@@ -65,7 +65,7 @@ xcodebuild archive \
 xcodebuild -exportArchive \
   -archivePath build/Happy.xcarchive \
   -exportPath build/ipa \
-  -exportOptionsPlist ExportOptions.plist \
+  -exportOptionsPlist ../deploy/ExportOptions.plist \
   -allowProvisioningUpdates \
   -authenticationKeyPath /Users/ondrej/.appstoreconnect/private_keys/AuthKey_T43ZQ8KTCH.p8 \
   -authenticationKeyID T43ZQ8KTCH \
@@ -94,6 +94,8 @@ node scripts/asc-build-status.mjs   # (if you make one)
 …or paste this one-shot into a `node -` REPL using the key + issuer above. The endpoint is `/v1/builds?filter[app]=<appId>&sort=-uploadedDate`.
 
 The `Happy Localhost` app ID is **6768410446**.
+
+> **Note:** `ExportOptions.plist` lives at `packages/happy-app/deploy/ExportOptions.plist` (outside `ios/`) because `pnpm prebuild` does `rm -rf ios` before regenerating.
 
 ## What's actually happening
 
