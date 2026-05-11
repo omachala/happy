@@ -1,86 +1,63 @@
-<div align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="/.github/logotype-dark.png">
-    <source media="(prefers-color-scheme: light)" srcset="/.github/logotype-light.png">
-    <img src="/.github/logotype-dark.png" width="400" alt="Happy">
-  </picture>
-</div>
+# Happy — Personal Fork
 
-<h1 align="center">
-  Mobile and Web Client for Claude Code & Codex
-</h1>
+This is **[omachala/happy](https://github.com/omachala/happy)**, a personal fork of [slopus/happy](https://github.com/slopus/happy) — a mobile + web + CLI client for Claude Code.
 
-<h4 align="center">
-Use Claude Code or Codex from anywhere with end-to-end encryption.
-</h4>
+## Why this fork
 
-<div align="center">
-  
-[📱 **iOS App**](https://apps.apple.com/us/app/happy-claude-code-client/id6748571505) • [🤖 **Android App**](https://play.google.com/store/apps/details?id=com.ex3ndr.happy) • [🌐 **Web App**](https://app.happy.engineering) • [🎥 **See a Demo**](https://youtu.be/GCS0OG9QMSE) • [📚 **Documentation**](https://happy.engineering/docs/) • [💬 **Discord**](https://discord.gg/fX9WBAhyfD)
+I love Happy but want my own simpler, more opinionated build:
 
-</div>
+- **Strip telemetry & monetization.** No PostHog analytics, no RevenueCat paywalls, no Firebase Android FCM (slopus's account anyway).
+- **Strip the inbox feature.** Personal device, no social layer needed.
+- **Simpler navigation.** No bottom tab bar — just the sessions list. Tap the logo to reach settings.
+- **Self-hosted server.** Server defaults to my own `happy.macha.la` instance (already self-hosted; see `~/network/HAPPY.md` on Din).
+- **Own TestFlight builds.** Bundle `com.omachala.happy`, signed under my Apple Developer team, distributed only to me.
 
-<img width="5178" height="2364" alt="github" src="/.github/header.png" />
+The upstream `slopus/happy` project is great and actively developed — I want to keep pulling their improvements while keeping my personal customizations on top.
 
+## Architecture
 
-<h3 align="center">
-Step 1: Download App
-</h3>
+```
+iOS app (TestFlight build of com.omachala.happy)
+    │
+    ▼ end-to-end encrypted over WebSocket / HTTPS
+happy.macha.la (self-hosted Caddy → happy-server on Din)
+    │
+    ├── Postgres
+    ├── Redis
+    └── MinIO
 
-<div align="center">
-<a href="https://apps.apple.com/us/app/happy-claude-code-client/id6748571505"><img width="135" height="39" alt="appstore" src="https://github.com/user-attachments/assets/45e31a11-cf6b-40a2-a083-6dc8d1f01291" /></a>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<a href="https://play.google.com/store/apps/details?id=com.ex3ndr.happy"><img width="135" height="39" alt="googleplay" src="https://github.com/user-attachments/assets/acbba639-858f-4c74-85c7-92a4096efbf5" /></a>
-</div>
-
-<h3 align="center">
-Step 2: Install CLI on your computer
-</h3>
-
-```bash
-npm install -g happy
+CLI on Boba/Din ──── happy auth login ──── pairs to the iOS app
 ```
 
-> Migrated from the `happy-coder` package. Thanks to [@franciscop](https://github.com/franciscop) for donating the `happy` package name!
+The iOS app is the master device (holds the master secret). Each CLI machine (Boba, Din) authenticates by scanning a URL from the iOS app.
 
-<h3 align="center">
-Step 3: Start using `happy` instead of `claude` or `codex`
-</h3>
+## Keeping in sync with upstream
 
 ```bash
-# Instead of claude, use:
-happy claude
-# or
-happy codex
+git fetch upstream
+git checkout personal-build
+git merge upstream/main
+# expect conflicts in:
+#   app.config.js, eas.json, package.json
+#   sources/components/MainView.tsx, HeaderLogo.tsx
+#   sources/track/tracking.ts, sources/sync/revenueCat/*
+#   sources/sync/appConfig.ts, sources/sync/serverConfig.ts
+#   sources/app/_layout.tsx (PostHog import removed)
+# resolve, then:
+pnpm install
+pnpm --filter happy-app typecheck
 ```
 
-## How does it work?
+After resolving, follow `BUILD.md` to ship a new TestFlight build.
 
-On your computer, run `happy` instead of `claude` or `happy codex` instead of `codex` to start your AI through our wrapper. When you want to control your coding agent from your phone, it restarts the session in remote mode. To switch back to your computer, just press any key on your keyboard.
+## Build & deploy
 
-## 🔥 Why Happy Coder?
+See **[BUILD.md](./BUILD.md)** for the full TestFlight workflow (prebuild → pod install → archive → upload to App Store Connect).
 
-- 📱 **Mobile access to Claude Code and Codex** - Check what your AI is building while away from your desk
-- 🔔 **Push notifications** - Get alerted when Claude Code and Codex needs permission or encounters errors  
-- ⚡ **Switch devices instantly** - Take control from phone or desktop with one keypress
-- 🔐 **End-to-end encrypted** - Your code never leaves your devices unencrypted
-- 🛠️ **Open source** - Audit the code yourself. No telemetry, no tracking
+## Upstream
 
-## 📦 Project Components
+To see what's diverged from `slopus/happy`:
 
-- **[Happy App](https://github.com/slopus/happy/tree/main/packages/happy-app)** - Web UI + mobile client (Expo)
-- **[Happy CLI](https://github.com/slopus/happy/tree/main/packages/happy-cli)** - Command-line interface for Claude Code and Codex
-- **[Happy Agent](https://github.com/slopus/happy/tree/main/packages/happy-agent)** - Remote agent control CLI (create, send, monitor sessions)
-- **[Happy Server](https://github.com/slopus/happy/tree/main/packages/happy-server)** - Backend server for encrypted sync
-
-## 🏠 Who We Are
-
-We're engineers scattered across Bay Area coffee shops and hacker houses, constantly checking how our AI coding agents are progressing on our pet projects during lunch breaks. Happy Coder was born from the frustration of not being able to peek at our AI coding tools building our side hustles while we're away from our keyboards. We believe the best tools come from scratching your own itch and sharing with the community.
-
-## 📚 Documentation & Contributing
-
-- **[Documentation Website](https://happy.engineering/docs/)** - Learn how to use Happy Coder effectively
-- **[Contributing Guide](docs/CONTRIBUTING.md)** - How to contribute, PR guidelines, and development setup
-- **[Edit docs at github.com/slopus/slopus.github.io](https://github.com/slopus/slopus.github.io)** - Help improve our documentation and guides
-
-## License
-
-MIT License - see [LICENSE](LICENSE) for details.
+```bash
+git log --oneline upstream/main..personal-build
+```
