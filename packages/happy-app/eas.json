@@ -14,28 +14,9 @@
         "SHARP_IGNORE_GLOBAL_LIBVIPS": "1"
       }
     },
-    "development-store": {
-      "autoIncrement": true,
-      "developmentClient": true,
-      "distribution": "store",
-      "channel": "development",
-      "env": {
-        "APP_ENV": "development",
-        "SHARP_IGNORE_GLOBAL_LIBVIPS": "1"
-      }
-    },
     "preview": {
       "autoIncrement": true,
       "distribution": "internal",
-      "channel": "preview",
-      "env": {
-        "APP_ENV": "preview",
-        "SHARP_IGNORE_GLOBAL_LIBVIPS": "1"
-      }
-    },
-    "preview-store": {
-      "autoIncrement": true,
-      "distribution": "store",
       "channel": "preview",
       "env": {
         "APP_ENV": "preview",
@@ -52,25 +33,11 @@
     }
   },
   "submit": {
-    "development-store": {
-      "ios": {
-        "appleId": "steve@bulkovo.com",
-        "ascAppId": "6748984254",
-        "appleTeamId": "466DQWDR8C"
-      }
-    },
-    "preview-store": {
-      "ios": {
-        "appleId": "steve@bulkovo.com",
-        "ascAppId": "6749025570",
-        "appleTeamId": "466DQWDR8C"
-      }
-    },
     "production": {
       "ios": {
-        "appleId": "steve@bulkovo.com",
-        "ascAppId": "6748571505",
-        "appleTeamId": "466DQWDR8C"
+        "appleTeamId": "924FH7MYCN",
+        "ascApiKeyPath": "/Users/ondrej/.appstoreconnect/private_keys/AuthKey_T43ZQ8KTCH.p8",
+        "ascApiKeyId": "T43ZQ8KTCH"
       }
     }
   }

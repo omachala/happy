@@ -5,16 +5,9 @@ const name = {
     production: "Happy"
 }[variant];
 const bundleId = {
-    development: "com.slopus.happy.dev",
-    preview: "com.slopus.happy.preview",
-    production: "com.ex3ndr.happy"
-}[variant];
-// const stagingElevenLabsAgentId = 'agent_7801k2c0r5hjfraa1kdbytpvs6yt';
-const productionElevenLabsAgentId = 'agent_6701k211syvvegba4kt7m68nxjmw';
-const elevenLabsAgentId = {
-    development: productionElevenLabsAgentId,
-    preview: productionElevenLabsAgentId,
-    production: productionElevenLabsAgentId,
+    development: "com.omachala.happy.dev",
+    preview: "com.omachala.happy.preview",
+    production: "com.omachala.happy"
 }[variant];
 const consoleLoggingDefault = {
     development: true,
@@ -42,19 +35,10 @@ export default {
                 NSMicrophoneUsageDescription: "Allow $(PRODUCT_NAME) to access your microphone for voice conversations with AI.",
                 NSLocalNetworkUsageDescription: "Allow $(PRODUCT_NAME) to find and connect to local devices on your network.",
                 NSBonjourServices: ["_http._tcp", "_https._tcp"],
-                // ATS:
-                // - NSAllowsLocalNetworking: lets HTTP fetches reach LAN
-                //   addresses (e.g. self-hosted server at 192.168.x.y) without
-                //   forcing TLS. Production cloud server is HTTPS, so the
-                //   default policy still applies there.
-                // - In dev/preview only, allow arbitrary HTTP loads so a
-                //   developer pointing the app at their machine doesn't have
-                //   to ship a TLS cert just to test attachment uploads.
                 NSAppTransportSecurity: variant === 'production'
                     ? { NSAllowsLocalNetworking: true }
                     : { NSAllowsLocalNetworking: true, NSAllowsArbitraryLoads: true }
-            },
-            associatedDomains: variant === 'production' ? ["applinks:app.happy.engineering"] : []
+            }
         },
         android: {
             adaptiveIcon: {
@@ -70,28 +54,12 @@ export default {
             ],
             blockedPermissions: [
                 "android.permission.ACTIVITY_RECOGNITION",
-                // Not using external storage/media access for now — blocks Google Play photo/video permission declaration
                 "android.permission.READ_EXTERNAL_STORAGE",
                 "android.permission.WRITE_EXTERNAL_STORAGE",
                 "android.permission.READ_MEDIA_IMAGES",
                 "android.permission.READ_MEDIA_VIDEO",
             ],
-            package: bundleId,
-            googleServicesFile: "./google-services.json",
-            intentFilters: variant === 'production' ? [
-                {
-                    "action": "VIEW",
-                    "autoVerify": true,
-                    "data": [
-                        {
-                            "scheme": "https",
-                            "host": "app.happy.engineering",
-                            "pathPrefix": "/"
-                        }
-                    ],
-                    "category": ["BROWSABLE", "DEFAULT"]
-                }
-            ] : []
+            package: bundleId
         },
         web: {
             bundler: "metro",
@@ -106,7 +74,6 @@ export default {
                     root: "./sources/app"
                 }
             ],
-            "expo-updates",
             "expo-asset",
             "expo-localization",
             "expo-mail-composer",
@@ -172,12 +139,6 @@ export default {
                 }
             ]
         ],
-        updates: {
-            url: "https://u.expo.dev/4558dd3d-cd5a-47cd-bad9-e591a241cc06",
-            requestHeaders: {
-                "expo-channel-name": "production"
-            }
-        },
         experiments: {
             typedRoutes: true
         },
@@ -185,18 +146,9 @@ export default {
             router: {
                 root: "./sources/app"
             },
-            eas: {
-                projectId: "4558dd3d-cd5a-47cd-bad9-e591a241cc06"
-            },
             app: {
-                postHogKey: process.env.EXPO_PUBLIC_POSTHOG_API_KEY,
-                revenueCatAppleKey: process.env.EXPO_PUBLIC_REVENUE_CAT_APPLE,
-                revenueCatGoogleKey: process.env.EXPO_PUBLIC_REVENUE_CAT_GOOGLE,
-                revenueCatStripeKey: process.env.EXPO_PUBLIC_REVENUE_CAT_STRIPE,
-                elevenLabsAgentId,
                 consoleLoggingDefault,
             }
-        },
-        owner: "bulkacorp"
+        }
     }
 };
