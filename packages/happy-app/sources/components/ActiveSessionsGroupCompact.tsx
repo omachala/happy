@@ -3,21 +3,19 @@ import { View, Pressable, Platform } from 'react-native';
 import { Text } from '@/components/StyledText';
 import { Machine } from '@/sync/storageTypes';
 import { SessionRowData } from '@/sync/storage';
-import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
+import { Ionicons } from '@expo/vector-icons';
 import {
     type SessionState,
     formatPathRelativeToHome,
-    vibingMessages,
 } from '@/utils/sessionUtils';
 import { Typography } from '@/constants/Typography';
 import { StatusDot } from './StatusDot';
-import { useAllMachines, useSessionGitStatus } from '@/sync/storage';
+import { useAllMachines } from '@/sync/storage';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { t } from '@/text';
 import { useNavigateToSession } from '@/hooks/useNavigateToSession';
 import { SessionActionsAnchor, SessionActionsPopover } from './SessionActionsPopover';
 import { useSessionActionAlert } from '@/hooks/useSessionQuickActions';
-import { isWorktreePath, getRepoPath, getWorktreeName } from '@/utils/worktree';
 import { useNewSessionDraft } from '@/hooks/useNewSessionDraft';
 import { useRouter } from 'expo-router';
 
@@ -44,9 +42,7 @@ interface ActiveSessionsGroupProps {
 
 type ProjectGroup = {
     projectPath: string;
-    displayPath: string;
-    projectName: string; // last folder of displayPath
-    parentDir: string;   // displayPath without last folder
+    projectName: string; // last folder of displayPath, capitalized; "~" → "Home"
     sessions: SessionRowData[];
 };
 
@@ -75,16 +71,17 @@ function pickLeadSession(sessions: SessionRowData[]): SessionRowData {
     return best;
 }
 
-// Machine header — always shown, even with only one machine. Tapping jumps
-// to the machine's detail screen.
-const MachineHeader = React.memo(({ machineName, machineId, count }: {
+// Machine header — always shown, even with only one machine. Tapping the name
+// jumps to the machine detail screen; tapping "+" opens a new session draft
+// with this machine preselected.
+const MachineHeader = React.memo(({ machineName, machineId }: {
     machineName: string;
     machineId: string;
-    count: number;
 }) => {
     const styles = stylesheet;
     const { theme } = useUnistyles();
     const router = useRouter();
+    const draft = useNewSessionDraft();
 
     const onPress = React.useCallback(() => {
         if (machineId !== UNKNOWN_MACHINE_ID) {
@@ -92,36 +89,49 @@ const MachineHeader = React.memo(({ machineName, machineId, count }: {
         }
     }, [router, machineId]);
 
+    const onAddPress = React.useCallback(() => {
+        if (machineId !== UNKNOWN_MACHINE_ID) {
+            draft.setMachineId(machineId);
+        }
+        router.navigate('/new');
+    }, [router, machineId, draft]);
+
     return (
-        <Pressable style={styles.machineHeader} onPress={onPress} hitSlop={{ top: 4, bottom: 4 }}>
-            <Ionicons
-                name="desktop-outline"
-                size={14}
-                color={theme.colors.text}
-                style={styles.machineHeaderIcon}
-            />
-            <Text style={styles.machineHeaderName} numberOfLines={1}>
-                {machineName}
-            </Text>
-            <Text style={styles.machineHeaderCount}>
-                {count}
-            </Text>
-        </Pressable>
+        <View style={styles.machineHeader}>
+            <Pressable
+                style={styles.machineHeaderMain}
+                onPress={onPress}
+                hitSlop={{ top: 4, bottom: 4 }}
+            >
+                <Ionicons
+                    name="desktop-outline"
+                    size={14}
+                    color={theme.colors.text}
+                    style={styles.machineHeaderIcon}
+                />
+                <Text style={styles.machineHeaderName} numberOfLines={1}>
+                    {machineName}
+                </Text>
+            </Pressable>
+            <Pressable
+                onPress={onAddPress}
+                hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+                style={styles.machineHeaderAdd}
+            >
+                <Ionicons name="add" size={20} color={theme.colors.text} />
+            </Pressable>
+        </View>
     );
 });
 
 // One project = one tap target. Opens the most-recent session under this path.
 // Long-press → existing session actions (archive, etc.) on the lead session.
-const ProjectTile = React.memo(({ group, selected, isFirst, isLast }: {
+const ProjectTile = React.memo(({ group, selected, isLast }: {
     group: ProjectGroup;
     selected: boolean;
-    isFirst: boolean;
     isLast: boolean;
 }) => {
     const styles = stylesheet;
-    const { theme } = useUnistyles();
-    const router = useRouter();
-    const draft = useNewSessionDraft();
     const navigateToSession = useNavigateToSession();
     const [actionsAnchor, setActionsAnchor] = React.useState<SessionActionsAnchor | null>(null);
 
@@ -132,41 +142,13 @@ const ProjectTile = React.memo(({ group, selected, isFirst, isLast }: {
     );
     const lead = React.useMemo(() => pickLeadSession(group.sessions), [group.sessions]);
 
-    const gitStatus = useSessionGitStatus(lead.id);
-    const sessionPath = lead.path || '';
-    const isWorktree = isWorktreePath(sessionPath);
-    const worktreeName = isWorktree ? getWorktreeName(sessionPath) : null;
-    const branch = worktreeName || (gitStatus?.lastUpdatedAt ? gitStatus.branch : null);
-    const linesAdded = gitStatus?.unstagedLinesAdded ?? 0;
-    const linesRemoved = gitStatus?.unstagedLinesRemoved ?? 0;
-
     const statusColor = lead.hasUnread
         ? { color: '#007AFF', pulsing: false }
         : STATUS_COLOR[lead.state];
 
-    const statusLabel = React.useMemo(() => {
-        if (lead.hasUnread) return t('status.unread');
-        if (lead.state === 'thinking') {
-            return vibingMessages[Math.floor(Math.random() * vibingMessages.length)].toLowerCase() + '…';
-        }
-        if (lead.state === 'permission_required') return t('status.permissionRequired');
-        if (lead.state === 'waiting') return t('status.online');
-        return null;
-    }, [lead.state, lead.hasUnread]);
-
     const handlePress = React.useCallback(() => {
         navigateToSession(mostRecent.id);
     }, [navigateToSession, mostRecent.id]);
-
-    const handleAdd = React.useCallback((e: any) => {
-        e.stopPropagation?.();
-        const repoPath = isWorktree ? getRepoPath(sessionPath) : sessionPath;
-        if (lead.machineId) draft.setMachineId(lead.machineId);
-        draft.setPath(formatPathRelativeToHome(repoPath, lead.homeDir ?? undefined));
-        draft.setSessionType(isWorktree ? 'worktree' : 'simple');
-        draft.setWorktreeKey(isWorktree ? sessionPath : null);
-        router.navigate('/new');
-    }, [lead.machineId, lead.homeDir, sessionPath, isWorktree, draft, router]);
 
     const handleContextMenu = React.useCallback((event: any) => {
         event.preventDefault?.();
@@ -184,78 +166,20 @@ const ProjectTile = React.memo(({ group, selected, isFirst, isLast }: {
         : { onLongPress: showActionAlert };
 
     return (
-        <View style={[
-            styles.tileWrapper,
-            isFirst && styles.tileWrapperFirst,
-            isLast && styles.tileWrapperLast,
-        ]}>
+        <View style={styles.tileWrapper}>
             <Pressable
                 style={[
                     styles.tile,
                     selected && styles.tileSelected,
-                    isFirst && styles.tileFirst,
                     isLast && styles.tileLast,
                 ]}
                 onPress={handlePress}
                 {...menuProps}
             >
-                <View style={styles.tileMain}>
-                    <View style={styles.tileTitleRow}>
-                        <Text style={styles.tileTitle} numberOfLines={1}>
-                            {group.projectName || group.displayPath}
-                        </Text>
-                        {group.sessions.length > 1 && (
-                            <View style={styles.sessionCountBadge}>
-                                <Text style={styles.sessionCountText}>{group.sessions.length}</Text>
-                            </View>
-                        )}
-                    </View>
-
-                    {(group.parentDir || branch) && (
-                        <View style={styles.tileMetaRow}>
-                            {group.parentDir ? (
-                                <Text style={styles.tileMetaText} numberOfLines={1}>
-                                    {group.parentDir}
-                                </Text>
-                            ) : null}
-                            {branch && (
-                                <>
-                                    {group.parentDir ? <Text style={styles.tileMetaDot}>·</Text> : null}
-                                    <Text style={styles.tileBranch} numberOfLines={1}>
-                                        {branch}
-                                    </Text>
-                                    {isWorktree && (
-                                        <MaterialCommunityIcons
-                                            name="tree"
-                                            size={11}
-                                            color={theme.colors.textSecondary}
-                                            style={{ marginLeft: 3 }}
-                                        />
-                                    )}
-                                    {linesAdded > 0 && <Text style={styles.tileAdded}>+{linesAdded}</Text>}
-                                    {linesRemoved > 0 && <Text style={styles.tileRemoved}>-{linesRemoved}</Text>}
-                                </>
-                            )}
-                        </View>
-                    )}
-
-                    {statusLabel && (
-                        <Text style={[styles.tileStatusLabel, { color: statusColor.color }]} numberOfLines={1}>
-                            {statusLabel}
-                        </Text>
-                    )}
-                </View>
-
-                <View style={styles.tileRight}>
-                    <StatusDot color={statusColor.color} isPulsing={statusColor.pulsing} />
-                    <Pressable
-                        onPress={handleAdd}
-                        hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
-                        style={styles.tileAddButton}
-                    >
-                        <Ionicons name="add" size={18} color={theme.colors.textSecondary} />
-                    </Pressable>
-                </View>
+                <Text style={styles.tileTitle} numberOfLines={1}>
+                    {group.projectName}
+                </Text>
+                <StatusDot color={statusColor.color} isPulsing={statusColor.pulsing} />
             </Pressable>
 
             {Platform.OS === 'web' && (
@@ -304,11 +228,12 @@ export function ActiveSessionsGroupCompact({ sessions, selectedSessionId }: Acti
             if (!pg) {
                 const displayPath = formatPathRelativeToHome(projectPath, session.homeDir ?? undefined);
                 const segments = displayPath.split(/[/\\]/).filter(Boolean);
-                const projectName = segments.length > 0 ? segments[segments.length - 1] : displayPath;
-                const parentDir = segments.length > 1
-                    ? (displayPath.startsWith('~') ? '~/' : '') + segments.slice(0, -1).join('/')
-                    : (displayPath.startsWith('~') && segments.length <= 1 ? '~' : '');
-                pg = { projectPath, displayPath, projectName, parentDir, sessions: [] };
+                const rawName = segments.length > 0 ? segments[segments.length - 1] : displayPath;
+                // "~" means the session is rooted at $HOME — show that as "Home".
+                const projectName = rawName === '~'
+                    ? t('common.home')
+                    : rawName.charAt(0).toUpperCase() + rawName.slice(1);
+                pg = { projectPath, projectName, sessions: [] };
                 mg.projects.push(pg);
             }
             pg.sessions.push(session);
@@ -329,33 +254,28 @@ export function ActiveSessionsGroupCompact({ sessions, selectedSessionId }: Acti
 
     return (
         <View style={styles.container}>
-            {machineGroups.map(mg => {
-                const projectCount = mg.projects.length;
-                return (
-                    <View key={mg.machineId} style={styles.machineSection}>
-                        <MachineHeader
-                            machineName={mg.machineName}
-                            machineId={mg.machineId}
-                            count={projectCount}
-                        />
-                        <View style={styles.tileGroup}>
-                            {mg.projects.map((pg, idx) => {
-                                const tileSelected = !!selectedSessionId
-                                    && pg.sessions.some(s => s.id === selectedSessionId);
-                                return (
-                                    <ProjectTile
-                                        key={pg.projectPath}
-                                        group={pg}
-                                        selected={tileSelected}
-                                        isFirst={idx === 0}
-                                        isLast={idx === mg.projects.length - 1}
-                                    />
-                                );
-                            })}
-                        </View>
+            {machineGroups.map(mg => (
+                <View key={mg.machineId} style={styles.machineSection}>
+                    <MachineHeader
+                        machineName={mg.machineName}
+                        machineId={mg.machineId}
+                    />
+                    <View style={styles.tileGroup}>
+                        {mg.projects.map((pg, idx) => {
+                            const tileSelected = !!selectedSessionId
+                                && pg.sessions.some(s => s.id === selectedSessionId);
+                            return (
+                                <ProjectTile
+                                    key={pg.projectPath}
+                                    group={pg}
+                                    selected={tileSelected}
+                                    isLast={idx === mg.projects.length - 1}
+                                />
+                            );
+                        })}
                     </View>
-                );
-            })}
+                </View>
+            ))}
         </View>
     );
 }
@@ -374,20 +294,24 @@ const stylesheet = StyleSheet.create((theme) => ({
         paddingHorizontal: Platform.select({ ios: 24, default: 20 }),
         paddingVertical: 8,
     },
+    machineHeaderMain: {
+        flex: 1,
+        flexDirection: 'row',
+        alignItems: 'center',
+    },
     machineHeaderIcon: {
         marginRight: 7,
     },
     machineHeaderName: {
-        flex: 1,
         fontSize: 17,
         color: theme.colors.text,
         ...Typography.default('semiBold'),
         letterSpacing: -0.2,
+        flexShrink: 1,
     },
-    machineHeaderCount: {
-        fontSize: 13,
-        color: theme.colors.textSecondary,
-        ...Typography.default('regular'),
+    machineHeaderAdd: {
+        padding: 4,
+        marginLeft: 4,
     },
     tileGroup: {
         marginHorizontal: Platform.select({ ios: 16, default: 12 }),
@@ -403,101 +327,27 @@ const stylesheet = StyleSheet.create((theme) => ({
     tileWrapper: {
         backgroundColor: theme.colors.surface,
     },
-    tileWrapperFirst: {},
-    tileWrapperLast: {},
     tile: {
-        minHeight: 64,
+        minHeight: 60,
         flexDirection: 'row',
         alignItems: 'center',
-        paddingHorizontal: 16,
-        paddingVertical: 10,
+        paddingHorizontal: 20,
+        paddingVertical: 16,
         borderBottomWidth: StyleSheet.hairlineWidth,
         borderBottomColor: theme.colors.divider,
     },
-    tileFirst: {},
     tileLast: {
         borderBottomWidth: 0,
     },
     tileSelected: {
         backgroundColor: theme.colors.surfaceSelected,
     },
-    tileMain: {
-        flex: 1,
-        justifyContent: 'center',
-        minWidth: 0,
-    },
-    tileTitleRow: {
-        flexDirection: 'row',
-        alignItems: 'center',
-    },
     tileTitle: {
-        fontSize: 16,
+        flex: 1,
+        fontSize: 17,
         color: theme.colors.text,
         ...Typography.default('semiBold'),
         letterSpacing: -0.1,
-        flexShrink: 1,
-    },
-    sessionCountBadge: {
-        marginLeft: 8,
-        paddingHorizontal: 6,
-        paddingVertical: 1,
-        borderRadius: 9,
-        backgroundColor: theme.colors.divider,
-        minWidth: 18,
-        alignItems: 'center',
-    },
-    sessionCountText: {
-        fontSize: 11,
-        color: theme.colors.textSecondary,
-        ...Typography.default('semiBold'),
-    },
-    tileMetaRow: {
-        flexDirection: 'row',
-        alignItems: 'center',
-        marginTop: 2,
-        flexWrap: 'nowrap',
-    },
-    tileMetaText: {
-        fontSize: 12,
-        color: theme.colors.textSecondary,
-        ...Typography.default('regular'),
-        flexShrink: 1,
-    },
-    tileMetaDot: {
-        fontSize: 12,
-        color: theme.colors.textSecondary,
-        marginHorizontal: 5,
-    },
-    tileBranch: {
-        fontSize: 12,
-        color: theme.colors.textSecondary,
-        ...Typography.default('regular'),
-        flexShrink: 1,
-    },
-    tileAdded: {
-        fontSize: 11,
-        color: theme.colors.gitAddedText,
-        marginLeft: 6,
-        ...Typography.default('semiBold'),
-    },
-    tileRemoved: {
-        fontSize: 11,
-        color: theme.colors.gitRemovedText,
-        marginLeft: 3,
-        ...Typography.default('semiBold'),
-    },
-    tileStatusLabel: {
-        fontSize: 11,
-        marginTop: 3,
-        ...Typography.default('regular'),
-    },
-    tileRight: {
-        flexDirection: 'row',
-        alignItems: 'center',
-        marginLeft: 10,
-        gap: 8,
-    },
-    tileAddButton: {
-        padding: 4,
+        marginRight: 10,
     },
 }));
