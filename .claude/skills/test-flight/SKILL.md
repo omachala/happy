@@ -61,7 +61,7 @@ LANG=en_US.UTF-8 pod install
 
 `LANG=en_US.UTF-8` avoids a Ruby string-encoding crash on some macOS locales.
 
-### 5. Archive (~10–15 min, run in background)
+### 5. Archive (~10–15 min, run in foreground)
 
 ```bash
 cd /Users/ondrej/projects/happy/packages/happy-app/ios
@@ -80,7 +80,7 @@ xcodebuild archive \
   CODE_SIGN_STYLE=Automatic
 ```
 
-Run with `run_in_background: true`. Wait for `** ARCHIVE SUCCEEDED **`.
+**Run in foreground** (not `run_in_background`) — the user wants to watch progress live. Use `timeout: 1800000` (30 min) on the Bash tool call. Wait for `** ARCHIVE SUCCEEDED **`.
 
 ### 6. Export + upload (single step)
 
@@ -98,7 +98,7 @@ xcodebuild -exportArchive \
   -authenticationKeyIssuerID "$(cat ~/.appstoreconnect/issuer-id)"
 ```
 
-Run with `run_in_background: true`. Success signals (both must appear):
+**Run in foreground** (not `run_in_background`) so the upload progress is visible. Use `timeout: 1800000` (30 min). Success signals (both must appear):
 - `Progress 100%: Upload succeeded.`
 - `** EXPORT SUCCEEDED **`
 
@@ -179,5 +179,5 @@ Sensitive files for this project live in `.claude/local/` and `.claude/secrets/`
 - Always typecheck before prebuild — caught here, not after a 15-minute archive
 - Always run prebuild before pod install before archive — they are sequential, not idempotent
 - Build numbers must be strictly increasing and unique per `(version, buildNumber)` pair
-- Use `run_in_background` for the archive and export/upload steps
+- Run the archive and export/upload steps in the foreground (do **not** pass `run_in_background`) — the user wants to watch progress live; use `timeout: 1800000` on those Bash calls
 - Push to `main` directly per project convention; do not open PRs on this fork
