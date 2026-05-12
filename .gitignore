@@ -45,6 +45,8 @@ yarn-error.*
 .claude/settings.local.json
 .claude/*.lock
 .claude/worktrees/
+.claude/local/
+.claude/secrets/
 .plan
 
 CLAUDE.local.md

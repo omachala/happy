@@ -10,7 +10,8 @@ Everything runs on **Boba** (the MacBook in the garage lab).
 - **Node 22+** with `pnpm` enabled via `corepack enable pnpm`.
 - **CocoaPods** (`brew install cocoapods` or installed by Xcode).
 - **Apple Developer Program** membership (paid), team ID `924FH7MYCN`.
-- **App Store Connect API key** at `~/.appstoreconnect/private_keys/AuthKey_T43ZQ8KTCH.p8`. Key ID `T43ZQ8KTCH`. Issuer ID is in App Store Connect → Users and Access → Integrations → Keys (top of page).
+- **App Store Connect API key** at `~/.appstoreconnect/private_keys/AuthKey_T43ZQ8KTCH.p8`. Key ID `T43ZQ8KTCH`.
+- **Issuer ID** stored at `~/.appstoreconnect/issuer-id` (chmod 600). Originally fetched from App Store Connect → Users and Access → Integrations → Keys (top of page).
 - **App Store Connect app entry** for bundle `com.omachala.happy` already created (one-time, done via the ASC web UI).
 - **Distribution certificate** `iPhone Distribution: Ondrej Machala (924FH7MYCN)` in the macOS keychain.
 
@@ -55,7 +56,7 @@ xcodebuild archive \
   -allowProvisioningUpdates \
   -authenticationKeyPath /Users/ondrej/.appstoreconnect/private_keys/AuthKey_T43ZQ8KTCH.p8 \
   -authenticationKeyID T43ZQ8KTCH \
-  -authenticationKeyIssuerID <ISSUER_ID_UUID> \
+  -authenticationKeyIssuerID "$(cat ~/.appstoreconnect/issuer-id)" \
   DEVELOPMENT_TEAM=924FH7MYCN \
   CODE_SIGN_STYLE=Automatic
 
@@ -69,10 +70,8 @@ xcodebuild -exportArchive \
   -allowProvisioningUpdates \
   -authenticationKeyPath /Users/ondrej/.appstoreconnect/private_keys/AuthKey_T43ZQ8KTCH.p8 \
   -authenticationKeyID T43ZQ8KTCH \
-  -authenticationKeyIssuerID <ISSUER_ID_UUID>
+  -authenticationKeyIssuerID "$(cat ~/.appstoreconnect/issuer-id)"
 ```
-
-Replace `<ISSUER_ID_UUID>` with the actual UUID from App Store Connect.
 
 A non-zero exit on step 5 is usually just dSYM warnings — check the output for `Upload succeeded.` Look for the line `Progress 100%: Upload succeeded.` followed by `** EXPORT SUCCEEDED **`.
 
