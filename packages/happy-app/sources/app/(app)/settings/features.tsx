@@ -13,7 +13,6 @@ export default function FeaturesSettingsScreen() {
     const [agentInputEnterToSend, setAgentInputEnterToSend] = useSettingMutable('agentInputEnterToSend');
     const [commandPaletteEnabled, setCommandPaletteEnabled] = useLocalSettingMutable('commandPaletteEnabled');
     const [markdownCopyV2, setMarkdownCopyV2] = useLocalSettingMutable('markdownCopyV2');
-    const [hideInactiveSessions, setHideInactiveSessions] = useSettingMutable('hideInactiveSessions');
     const [expResumeSession, setExpResumeSession] = useSettingMutable('expResumeSession');
     const [fileDiffsSidebar, setFileDiffsSidebar] = useSettingMutable('fileDiffsSidebar');
     const [expImageUpload, setExpImageUpload] = useSettingMutable('expImageUpload');
@@ -64,18 +63,6 @@ export default function FeaturesSettingsScreen() {
                         <Switch
                             value={markdownCopyV2}
                             onValueChange={setMarkdownCopyV2}
-                        />
-                    }
-                    showChevron={false}
-                />
-                <Item
-                    title={t('settingsFeatures.hideInactiveSessions')}
-                    subtitle={t('settingsFeatures.hideInactiveSessionsSubtitle')}
-                    icon={<Ionicons name="eye-off-outline" size={29} color="#FF9500" />}
-                    rightElement={
-                        <Switch
-                            value={hideInactiveSessions}
-                            onValueChange={setHideInactiveSessions}
                         />
                     }
                     showChevron={false}
