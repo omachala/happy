@@ -48,6 +48,7 @@ interface AgentInputProps {
     metadata?: Metadata | null;
     onAbort?: () => void | Promise<void>;
     showAbortButton?: boolean;
+    onClear?: () => void;
     connectionStatus?: {
         text: string;
         color: string;
@@ -1217,13 +1218,40 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
                                                 />
                                             ) : (
                                                 <Octicons
-                                                    name={"stop"}
+                                                    name={"x"}
                                                     size={16}
                                                     color={theme.colors.button.secondary.tint}
                                                 />
                                             )}
                                         </Pressable>
                                     </Shaker>
+                                )}
+
+                                {/* Clear conversation button — sends /clear and wipes local view */}
+                                {props.onClear && (
+                                    <Pressable
+                                        onPress={() => {
+                                            hapticsLight();
+                                            props.onClear?.();
+                                        }}
+                                        hitSlop={{ top: 5, bottom: 10, left: 0, right: 0 }}
+                                        style={(p) => ({
+                                            flexDirection: 'row',
+                                            alignItems: 'center',
+                                            borderRadius: Platform.select({ default: 16, android: 20 }),
+                                            paddingHorizontal: 8,
+                                            paddingVertical: 6,
+                                            justifyContent: 'center',
+                                            height: 32,
+                                            opacity: p.pressed ? 0.7 : 1,
+                                        })}
+                                    >
+                                        <Octicons
+                                            name="trash"
+                                            size={16}
+                                            color={theme.colors.button.secondary.tint}
+                                        />
+                                    </Pressable>
                                 )}
 
                                 {/* Git Status Badge */}

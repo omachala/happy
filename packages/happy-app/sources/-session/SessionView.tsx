@@ -530,6 +530,7 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
             isMicActive={isDisconnected ? false : micButtonState.isMicActive}
             onAbort={isDisconnected ? undefined : () => sessionAbort(sessionId)}
             showAbortButton={sessionStatus.state === 'thinking' || sessionStatus.state === 'waiting'}
+            onClear={isDisconnected ? undefined : () => sync.sendMessage(sessionId, '/clear', { source: 'chat' })}
             onFileViewerPress={experiments && !isTablet ? () => router.push(`/session/${sessionId}/files`) : undefined}
             selectedImages={expImageUpload ? selectedImages : undefined}
             onPickImages={expImageUpload ? pickImages : undefined}

@@ -163,6 +163,10 @@ export type ReducerState = {
         contextSize: number;
         timestamp: number;
     };
+    // Timestamp of the most recent /clear ("Context was reset") event.
+    // Messages with createdAt < resetAt are filtered out so the local view
+    // reflects only the current context window. Server data is unchanged.
+    resetAt?: number;
 };
 
 export function createReducer(): ReducerState {
@@ -241,6 +245,9 @@ export type ReducerResult = {
         contextSize: number;
     };
     hasReadyEvent?: boolean;
+    // Set when a "Context was reset" event was processed in this pass.
+    // Storage uses this to drop pre-reset entries from messagesMap.
+    resetAt?: number;
 };
 
 function updateLatestTodos(state: ReducerState, value: unknown, timestamp: number) {
@@ -271,9 +278,15 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
     let newMessages: Message[] = [];
     let changed: Set<string> = new Set();
     let hasReadyEvent = false;
+    let appliedResetAt: number | undefined;
+
+    // Drop any pre-reset messages so late/replayed history can't re-enter the view.
+    const filteredMessages = state.resetAt
+        ? messages.filter(m => m.createdAt >= state.resetAt!)
+        : messages;
 
     // First, trace all messages to identify sidechains
-    const tracedMessages = traceMessages(state.tracerState, messages);
+    const tracedMessages = traceMessages(state.tracerState, filteredMessages);
 
     // Separate sidechain and non-sidechain messages
     let nonSidechainMessages = tracedMessages.filter(msg => !msg.sidechainId);
@@ -329,6 +342,19 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
                 contextSize: 0,
                 timestamp: msg.createdAt  // Use message timestamp to avoid blocking older usage data
             };
+            // Drop pre-reset messages from the local view. Server data is unchanged.
+            state.resetAt = msg.createdAt;
+            appliedResetAt = msg.createdAt;
+            for (const [id, m] of state.messages) {
+                if (m.createdAt < msg.createdAt) {
+                    state.messages.delete(id);
+                }
+            }
+            // Stale tool/permission/sidechain pointers reference deleted messages.
+            state.toolIdToMessageId.clear();
+            state.sidechainToolIdToMessageId.clear();
+            state.permissions.clear();
+            state.sidechains.clear();
             // Don't continue - let the event be processed normally to create a message
         }
 
@@ -1131,7 +1157,8 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
             cacheRead: state.latestUsage.cacheRead,
             contextSize: state.latestUsage.contextSize
         } : undefined,
-        hasReadyEvent: hasReadyEvent || undefined
+        hasReadyEvent: hasReadyEvent || undefined,
+        resetAt: appliedResetAt
     };
 }
 

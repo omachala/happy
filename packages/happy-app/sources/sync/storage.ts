@@ -658,8 +658,15 @@ export const storage = create<StorageState>()((set, get) => {
                     hasReadyEvent = true;
                 }
 
-                // Merge messages
-                const mergedMessagesMap = { ...existingSession.messagesMap };
+                // Merge messages. On /clear, drop entries older than the reset
+                // so the local view shows only post-reset history.
+                const resetAt = reducerResult.resetAt;
+                const mergedMessagesMap: Record<string, Message> = resetAt
+                    ? Object.fromEntries(
+                        Object.entries(existingSession.messagesMap)
+                            .filter(([, m]) => m.createdAt >= resetAt)
+                    )
+                    : { ...existingSession.messagesMap };
                 processedMessages.forEach(message => {
                     mergedMessagesMap[message.id] = message;
                 });
