@@ -67,16 +67,9 @@ const styles = StyleSheet.create((theme) => ({
         flex: 1,
         alignItems: 'center',
     },
-    titleText: {
-        fontSize: 17,
-        color: theme.colors.header.tint,
-        fontWeight: '600',
-        ...Typography.default('semiBold'),
-    },
     statusContainer: {
         flexDirection: 'row',
         alignItems: 'center',
-        marginTop: -2,
     },
     statusText: {
         fontSize: 12,
@@ -114,7 +107,6 @@ const HeaderTitle = React.memo(() => {
 
     return (
         <View style={styles.titleContainer}>
-            <Text style={styles.titleText}>{t('tabs.sessions')}</Text>
             {connectionStatus.text && (
                 <View style={styles.statusContainer}>
                     <StatusDot color={connectionStatus.color} isPulsing={connectionStatus.isPulsing} size={6} style={{ marginRight: 4 }} />

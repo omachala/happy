@@ -347,7 +347,7 @@ const stylesheet = StyleSheet.create((theme) => ({
     tileTitle: {
         fontSize: 17,
         color: theme.colors.text,
-        ...Typography.default('semiBold'),
+        ...Typography.default('regular'),
         letterSpacing: -0.1,
         flexShrink: 1,
     },
