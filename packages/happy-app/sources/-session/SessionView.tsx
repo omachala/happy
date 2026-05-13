@@ -24,7 +24,7 @@ import { voiceHooks } from '@/realtime/hooks/voiceHooks';
 import { getCurrentVoiceConversationId, getCurrentVoiceSessionDurationSeconds, startRealtimeSession, stopRealtimeSession } from '@/realtime/RealtimeSession';
 import { gitStatusSync } from '@/sync/gitStatusSync';
 import { sessionAbort } from '@/sync/ops';
-import { storage, useIsDataReady, useLocalSetting, useRealtimeStatus, useSessionMessages, useSessionUsage, useSetting } from '@/sync/storage';
+import { storage, useIsDataReady, useLocalSetting, useRealtimeStatus, useSessionMessages, useSessionUsage, useSetting, useSocketStatus } from '@/sync/storage';
 import { useSession } from '@/sync/storage';
 import { Session } from '@/sync/storageTypes';
 import { sync } from '@/sync/sync';
@@ -306,6 +306,7 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
     const isTablet = useIsTablet();
     const [message, setMessage] = React.useState('');
     const realtimeStatus = useRealtimeStatus();
+    const socketLastConnectedAt = useSocketStatus().lastConnectedAt;
     const { messages, isLoaded } = useSessionMessages(sessionId);
     const acknowledgedCliVersions = useLocalSetting('acknowledgedCliVersions');
     const zenMode = useLocalSetting('zenMode');
@@ -474,6 +475,13 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
             }
         };
     }, [sessionId, realtimeStatus]);
+
+    // Re-fetch messages when the API socket reconnects: any new-message
+    // updates emitted while the socket was down would otherwise be lost.
+    React.useEffect(() => {
+        if (socketLastConnectedAt === null) return;
+        sync.onSessionVisible(sessionId);
+    }, [sessionId, socketLastConnectedAt]);
 
     let content = (
         <>

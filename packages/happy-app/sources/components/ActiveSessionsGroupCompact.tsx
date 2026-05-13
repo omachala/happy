@@ -179,7 +179,9 @@ const ProjectTile = React.memo(({ group, selected, isLast }: {
                 <Text style={styles.tileTitle} numberOfLines={1}>
                     {group.projectName}
                 </Text>
-                <StatusDot color={statusColor.color} isPulsing={statusColor.pulsing} />
+                <View style={styles.tileDot}>
+                    <StatusDot color={statusColor.color} isPulsing={statusColor.pulsing} />
+                </View>
             </Pressable>
 
             {Platform.OS === 'web' && (
@@ -343,11 +345,13 @@ const stylesheet = StyleSheet.create((theme) => ({
         backgroundColor: theme.colors.surfaceSelected,
     },
     tileTitle: {
-        flex: 1,
         fontSize: 17,
         color: theme.colors.text,
         ...Typography.default('semiBold'),
         letterSpacing: -0.1,
-        marginRight: 10,
+        flexShrink: 1,
+    },
+    tileDot: {
+        marginLeft: 10,
     },
 }));
