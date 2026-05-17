@@ -23,7 +23,9 @@ import { Modal } from '@/modal';
 import { voiceHooks } from '@/realtime/hooks/voiceHooks';
 import { getCurrentVoiceConversationId, getCurrentVoiceSessionDurationSeconds, startRealtimeSession, stopRealtimeSession } from '@/realtime/RealtimeSession';
 import { gitStatusSync } from '@/sync/gitStatusSync';
-import { sessionAbort } from '@/sync/ops';
+import { machineSpawnNewSession, sessionAbort, sessionArchive, sessionKill } from '@/sync/ops';
+import { useHappyAction } from '@/hooks/useHappyAction';
+import { HappyError } from '@/utils/errors';
 import { storage, useIsDataReady, useLocalSetting, useRealtimeStatus, useSessionMessages, useSessionUsage, useSetting, useSocketStatus } from '@/sync/storage';
 import { useSession } from '@/sync/storage';
 import { Session } from '@/sync/storageTypes';
@@ -363,6 +365,48 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
     const isDisconnected = !sessionStatus.isConnected;
     const resumeCommandBlock = getResumeCommandBlock(session);
 
+    // Trash button: kill the current CLI process and respawn a fresh session
+    // on the same machine + directory, then replace navigation to the new id.
+    // Old session archives behind us so it stays accessible if needed.
+    const restartMachineId = session.metadata?.machineId;
+    const restartDirectory = session.metadata?.path;
+    const canRestart = !isDisconnected && !!restartMachineId && !!restartDirectory;
+    const [, restartSession] = useHappyAction(async () => {
+        if (!restartMachineId || !restartDirectory) {
+            throw new HappyError('Cannot restart: session is missing machine or directory metadata', false);
+        }
+        const flavorRaw = session.metadata?.flavor;
+        const agent: 'claude' | 'codex' | 'gemini' | 'openclaw' =
+            flavorRaw === 'codex' || flavorRaw === 'gemini' || flavorRaw === 'openclaw'
+                ? flavorRaw
+                : 'claude';
+
+        const killResult = await sessionKill(session.id);
+        if (!killResult.success) {
+            await sessionArchive(session.id);
+        }
+
+        const spawnResult = await machineSpawnNewSession({
+            machineId: restartMachineId,
+            directory: restartDirectory,
+            agent,
+        });
+        if (spawnResult.type !== 'success') {
+            const msg = spawnResult.type === 'error' ? spawnResult.errorMessage : 'Failed to start new session';
+            throw new HappyError(msg, false);
+        }
+
+        await sync.refreshSessions();
+        if (session.permissionMode) {
+            storage.getState().updateSessionPermissionMode(spawnResult.sessionId, session.permissionMode);
+        }
+        if (session.modelMode) {
+            storage.getState().updateSessionModelMode(spawnResult.sessionId, session.modelMode);
+        }
+
+        router.replace(`/session/${encodeURIComponent(spawnResult.sessionId)}`);
+    });
+
     // Use draft hook for auto-saving message drafts
     const { clearDraft } = useDraft(sessionId, message, setMessage);
 
@@ -538,7 +582,7 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
             isMicActive={isDisconnected ? false : micButtonState.isMicActive}
             onAbort={isDisconnected ? undefined : () => sessionAbort(sessionId)}
             showAbortButton={sessionStatus.state === 'thinking' || sessionStatus.state === 'waiting'}
-            onClear={isDisconnected ? undefined : () => sync.sendMessage(sessionId, '/clear', { source: 'chat' })}
+            onClear={canRestart ? restartSession : undefined}
             onFileViewerPress={experiments && !isTablet ? () => router.push(`/session/${sessionId}/files`) : undefined}
             selectedImages={expImageUpload ? selectedImages : undefined}
             onPickImages={expImageUpload ? pickImages : undefined}
