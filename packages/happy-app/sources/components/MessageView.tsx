@@ -78,6 +78,21 @@ function RenderBlock(props: {
   }
 }
 
+// Slash-command and skill invocations arrive wrapped in <command-name>,
+// <command-message>, <command-args> (and sometimes inlined skill bodies).
+// Collapse them to just `/name args` so the chat shows the invocation,
+// not the full skill markdown.
+function collapseCommandInvocation(text: string): string | null {
+  const nameMatch = text.match(/<command-name>([\s\S]*?)<\/command-name>/);
+  if (!nameMatch) return null;
+  const name = nameMatch[1].trim();
+  if (!name) return null;
+  const argsMatch = text.match(/<command-args>([\s\S]*?)<\/command-args>/);
+  const args = argsMatch ? argsMatch[1].trim() : '';
+  const prefixed = name.startsWith('/') ? name : `/${name}`;
+  return args ? `\`${prefixed} ${args}\`` : `\`${prefixed}\``;
+}
+
 function UserTextBlock(props: {
   message: UserTextMessage;
   sessionId: string;
@@ -95,6 +110,11 @@ function UserTextBlock(props: {
     }
   }, [claudeUuid, props.message.id, props.onForkFromUserMessage]);
 
+  const rendered = React.useMemo(() => {
+    if (props.message.displayText) return props.message.displayText;
+    return collapseCommandInvocation(props.message.text) ?? props.message.text;
+  }, [props.message.displayText, props.message.text]);
+
   return (
     <View style={styles.userMessageContainer}>
       <Pressable
@@ -102,7 +122,7 @@ function UserTextBlock(props: {
         delayLongPress={400}
         style={styles.userMessageBubble}
       >
-        <MarkdownView markdown={props.message.displayText || props.message.text} onOptionPress={handleOptionPress} sessionId={props.sessionId} />
+        <MarkdownView markdown={rendered} onOptionPress={handleOptionPress} sessionId={props.sessionId} />
       </Pressable>
     </View>
   );
