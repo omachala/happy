@@ -176,9 +176,16 @@ const ProjectTile = React.memo(({ group, selected, isLast }: {
                 onPress={handlePress}
                 {...menuProps}
             >
-                <Text style={styles.tileTitle} numberOfLines={1}>
-                    {group.projectName}
-                </Text>
+                <View style={styles.tileTextColumn}>
+                    <Text style={styles.tileTitle} numberOfLines={1}>
+                        {group.projectName}
+                    </Text>
+                    {mostRecent.name ? (
+                        <Text style={styles.tileSubtitle} numberOfLines={1}>
+                            {mostRecent.name}
+                        </Text>
+                    ) : null}
+                </View>
                 <View style={styles.tileDot}>
                     <StatusDot color={statusColor.color} isPulsing={statusColor.pulsing} />
                 </View>
@@ -344,12 +351,22 @@ const stylesheet = StyleSheet.create((theme) => ({
     tileSelected: {
         backgroundColor: theme.colors.surfaceSelected,
     },
+    tileTextColumn: {
+        flex: 1,
+        flexShrink: 1,
+        minWidth: 0,
+    },
     tileTitle: {
         fontSize: 17,
         color: theme.colors.text,
         ...Typography.default('regular'),
         letterSpacing: -0.1,
-        flexShrink: 1,
+    },
+    tileSubtitle: {
+        fontSize: 12,
+        color: theme.colors.textSecondary,
+        marginTop: 2,
+        ...Typography.default('regular'),
     },
     tileDot: {
         marginLeft: 10,
