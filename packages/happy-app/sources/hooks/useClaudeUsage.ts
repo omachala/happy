@@ -1,11 +1,16 @@
 import * as React from 'react';
 import { useAuth } from '@/auth/AuthContext';
-import { getServerUrl } from '@/sync/serverConfig';
+import { kvGet } from '@/sync/apiKv';
 
-// Polls happy-server's /v1/account/anthropic/usage endpoint, which forwards
-// to Anthropic's OAuth usage API using the user's CLI-registered token
-// (server-side refresh handled). No token paste needed in-app — relies on
-// `happy connect claude` having been run on at least one machine.
+// Reads the Anthropic usage snapshot that the happy-cli daemon publishes
+// into KV under `anthropic_usage`. The CLI runs on the user's Mac, reads the
+// Claude Code OAuth token from macOS Keychain, hits Anthropic's usage API,
+// and writes the result into KV every ~60s. No server changes required —
+// happy-server treats KV values as opaque strings.
+//
+// If no daemon is running anywhere on the account, KV stays empty and the
+// hook returns null usage (pill hides). Once the daemon ticks once, the pill
+// appears within the next app poll (60s).
 
 export type ClaudeUsage = {
     fiveHour: { utilization: number; resetsAt: string | null };
@@ -19,6 +24,7 @@ export type ClaudeUsage = {
 };
 
 const REFRESH_MS = 60_000;
+const KV_KEY = 'anthropic_usage';
 
 export function useClaudeUsage(): {
     usage: ClaudeUsage | null;
@@ -26,13 +32,13 @@ export function useClaudeUsage(): {
     refresh: () => void;
 } {
     const auth = useAuth();
-    const token = auth.credentials?.token ?? null;
+    const credentials = auth.credentials;
     const [usage, setUsage] = React.useState<ClaudeUsage | null>(null);
     const [error, setError] = React.useState<string | null>(null);
     const [tick, setTick] = React.useState(0);
 
     React.useEffect(() => {
-        if (!token) {
+        if (!credentials) {
             setUsage(null);
             setError(null);
             return;
@@ -40,21 +46,15 @@ export function useClaudeUsage(): {
         let cancelled = false;
         (async () => {
             try {
-                const res = await fetch(`${getServerUrl()}/v1/account/anthropic/usage`, {
-                    headers: { 'Authorization': `Bearer ${token}` },
-                });
+                const item = await kvGet(credentials, KV_KEY);
                 if (cancelled) return;
-                if (res.status === 404) {
-                    // Account not connected on the server — silently no-op.
+                if (!item) {
+                    // No daemon has written yet — silently hide.
                     setUsage(null);
                     setError(null);
                     return;
                 }
-                if (!res.ok) {
-                    setError(`HTTP ${res.status}`);
-                    return;
-                }
-                const data: any = await res.json();
+                const data: any = JSON.parse(item.value);
                 setError(null);
                 setUsage({
                     fiveHour: {
@@ -76,17 +76,17 @@ export function useClaudeUsage(): {
                 });
             } catch (e: any) {
                 if (cancelled) return;
-                setError(e?.message ?? 'fetch failed');
+                setError(e?.message ?? 'kv read failed');
             }
         })();
         return () => { cancelled = true; };
-    }, [token, tick]);
+    }, [credentials, tick]);
 
     React.useEffect(() => {
-        if (!token) return;
+        if (!credentials) return;
         const id = setInterval(() => setTick(t => t + 1), REFRESH_MS);
         return () => clearInterval(id);
-    }, [token]);
+    }, [credentials]);
 
     const refresh = React.useCallback(() => setTick(t => t + 1), []);
     return { usage, error, refresh };
