@@ -10,6 +10,7 @@ import { SessionsList } from './SessionsList';
 import { SessionsListWrapper } from './SessionsListWrapper';
 import { Header } from './navigation/Header';
 import { HeaderLogo } from './HeaderLogo';
+import { UsagePill } from './UsagePill';
 import { VoiceAssistantStatusBar } from './VoiceAssistantStatusBar';
 import { StatusDot } from './StatusDot';
 import { Ionicons } from '@expo/vector-icons';
@@ -83,6 +84,10 @@ const styles = StyleSheet.create((theme) => ({
         alignItems: 'center',
         justifyContent: 'center',
     },
+    headerRightRow: {
+        flexDirection: 'row',
+        alignItems: 'center',
+    },
 }));
 
 const HeaderTitle = React.memo(() => {
@@ -121,9 +126,12 @@ const HeaderRight = React.memo(() => {
     const router = useRouter();
     const { theme } = useUnistyles();
     return (
-        <Pressable onPress={() => router.navigate('/new')} hitSlop={15} style={styles.headerButton}>
-            <Ionicons name="add-outline" size={28} color={theme.colors.header.tint} />
-        </Pressable>
+        <View style={styles.headerRightRow}>
+            <UsagePill />
+            <Pressable onPress={() => router.navigate('/new')} hitSlop={15} style={styles.headerButton}>
+                <Ionicons name="add-outline" size={28} color={theme.colors.header.tint} />
+            </Pressable>
+        </View>
     );
 });
 

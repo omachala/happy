@@ -71,6 +71,38 @@ function formatBuildSubtitle(buildConfig: BuildConfig): string | undefined {
     ].filter(Boolean).join(' / ');
 }
 
+// One-shot paste row for the Claude Code OAuth access token. The token
+// powers the home-header usage pill via api.anthropic.com/api/oauth/usage.
+// Grab it on the machine running `claude` with:
+//   security find-generic-password -s "Claude Code-credentials" -w \
+//     | jq -r .claudeAiOauth.accessToken
+const AnthropicUsageTokenRow = React.memo(function AnthropicUsageTokenRow() {
+    const [token, setToken] = useLocalSettingMutable('anthropicOauthAccessToken');
+    const masked = token ? `••••${token.slice(-4)}` : 'Not set';
+    return (
+        <Item
+            title="OAuth access token"
+            subtitle={masked}
+            icon={<Ionicons name="key-outline" size={29} color="#007AFF" />}
+            onPress={async () => {
+                const next = await Modal.prompt(
+                    'Paste OAuth access token',
+                    'Run on the machine where you use Claude Code:\n\nsecurity find-generic-password -s "Claude Code-credentials" -w | jq -r .claudeAiOauth.accessToken',
+                    {
+                        placeholder: 'sk-ant-oat01-…',
+                        defaultValue: token ?? '',
+                        confirmText: 'Save',
+                        inputType: 'default',
+                    }
+                );
+                if (next == null) return;
+                setToken(next.trim() ? next.trim() : null);
+            }}
+            showChevron={false}
+        />
+    );
+});
+
 export const SettingsView = React.memo(function SettingsView() {
     const { theme } = useUnistyles();
     const router = useRouter();
@@ -259,6 +291,10 @@ export const SettingsView = React.memo(function SettingsView() {
                     showChevron={false}
                     onPress={isPro ? undefined : handleSubscribe}
                 />
+            </ItemGroup>
+
+            <ItemGroup title="Anthropic usage">
+                <AnthropicUsageTokenRow />
             </ItemGroup>
 
             <ItemGroup title={t('settings.connectedAccounts')}>
