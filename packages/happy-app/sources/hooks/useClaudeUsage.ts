@@ -1,6 +1,7 @@
 import * as React from 'react';
 import { useAuth } from '@/auth/AuthContext';
 import { kvGet } from '@/sync/apiKv';
+import { decodeBase64 } from '@/encryption/base64';
 
 // Reads the Anthropic usage snapshot that the happy-cli daemon publishes
 // into KV under `anthropic_usage`. The CLI runs on the user's Mac, reads the
@@ -54,7 +55,10 @@ export function useClaudeUsage(): {
                     setError(null);
                     return;
                 }
-                const data: any = JSON.parse(item.value);
+                // KV values are wire-format base64 (server stores bytes).
+                const bytes = decodeBase64(item.value);
+                const json = new TextDecoder().decode(bytes);
+                const data: any = JSON.parse(json);
                 setError(null);
                 setUsage({
                     fiveHour: {

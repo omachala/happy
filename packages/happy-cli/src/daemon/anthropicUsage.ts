@@ -138,7 +138,9 @@ export async function publishAnthropicUsageTick(authToken: string): Promise<void
     const usage = await fetchUsage(accessToken);
     if (!usage) return;
 
-    const payload = JSON.stringify({ ...usage, fetched_at: Date.now() });
+    const payload = Buffer
+        .from(JSON.stringify({ ...usage, fetched_at: Date.now() }), 'utf8')
+        .toString('base64');
 
     const version = lastKvVersion ?? -1;
     const first = await postUsageMutation(authToken, payload, version);
