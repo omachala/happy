@@ -11,11 +11,16 @@
  * If the read token is expired (Anthropic returns 401) we just skip this
  * tick and try again on the next heartbeat.
  *
- * macOS-only. Non-darwin platforms quietly do nothing.
+ * Cross-platform: macOS reads from Keychain (`Claude Code-credentials`),
+ * Linux reads from `~/.claude/.credentials.json`. Missing/unreadable
+ * credentials simply skip the tick.
  */
 
 import { execFile } from 'child_process';
 import { promisify } from 'util';
+import { promises as fs } from 'fs';
+import { homedir } from 'os';
+import { join } from 'path';
 import axios from 'axios';
 
 import { configuration } from '@/configuration';
@@ -24,6 +29,7 @@ import { logger } from '@/ui/logger';
 const execFileAsync = promisify(execFile);
 
 const KEYCHAIN_SERVICE = 'Claude Code-credentials';
+const LINUX_CREDENTIALS_PATH = join(homedir(), '.claude', '.credentials.json');
 const USAGE_URL = 'https://api.anthropic.com/api/oauth/usage';
 const KV_KEY = 'anthropic_usage';
 const CLAUDE_CODE_UA = 'claude-code/2.0.32';
@@ -45,20 +51,20 @@ type AnthropicUsagePayload = {
 let lastKvVersion: number | null = null;
 
 async function readClaudeCodeAccessToken(): Promise<string | null> {
-    if (process.platform !== 'darwin') return null;
     try {
-        const { stdout } = await execFileAsync(
-            '/usr/bin/security',
-            ['find-generic-password', '-s', KEYCHAIN_SERVICE, '-w'],
-            { timeout: 5000 },
-        );
-        const raw = stdout.trim();
+        const raw = process.platform === 'darwin'
+            ? (await execFileAsync(
+                '/usr/bin/security',
+                ['find-generic-password', '-s', KEYCHAIN_SERVICE, '-w'],
+                { timeout: 5000 },
+            )).stdout.trim()
+            : (await fs.readFile(LINUX_CREDENTIALS_PATH, 'utf8')).trim();
         if (!raw) return null;
         const parsed = JSON.parse(raw);
         const token = parsed?.claudeAiOauth?.accessToken;
         return typeof token === 'string' && token.length > 0 ? token : null;
     } catch {
-        // Keychain entry missing, locked, or unparseable — caller skips this tick.
+        // Credential entry missing, locked, or unparseable — caller skips this tick.
         return null;
     }
 }
