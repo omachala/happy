@@ -28,7 +28,6 @@ import { detectCLIAvailability } from '@/utils/detectCLI';
 import { buildResumeLaunch } from '@/resume/handleResumeCommand';
 import { detectResumeSupport } from '@/resume/localHappyAgentAuth';
 import { encodeBase64, decodeBase64, decrypt } from '@/api/encryption';
-import { publishAnthropicUsageTick } from './anthropicUsage';
 
 /** Shell-escape a string for safe interpolation into tmux commands. */
 function shellescape(s: string): string {
@@ -929,16 +928,6 @@ export async function startDaemon(): Promise<void> {
         }
       } catch (error) {
         logger.debug('[DAEMON RUN] Failed to write heartbeat', error);
-      }
-
-      // Best-effort Anthropic usage snapshot — feeds the mobile app's home
-      // header pill via the KV store. Silently skips when there's no local
-      // Claude Code keychain entry (e.g. on non-darwin or unauthenticated
-      // machines) or when Anthropic returns anything but 200.
-      try {
-        await publishAnthropicUsageTick(credentials.token);
-      } catch (error) {
-        logger.debug('[DAEMON RUN] Anthropic usage tick failed', error);
       }
 
       heartbeatRunning = false;

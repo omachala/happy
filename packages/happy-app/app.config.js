@@ -61,7 +61,7 @@ export default {
         ios: {
             supportsTablet: true,
             bundleIdentifier: bundleId,
-            buildNumber: "13",
+            buildNumber: "14",
             config: {
                 usesNonExemptEncryption: false
             },
@@ -70,7 +70,15 @@ export default {
                 NSLocalNetworkUsageDescription: "Allow $(PRODUCT_NAME) to find and connect to local devices on your network.",
                 NSBonjourServices: ["_http._tcp", "_https._tcp"],
                 NSAppTransportSecurity: variant === 'production'
-                    ? { NSAllowsLocalNetworking: true }
+                    ? {
+                        NSAllowsLocalNetworking: true,
+                        NSExceptionDomains: {
+                            'api.home': {
+                                NSExceptionAllowsInsecureHTTPLoads: true,
+                                NSIncludesSubdomains: false,
+                            },
+                        },
+                    }
                     : { NSAllowsLocalNetworking: true, NSAllowsArbitraryLoads: true }
             }
         },
