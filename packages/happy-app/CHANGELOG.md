@@ -1,6 +1,29 @@
-# May 7 — New sidebar, code editor, session branching
+# May 15 — Cleaner, steadier chat
+
+Less clutter in the conversation, fewer stuck states, smoother scrolling.
+
+- Slash commands render as a clean chip — no more raw command markup or duplicated text.
+- Skill runs no longer dump a wall of raw instructions into the chat.
+- Chats pick up their real title instead of staying stuck on "New chat".
+- The view stays put while the agent streams — no more scroll jumps when you've scrolled up to read.
+- "Permission required" prompts clear properly after a session is interrupted.
+- Resumed sessions no longer replay your whole history as duplicate messages.
+- Slash-command and file autocomplete shows more results and keeps the highlighted item in view.
+
+# May 13 — Faster long chats
+
+Long sessions open instantly. Messages load latest-first with older history streaming in on scroll.
+
+- Parallel decryption — no more freezing on sessions with thousands of messages.
+- Backward pagination — scroll up to load history on demand.
+
+# May 7 — Session retention, new sidebar, code editor, session branching
 
 Desktop got a full refresh with a file browser, built-in editor, and zen mode. Sessions can now be branched or rewound.
+
+**Session retention: 2 months.** Older sessions are cleaned up automatically to keep storage costs manageable.
+
+## Features and fixes
 
 - Thinking effort selection bug fixed.
 - Smarter push notifications — suppressed when you're already in the app.
@@ -8,7 +31,10 @@ Desktop got a full refresh with a file browser, built-in editor, and zen mode. S
 - Redesigned sidebar with file browser, code editor, and zen mode.
 - Fixed stale sessions refusing to load, blank screen on launch, dual cursors in remote mode, `claude --resume` not finding Happy sessions.
 
-Experimental — enable in Settings → Features:
+## Experimental
+
+Enable in Settings → Features:
+
 - File diffs sidebar — see git changes next to chat on desktop.
 - Session fork & rewind — branch off any session or roll back to any message.
 

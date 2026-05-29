@@ -16,7 +16,7 @@ import { syncCurrentPushToken } from './pushRegistration';
 import { Platform, AppState, type AppStateStatus } from 'react-native';
 import { isRunningOnMac } from '@/utils/platform';
 import { NormalizedMessage, normalizeRawMessage, RawRecord } from './typesRaw';
-import { applySettings, Settings, settingsDefaults, settingsParse, SUPPORTED_SCHEMA_VERSION } from './settings';
+import { applySettings, Settings, settingsDefaults, settingsParse, settingsToSyncPayload, SUPPORTED_SCHEMA_VERSION } from './settings';
 import { Profile, profileParse } from './profile';
 import { loadPendingSettings, savePendingSettings } from './persistence';
 import {
@@ -37,7 +37,6 @@ import { getServerUrl } from './serverConfig';
 import { config } from '@/config';
 import { log } from '@/log';
 import { gitStatusSync } from './gitStatusSync';
-import { projectManager } from './projectManager';
 import { AsyncLock } from '@/utils/lock';
 import { voiceHooks } from '@/realtime/hooks/voiceHooks';
 import { Message } from './typesMessage';
@@ -62,6 +61,13 @@ type V3GetSessionMessagesResponse = {
     messages: ApiMessage[];
     hasMore: boolean;
 };
+
+// Sentinel used as `before_seq` for the very first backward fetch of a
+// session. It must exceed any real `seq` value the server can produce.
+// `seq` is stored as Postgres int4 on the server, so the maximum is
+// 2_147_483_647. We use that exact upper bound to keep the request safely
+// within int4 while still being effectively "infinite" for any session.
+const SEQ_BACKWARD_INITIAL_SENTINEL = 2_147_483_647;
 
 type V3PostSessionMessagesResponse = {
     messages: Array<{
@@ -97,6 +103,11 @@ class Sync {
     private sendSync = new Map<string, InvalidateSync>();
     private sendAbortControllers = new Map<string, AbortController>();
     private sessionLastSeq = new Map<string, number>();
+    // Lowest seq value we have already fetched and applied for a session.
+    // Used as the cursor for backward pagination when the user scrolls up to
+    // load older history. Set after the initial latest-page fetch and
+    // advanced downward by loadOlderMessages.
+    private sessionOldestSeq = new Map<string, number>();
     private pendingOutbox = new Map<string, OutboxMessage[]>();
     private sessionMessageQueue = new Map<string, NormalizedMessage[]>();
     private sessionQueueProcessing = new Set<string>();
@@ -559,7 +570,7 @@ class Sync {
             }
         }
 
-        const { permissionMode, model, effort } = resolveMessageModeMeta(session);
+        const modeMeta = resolveMessageModeMeta(session, storage.getState().settings);
         const { displayText, source = 'chat', attachments } = options ?? {};
 
         // Image attachments are wired into the Claude pipeline only; Codex /
@@ -661,8 +672,6 @@ class Sync {
             sentFrom = 'web'; // fallback
         }
 
-        const fallbackModel: string | null = null;
-
         // Create user message content with metadata
         const content: RawRecord = {
             role: 'user',
@@ -672,11 +681,10 @@ class Sync {
             },
             meta: {
                 sentFrom,
-                permissionMode,
-                model,
-                fallbackModel,
                 appendSystemPrompt: systemPrompt,
-                ...(effort && { effort }), // Forward effort (low/medium/high/max for Claude, low/medium/high/xhigh for Codex)
+                ...(modeMeta.permissionMode !== undefined ? { permissionMode: modeMeta.permissionMode } : {}),
+                ...(modeMeta.model !== undefined ? { model: modeMeta.model } : {}),
+                ...(modeMeta.effort !== undefined ? { effort: modeMeta.effort } : {}),
                 ...(displayText && { displayText }) // Add displayText if provided
             }
         };
@@ -1488,7 +1496,7 @@ class Sync {
                 const response = await fetch(`${API_ENDPOINT}/v1/account/settings`, {
                     method: 'POST',
                     body: JSON.stringify({
-                        settings: await this.encryption.encryptRaw(settings),
+                        settings: await this.encryption.encryptRaw(settingsToSyncPayload(settings)),
                         expectedVersion: version ?? 0
                     }),
                     headers: {
@@ -1812,55 +1820,218 @@ class Sync {
                 throw new Error(`Session encryption not ready for ${sessionId}`);
             }
 
-            let afterSeq = this.sessionLastSeq.get(sessionId) ?? 0;
-            let hasMore = true;
-            let totalNormalized = 0;
+            const knownLastSeq = this.sessionLastSeq.get(sessionId);
+            const isInitialLoad = knownLastSeq === undefined;
+            if (isInitialLoad) {
+                // Initial load. Pull only the most recent page so the user can
+                // start chatting immediately. Older history streams in lazily
+                // through loadOlderMessages() when the user scrolls up — and
+                // also through a background prefetch kicked off below, so the
+                // history fills in even when the user doesn't scroll.
+                //
+                // Previously this method walked forward from seq=0 until every
+                // page had been fetched and decrypted, which blocked the chat
+                // from displaying anything for sessions with thousands of
+                // messages. The user's reported pain point was "opening a long
+                // session feels frozen" — this is the fix.
+                await this.fetchInitialLatestPage(sessionId, encryption);
+            } else {
+                // Forward incremental sync. Used after reconnect, invalidate,
+                // or any subsequent visit. Only pulls messages newer than what
+                // we already have, so it's bounded and fast in normal use.
+                await this.fetchForwardSince(sessionId, encryption, knownLastSeq);
+            }
 
-            while (hasMore) {
-                const response = await apiSocket.request(`/v3/sessions/${sessionId}/messages?after_seq=${afterSeq}&limit=100`);
+            storage.getState().applyMessagesLoaded(sessionId);
+            log.log(`💬 fetchMessages completed for session ${sessionId}`);
+
+            if (isInitialLoad) {
+                // Fire-and-forget. The chat is interactive at this point;
+                // background pages stream in without blocking either the
+                // surrounding lock or the UI. loadOlderMessages takes the
+                // same lock internally, so the loop naturally serialises
+                // with on-scroll triggers and live socket updates.
+                void this.prefetchOlderMessagesInBackground(sessionId);
+            }
+        });
+    }
+
+    private prefetchOlderMessagesInBackground = async (sessionId: string) => {
+        const SLEEP_BETWEEN_PAGES_MS = 250;
+        // While loadOlderMessages handles the actual work, this loop is what
+        // keeps it going without user input. We keep stepping until either:
+        //   - the server says there is no more older history, or
+        //   - the session is no longer present in the store (user navigated
+        //     away and the session was unloaded), or
+        //   - we hit seq = 1 (the very first message), or
+        //   - the encryption key is gone (logged out).
+        // The loop yields between pages to keep the UI thread responsive
+        // and to spread out server load.
+        while (true) {
+            const sessionMessages = storage.getState().sessionMessages[sessionId];
+            if (!sessionMessages || !sessionMessages.hasMoreOlder) {
+                return;
+            }
+            if (!this.encryption.getSessionEncryption(sessionId)) {
+                return;
+            }
+            const oldestSeq = this.sessionOldestSeq.get(sessionId);
+            if (oldestSeq === undefined || oldestSeq <= 1) {
+                return;
+            }
+
+            try {
+                await this.loadOlderMessages(sessionId);
+            } catch (error) {
+                log.log(`💬 prefetchOlderMessagesInBackground: error for ${sessionId}, stopping: ${String(error)}`);
+                return;
+            }
+
+            await new Promise((resolve) => setTimeout(resolve, SLEEP_BETWEEN_PAGES_MS));
+        }
+    }
+
+    private fetchInitialLatestPage = async (
+        sessionId: string,
+        encryption: ReturnType<Encryption['getSessionEncryption']> & {}
+    ) => {
+        const response = await apiSocket.request(
+            `/v3/sessions/${sessionId}/messages?before_seq=${SEQ_BACKWARD_INITIAL_SENTINEL}&limit=100`
+        );
+        if (!response.ok) {
+            throw new Error(`Failed to fetch initial page for ${sessionId}: ${response.status}`);
+        }
+        const data = await response.json() as V3GetSessionMessagesResponse;
+        const messages = Array.isArray(data.messages) ? data.messages : [];
+
+        await this.applyFetchedMessages(sessionId, encryption, messages);
+
+        // Anchor both ends so future incremental forward sync resumes from
+        // maxSeq, and loadOlderMessages can page backward from minSeq.
+        let maxSeq = 0;
+        let minSeq = Number.POSITIVE_INFINITY;
+        for (const message of messages) {
+            if (message.seq > maxSeq) maxSeq = message.seq;
+            if (message.seq < minSeq) minSeq = message.seq;
+        }
+        this.sessionLastSeq.set(sessionId, maxSeq);
+        if (messages.length > 0) {
+            this.sessionOldestSeq.set(sessionId, minSeq);
+        }
+        storage.getState().applyOlderMessagesPagination(sessionId, {
+            hasMore: !!data.hasMore && messages.length > 0
+        });
+    }
+
+    private fetchForwardSince = async (
+        sessionId: string,
+        encryption: ReturnType<Encryption['getSessionEncryption']> & {},
+        fromSeq: number
+    ) => {
+        let afterSeq = fromSeq;
+        while (true) {
+            const response = await apiSocket.request(`/v3/sessions/${sessionId}/messages?after_seq=${afterSeq}&limit=100`);
+            if (!response.ok) {
+                throw new Error(`Failed to forward-sync ${sessionId}: ${response.status}`);
+            }
+            const data = await response.json() as V3GetSessionMessagesResponse;
+            const messages = Array.isArray(data.messages) ? data.messages : [];
+
+            await this.applyFetchedMessages(sessionId, encryption, messages);
+
+            let maxSeq = afterSeq;
+            for (const message of messages) {
+                if (message.seq > maxSeq) maxSeq = message.seq;
+            }
+            this.sessionLastSeq.set(sessionId, maxSeq);
+
+            if (!data.hasMore) break;
+            if (maxSeq === afterSeq) {
+                log.log(`💬 fetchForwardSince: pagination stalled for ${sessionId}, stopping to avoid infinite loop`);
+                break;
+            }
+            afterSeq = maxSeq;
+        }
+    }
+
+    private applyFetchedMessages = async (
+        sessionId: string,
+        encryption: ReturnType<Encryption['getSessionEncryption']> & {},
+        messages: ApiMessage[]
+    ) => {
+        if (messages.length === 0) return;
+        const decryptedMessages = await encryption.decryptMessages(messages);
+        const normalizedMessages: NormalizedMessage[] = [];
+        for (let i = 0; i < decryptedMessages.length; i++) {
+            const decrypted = decryptedMessages[i];
+            if (!decrypted) continue;
+            const normalized = normalizeRawMessage(decrypted.id, decrypted.localId, decrypted.createdAt, decrypted.content);
+            if (normalized) {
+                normalizedMessages.push(normalized);
+            }
+        }
+        if (normalizedMessages.length > 0) {
+            this.applyMessages(sessionId, normalizedMessages);
+        }
+    }
+
+    /**
+     * Fetch one page of older messages for a session and prepend them to the
+     * store. Called from the chat UI when the user scrolls past the top of
+     * the currently loaded history. No-op when we have already fetched the
+     * earliest message, when no initial fetch has happened yet, or when an
+     * older-fetch is already in flight for this session.
+     */
+    loadOlderMessages = async (sessionId: string) => {
+        const oldestSeq = this.sessionOldestSeq.get(sessionId);
+        if (oldestSeq === undefined || oldestSeq <= 1) {
+            return;
+        }
+        const sessionMessages = storage.getState().sessionMessages[sessionId];
+        if (!sessionMessages || sessionMessages.isLoadingOlder || !sessionMessages.hasMoreOlder) {
+            return;
+        }
+
+        storage.getState().applyOlderMessagesLoading(sessionId, true);
+        const lock = this.getSessionMessageLock(sessionId);
+        try {
+            await lock.inLock(async () => {
+                const encryption = this.encryption.getSessionEncryption(sessionId);
+                if (!encryption) {
+                    log.log(`💬 loadOlderMessages: encryption not ready for ${sessionId}`);
+                    return;
+                }
+                // Re-read the cursor inside the lock. A concurrent
+                // socket-pushed update or reload could have changed it.
+                const beforeSeq = this.sessionOldestSeq.get(sessionId);
+                if (beforeSeq === undefined || beforeSeq <= 1) {
+                    return;
+                }
+                const response = await apiSocket.request(
+                    `/v3/sessions/${sessionId}/messages?before_seq=${beforeSeq}&limit=100`
+                );
                 if (!response.ok) {
-                    throw new Error(`Failed to fetch messages for ${sessionId}: ${response.status}`);
+                    throw new Error(`Failed to load older messages for ${sessionId}: ${response.status}`);
                 }
                 const data = await response.json() as V3GetSessionMessagesResponse;
                 const messages = Array.isArray(data.messages) ? data.messages : [];
 
-                let maxSeq = afterSeq;
+                await this.applyFetchedMessages(sessionId, encryption, messages);
+
+                let minSeq = beforeSeq;
                 for (const message of messages) {
-                    if (message.seq > maxSeq) {
-                        maxSeq = message.seq;
-                    }
+                    if (message.seq < minSeq) minSeq = message.seq;
                 }
-
-                const decryptedMessages = await encryption.decryptMessages(messages);
-                const normalizedMessages: NormalizedMessage[] = [];
-                for (let i = 0; i < decryptedMessages.length; i++) {
-                    const decrypted = decryptedMessages[i];
-                    if (!decrypted) {
-                        continue;
-                    }
-                    const normalized = normalizeRawMessage(decrypted.id, decrypted.localId, decrypted.createdAt, decrypted.content);
-                    if (normalized) {
-                        normalizedMessages.push(normalized);
-                    }
+                if (messages.length > 0) {
+                    this.sessionOldestSeq.set(sessionId, minSeq);
                 }
-
-                if (normalizedMessages.length > 0) {
-                    totalNormalized += normalizedMessages.length;
-                    this.applyMessages(sessionId, normalizedMessages);
-                }
-
-                this.sessionLastSeq.set(sessionId, maxSeq);
-                hasMore = !!data.hasMore;
-                if (hasMore && maxSeq === afterSeq) {
-                    log.log(`💬 fetchMessages: pagination stalled for ${sessionId}, stopping to avoid infinite loop`);
-                    break;
-                }
-                afterSeq = maxSeq;
-            }
-
-            storage.getState().applyMessagesLoaded(sessionId);
-            log.log(`💬 fetchMessages completed for session ${sessionId} - processed ${totalNormalized} messages`);
-        });
+                storage.getState().applyOlderMessagesPagination(sessionId, {
+                    hasMore: !!data.hasMore && messages.length > 0
+                });
+            });
+        } finally {
+            storage.getState().applyOlderMessagesLoading(sessionId, false);
+        }
     }
 
     private registerPushToken = async () => {
@@ -2030,27 +2201,35 @@ class Sync {
             // Remove encryption keys from memory
             this.encryption.removeSessionEncryption(sessionId);
 
-            // Remove from project manager
-            projectManager.removeSession(sessionId);
-
             // Clear any cached git status
             gitStatusSync.clearForSession(sessionId);
             this.messagesSync.delete(sessionId);
             this.sendSync.delete(sessionId);
             this.pendingOutbox.delete(sessionId);
             this.sessionLastSeq.delete(sessionId);
+            this.sessionOldestSeq.delete(sessionId);
             this.sessionMessageLocks.delete(sessionId);
             this.sessionMessageQueue.delete(sessionId);
             this.sessionQueueProcessing.delete(sessionId);
 
             log.log(`🗑️ Session ${sessionId} deleted from local storage`);
         } else if (updateData.body.t === 'update-session') {
-            const session = storage.getState().sessions[updateData.body.id];
+            // Session + encryption may not be initialized yet if sessions are
+            // still syncing on startup. Mirror the new-message path: await the
+            // sessions sync queue and re-check before giving up — dropping here
+            // silently loses the metadata update that carries the chat title
+            // (#1251: every chat stuck on "New chat" after the lazy-load change).
+            let session = storage.getState().sessions[updateData.body.id];
+            let sessionEncryption = this.encryption.getSessionEncryption(updateData.body.id);
+            if (!session || !sessionEncryption) {
+                await this.sessionsSync.awaitQueue();
+                session = storage.getState().sessions[updateData.body.id];
+                sessionEncryption = this.encryption.getSessionEncryption(updateData.body.id);
+            }
             if (session) {
-                // Get session encryption
-                const sessionEncryption = this.encryption.getSessionEncryption(updateData.body.id);
                 if (!sessionEncryption) {
-                    console.error(`Session encryption not found for ${updateData.body.id} - this should never happen`);
+                    console.error(`Session encryption not found for ${updateData.body.id} after sync`);
+                    this.fetchSessions();
                     return;
                 }
 

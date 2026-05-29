@@ -15,6 +15,7 @@ export default function FeaturesSettingsScreen() {
     const [markdownCopyV2, setMarkdownCopyV2] = useLocalSettingMutable('markdownCopyV2');
     const [expResumeSession, setExpResumeSession] = useSettingMutable('expResumeSession');
     const [fileDiffsSidebar, setFileDiffsSidebar] = useSettingMutable('fileDiffsSidebar');
+    const [groupToolCalls, setGroupToolCalls] = useSettingMutable('groupToolCalls');
     const [expImageUpload, setExpImageUpload] = useSettingMutable('expImageUpload');
 
     return (
@@ -32,6 +33,18 @@ export default function FeaturesSettingsScreen() {
                         <Switch
                             value={fileDiffsSidebar}
                             onValueChange={setFileDiffsSidebar}
+                        />
+                    }
+                    showChevron={false}
+                />
+                <Item
+                    title={t('settingsFeatures.groupToolCalls')}
+                    subtitle={t('settingsFeatures.groupToolCallsSubtitle')}
+                    icon={<Ionicons name="layers-outline" size={29} color="#AF52DE" />}
+                    rightElement={
+                        <Switch
+                            value={groupToolCalls}
+                            onValueChange={setGroupToolCalls}
                         />
                     }
                     showChevron={false}

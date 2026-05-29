@@ -1,3 +1,5 @@
+const { execFileSync } = require('node:child_process');
+
 const variant = process.env.APP_ENV || 'development';
 const name = {
     development: "Happy (dev)",
@@ -14,6 +16,37 @@ const consoleLoggingDefault = {
     preview: true,
     production: false,
 }[variant];
+
+function git(args) {
+    try {
+        return execFileSync('git', args, {
+            encoding: 'utf8',
+            stdio: ['ignore', 'pipe', 'ignore'],
+        }).trim() || undefined;
+    } catch {
+        return undefined;
+    }
+}
+
+function loadBuildMetadata() {
+    const commitSha =
+        process.env.HAPPY_BUILD_COMMIT_SHA ||
+        process.env.EAS_BUILD_GIT_COMMIT_HASH ||
+        process.env.GITHUB_SHA ||
+        git(['rev-parse', 'HEAD']);
+    const commitTimestamp =
+        process.env.HAPPY_BUILD_COMMIT_TIMESTAMP ||
+        (commitSha
+            ? git(['show', '-s', '--format=%cI', commitSha])
+            : git(['show', '-s', '--format=%cI', 'HEAD']));
+
+    return {
+        commitSha,
+        commitTimestamp,
+    };
+}
+
+const buildMetadata = loadBuildMetadata();
 
 export default {
     expo: {
@@ -149,6 +182,8 @@ export default {
             },
             app: {
                 consoleLoggingDefault,
+                buildCommitSha: buildMetadata.commitSha,
+                buildCommitTimestamp: buildMetadata.commitTimestamp,
             }
         }
     }

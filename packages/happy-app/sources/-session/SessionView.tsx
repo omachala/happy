@@ -1,13 +1,11 @@
 import { AgentContentView } from '@/components/AgentContentView';
 import { AgentInput } from '@/components/AgentInput';
+import type { MultiTextInputHandle } from '@/components/MultiTextInput';
 import { layout } from '@/components/layout';
 import {
     getAvailableModels,
     getAvailablePermissionModes,
-    getDefaultModelKey,
-    getDefaultPermissionModeKey,
     getEffortLevelsForModel,
-    getDefaultEffortKeyForModel,
     resolveCurrentOption,
     EffortLevel,
 } from '@/components/modelModeOptions';
@@ -40,6 +38,7 @@ import { AllFilesDiffView } from '@/components/AllFilesDiffView';
 import { FileViewPanel } from '@/components/FileViewPanel';
 import { prefetchPierreDiff } from '@/components/diff/PierreDiffView';
 import { GitFileStatus } from '@/sync/gitStatusFiles';
+import { useOverlayNav } from '@/-session/sessionOverlayNav';
 import { formatPathRelativeToHome, getResumeCommandBlock, getSessionName, useSessionStatus } from '@/utils/sessionUtils';
 import { useSessionQuickActions } from '@/hooks/useSessionQuickActions';
 import { isVersionSupported, MINIMUM_CLI_VERSION } from '@/utils/versionUtils';
@@ -53,6 +52,7 @@ import Animated, { useSharedValue, useAnimatedStyle, withTiming, Easing } from '
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useUnistyles } from 'react-native-unistyles';
 import type { ModelMode, PermissionMode } from '@/components/PermissionModeSelector';
+import { resolveAgentDefaultConfig } from '@/sync/agentDefaults';
 
 export const SessionView = React.memo((props: { id: string }) => {
     const sessionId = props.id;
@@ -94,11 +94,18 @@ export const SessionView = React.memo((props: { id: string }) => {
     // Match left sidebar width: 30% of window, clamped to 250–360px
     const sidebarWidth = Math.min(Math.max(Math.floor(windowWidth * 0.3), 250), 360);
 
-    // Animate diff sidebar width
+    // Animate diff sidebar width.
+    //
+    // On web we snap the value (duration: 0). The animated `width` change
+    // triggers a flex-row reflow on every frame, which in turn re-measures
+    // the entire chat tree (FlatList rows, message blocks). At ~60fps that
+    // grinds to ~15fps on dev builds. Snapping skips the layout thrash —
+    // the chat reflows once instead of 60 times. Native keeps the smooth
+    // animation because it runs on Reanimated's UI thread.
     const sidebarAnim = useSharedValue(showSidebar ? 1 : 0);
     React.useEffect(() => {
         sidebarAnim.value = withTiming(showSidebar ? 1 : 0, {
-            duration: 250,
+            duration: Platform.OS === 'web' ? 0 : 250,
             easing: Easing.out(Easing.cubic),
         });
     }, [showSidebar]);
@@ -108,39 +115,75 @@ export const SessionView = React.memo((props: { id: string }) => {
         overflow: 'hidden' as const,
     }));
 
-    const [diffViewOpen, setDiffViewOpen] = React.useState(false);
-    const [scrollToFile, setScrollToFile] = React.useState<string | null>(null);
     const [sidebarMode, setSidebarMode] = React.useState<SidebarMode>('changes');
-    const [fileViewPath, setFileViewPath] = React.useState<string | null>(null);
+
+    // Overlay state is managed as a browser-style history stack so the
+    // sidebar's back / forward arrows can navigate between chat ↔ diff ↔ file
+    // without a per-overlay close button. Stack + cursor live in one piece
+    // of state so functional updates stay coordinated.
+    type OverlayEntry =
+        | { kind: 'none' }
+        | { kind: 'diff'; file: string }
+        | { kind: 'file'; path: string };
+    const [overlayHistory, setOverlayHistory] = React.useState<{ stack: OverlayEntry[]; cursor: number }>(
+        { stack: [{ kind: 'none' }], cursor: 0 }
+    );
+    const overlayCurrent = overlayHistory.stack[overlayHistory.cursor] ?? { kind: 'none' };
+    const diffViewOpen = overlayCurrent.kind === 'diff';
+    const fileViewPath = overlayCurrent.kind === 'file' ? overlayCurrent.path : null;
+    const scrollToFile = overlayCurrent.kind === 'diff' ? overlayCurrent.file : null;
+
+    const pushOverlay = React.useCallback((entry: OverlayEntry) => {
+        setOverlayHistory((prev) => {
+            const truncated = prev.stack.slice(0, prev.cursor + 1);
+            truncated.push(entry);
+            return { stack: truncated, cursor: truncated.length - 1 };
+        });
+    }, []);
 
     const handleSidebarFilePress = React.useCallback((file: GitFileStatus) => {
         if (file.status === 'deleted') return;
-        setFileViewPath(null);
-        setScrollToFile(file.fullPath);
-        setDiffViewOpen(true);
-    }, []);
+        pushOverlay({ kind: 'diff', file: file.fullPath });
+    }, [pushOverlay]);
     const handleAllFilesFilePress = React.useCallback((filePath: string) => {
-        setDiffViewOpen(false);
-        setScrollToFile(null);
-        setFileViewPath(filePath);
-    }, []);
-    const closeDiffView = React.useCallback(() => {
-        setDiffViewOpen(false);
-        setScrollToFile(null);
-    }, []);
-    const closeFileView = React.useCallback(() => {
-        setFileViewPath(null);
-    }, []);
+        pushOverlay({ kind: 'file', path: filePath });
+    }, [pushOverlay]);
 
     // When sidebar capability is lost (screen too narrow, disabled), close views.
     // Don't close on zen mode toggle — keep the view visible.
     React.useEffect(() => {
         if (!canShowSidebar) {
-            setDiffViewOpen(false);
-            setScrollToFile(null);
-            setFileViewPath(null);
+            setOverlayHistory({ stack: [{ kind: 'none' }], cursor: 0 });
         }
     }, [canShowSidebar]);
+
+    // Right-side header content published by the active overlay (diff toggle / save button).
+    const [headerRightSlot, setHeaderRightSlot] = React.useState<React.ReactNode>(null);
+
+    // Wire intra-session back / forward into the global SidebarNavigator arrows.
+    const canOverlayBack = overlayHistory.cursor > 0;
+    const canOverlayForward = overlayHistory.cursor < overlayHistory.stack.length - 1;
+    React.useEffect(() => {
+        useOverlayNav.getState().publish({
+            canBack: canOverlayBack,
+            canForward: canOverlayForward,
+            back: () => {
+                if (!canOverlayBack) return false;
+                setOverlayHistory((prev) => (
+                    prev.cursor <= 0 ? prev : { ...prev, cursor: prev.cursor - 1 }
+                ));
+                return true;
+            },
+            forward: () => {
+                if (!canOverlayForward) return false;
+                setOverlayHistory((prev) => (
+                    prev.cursor >= prev.stack.length - 1 ? prev : { ...prev, cursor: prev.cursor + 1 }
+                ));
+                return true;
+            },
+        });
+        return () => useOverlayNav.getState().reset();
+    }, [canOverlayBack, canOverlayForward]);
 
     // Warm Pierre's lazy web chunks while the user is still reading chat.
     React.useEffect(() => {
@@ -202,6 +245,8 @@ export const SessionView = React.memo((props: { id: string }) => {
                         title={headerProps.title}
                         folderName={headerProps.folderName}
                         isConnected={headerProps.isConnected}
+                        extraPathSegment={fileViewPath ?? undefined}
+                        rightSlot={(diffViewOpen || !!fileViewPath) ? headerRightSlot : null}
                         onTitlePress={session ? () => router.push(`/session/${sessionId}/info`) : undefined}
                         onBackPress={() => router.back()}
                     />
@@ -240,7 +285,17 @@ export const SessionView = React.memo((props: { id: string }) => {
     // (chat stays mounted underneath so state is preserved).
     return (
         <View style={{ flex: 1, flexDirection: 'row' }}>
-            <View style={{ flex: 1 }}>
+            <View
+                style={{
+                    flex: 1,
+                    // Web-only: isolate the chat subtree's layout from the
+                    // parent flex-row. If we ever bring back a width
+                    // animation on the right sidebar, `contain` prevents
+                    // layout work from leaking up to the chat tree on
+                    // every frame.
+                    ...(Platform.OS === 'web' ? { contain: 'layout style paint' as any } : {}),
+                }}
+            >
                 {mainContent}
                 {diffViewOpen && canShowSidebar && (
                     <View
@@ -257,7 +312,7 @@ export const SessionView = React.memo((props: { id: string }) => {
                         <AllFilesDiffView
                             sessionId={sessionId}
                             scrollToFile={scrollToFile}
-                            onClose={closeDiffView}
+                            onHeaderRightSlotChange={setHeaderRightSlot}
                         />
                     </View>
                 )}
@@ -276,7 +331,7 @@ export const SessionView = React.memo((props: { id: string }) => {
                         <FileViewPanel
                             sessionId={sessionId}
                             filePath={fileViewPath}
-                            onClose={closeFileView}
+                            onHeaderRightSlotChange={setHeaderRightSlot}
                         />
                     </View>
                 )}
@@ -299,6 +354,74 @@ export const SessionView = React.memo((props: { id: string }) => {
 
 const SIDEBAR_MIN_WINDOW_WIDTH = 1100;
 
+// Hoisted so AgentInput's React.memo doesn't see a new array ref on every keystroke
+const AGENT_INPUT_AUTOCOMPLETE_PREFIXES = ['@', '/'];
+
+// Imperative handle exposed by ChatComposer so SessionViewLoaded can read /
+// clear the message text without subscribing to it (which would re-render
+// the whole loaded screen on every keystroke).
+type ChatComposerHandle = {
+    getMessage: () => string;
+    clearMessage: () => void;
+};
+
+type ChatComposerProps = Omit<
+    React.ComponentProps<typeof AgentInput>,
+    'initialValue' | 'onChangeText'
+> & {
+    sessionId: string;
+    composerHandleRef: React.RefObject<ChatComposerHandle | null>;
+};
+
+// Owns the chat-message draft autosave. The textarea itself is uncontrolled:
+// keystrokes never round-trip through React state, so the parent can stay
+// stable on every keystroke and deletion doesn't batch on a busy main thread.
+// `message` here is a low-priority mirror updated via startTransition; it's
+// only used to feed useDraft's debounced autosave. Reads/clears on send go
+// through the MultiTextInput handle imperatively.
+const ChatComposer = React.memo(function ChatComposer(props: ChatComposerProps) {
+    const { sessionId, composerHandleRef, ...rest } = props;
+    // Synchronously hydrate the textarea with any saved draft so the user sees
+    // their work-in-progress on session open without an extra round-trip.
+    const initialDraft = React.useMemo(() => {
+        return storage.getState().sessions[sessionId]?.draft ?? '';
+    }, [sessionId]);
+    const inputHandleRef = React.useRef<MultiTextInputHandle>(null);
+    const [message, setMessage] = React.useState(initialDraft);
+
+    const applyDraft = React.useCallback((text: string) => {
+        inputHandleRef.current?.setTextAndSelection(text, { start: text.length, end: text.length });
+        setMessage(text);
+    }, []);
+
+    const { clearDraft } = useDraft(sessionId, message, applyDraft);
+
+    const handleChangeText = React.useCallback((text: string) => {
+        // Transition keeps the textarea responsive even when the draft
+        // autosave / re-render takes longer than a frame.
+        React.startTransition(() => setMessage(text));
+    }, []);
+
+    React.useImperativeHandle(composerHandleRef, () => ({
+        getMessage: () => inputHandleRef.current?.getText() ?? '',
+        clearMessage: () => {
+            inputHandleRef.current?.setTextAndSelection('', { start: 0, end: 0 });
+            setMessage('');
+            clearDraft();
+        },
+    }), [clearDraft]);
+
+    return (
+        <AgentInput
+            {...rest}
+            ref={inputHandleRef}
+            sessionId={sessionId}
+            initialValue={initialDraft}
+            onChangeText={handleChangeText}
+        />
+    );
+});
+
 function SessionViewLoaded({ sessionId, session }: { sessionId: string, session: Session }) {
     const { theme } = useUnistyles();
     const router = useRouter();
@@ -306,7 +429,6 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
     const isLandscape = useIsLandscape();
     const deviceType = useDeviceType();
     const isTablet = useIsTablet();
-    const [message, setMessage] = React.useState('');
     const realtimeStatus = useRealtimeStatus();
     const socketLastConnectedAt = useSocketStatus().lastConnectedAt;
     const { messages, isLoaded } = useSessionMessages(sessionId);
@@ -327,22 +449,26 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
     const availableModes = React.useMemo(() => (
         getAvailablePermissionModes(flavor, session.metadata, t)
     ), [flavor, session.metadata]);
+    const agentDefaultOverrides = useSetting('agentDefaultOverrides');
+    const effectiveAgentDefaults = React.useMemo(() => (
+        resolveAgentDefaultConfig(agentDefaultOverrides, flavor)
+    ), [agentDefaultOverrides, flavor]);
 
     const permissionMode = React.useMemo<PermissionMode | null>(() => (
         resolveCurrentOption(availableModes, [
             session.permissionMode,
+            effectiveAgentDefaults.permissionMode,
             session.metadata?.currentOperatingModeCode,
-            getDefaultPermissionModeKey(flavor),
         ])
-    ), [availableModes, session.permissionMode, session.metadata?.currentOperatingModeCode, flavor]);
+    ), [availableModes, session.permissionMode, effectiveAgentDefaults.permissionMode, session.metadata?.currentOperatingModeCode]);
 
     const modelMode = React.useMemo<ModelMode | null>(() => (
         resolveCurrentOption(availableModels, [
             session.modelMode,
+            effectiveAgentDefaults.modelMode,
             session.metadata?.currentModelCode,
-            getDefaultModelKey(flavor),
         ])
-    ), [availableModels, session.modelMode, session.metadata?.currentModelCode, flavor]);
+    ), [availableModels, session.modelMode, effectiveAgentDefaults.modelMode, session.metadata?.currentModelCode]);
 
     // Effort level state
     const modelKey = modelMode?.key ?? 'default';
@@ -352,9 +478,9 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
     const effortLevel = React.useMemo<EffortLevel | null>(() => (
         resolveCurrentOption(availableEffortLevels, [
             session.effortLevel,
-            getDefaultEffortKeyForModel(flavor, modelKey),
+            effectiveAgentDefaults.effortLevel,
         ])
-    ), [availableEffortLevels, session.effortLevel, flavor, modelKey]);
+    ), [availableEffortLevels, session.effortLevel, effectiveAgentDefaults.effortLevel]);
 
     const sessionStatus = useSessionStatus(session);
     const sessionUsage = useSessionUsage(sessionId);
@@ -407,12 +533,15 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
         router.replace(`/session/${encodeURIComponent(spawnResult.sessionId)}`);
     });
 
-    // Use draft hook for auto-saving message drafts
-    const { clearDraft } = useDraft(sessionId, message, setMessage);
-
     // Image attachment state (expImageUpload feature flag)
     const expImageUpload = useSetting('expImageUpload');
     const { selectedImages, pickImages, removeImage, clearImages, addImages } = useImagePicker();
+
+    // ChatComposer owns the message state + useDraft subscription. We only
+    // hold an imperative handle so handleSend can read the live text and
+    // clear it without subscribing to it (which would re-render the whole
+    // SessionViewLoaded tree on every keystroke).
+    const composerHandleRef = React.useRef<ChatComposerHandle | null>(null);
 
     // Handle dismissing CLI version warning
     const handleDismissCliWarning = React.useCallback(() => {
@@ -448,6 +577,50 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
             marginTop: 0 // No marginTop needed since header is handled by parent
         },
     }), []);
+
+    // handleSend reads the live message via the composer ref, so it doesn't
+    // need to re-create on every keystroke.
+    const handleSend = React.useCallback(() => {
+        const liveMessage = composerHandleRef.current?.getMessage() ?? '';
+        if (liveMessage.trim() || (expImageUpload && selectedImages.length > 0)) {
+            const attachments = expImageUpload ? selectedImages : undefined;
+            composerHandleRef.current?.clearMessage();
+            if (expImageUpload) clearImages();
+            sync.sendMessage(sessionId, liveMessage, { source: 'chat', attachments });
+        }
+    }, [sessionId, expImageUpload, selectedImages, clearImages]);
+
+    const handleAbort = React.useCallback(() => {
+        storage.getState().resetSessionAgentOverrides(sessionId);
+        sessionAbort(sessionId);
+    }, [sessionId]);
+
+    const handleFileViewerPress = React.useCallback(() => {
+        router.push(`/session/${sessionId}/files`);
+    }, [router, sessionId]);
+
+    const handleAutocompleteSuggestions = React.useCallback((query: string) => (
+        getSuggestions(sessionId, query)
+    ), [sessionId]);
+
+    const connectionStatus = React.useMemo(() => ({
+        text: sessionStatus.statusText,
+        color: sessionStatus.statusColor,
+        dotColor: sessionStatus.statusDotColor,
+        isPulsing: sessionStatus.isPulsing,
+    }), [sessionStatus.statusText, sessionStatus.statusColor, sessionStatus.statusDotColor, sessionStatus.isPulsing]);
+
+    const usageData = React.useMemo(() => {
+        const source = sessionUsage ?? session.latestUsage;
+        if (!source) return undefined;
+        return {
+            inputTokens: source.inputTokens,
+            outputTokens: source.outputTokens,
+            cacheCreation: source.cacheCreation,
+            cacheRead: source.cacheRead,
+            contextSize: source.contextSize,
+        };
+    }, [sessionUsage, session.latestUsage]);
 
 
     // Handle microphone button press - memoized to prevent button flashing
@@ -547,10 +720,9 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
     ) : null;
 
     const composer = (
-        <AgentInput
+        <ChatComposer
+            composerHandleRef={composerHandleRef}
             placeholder={t('session.inputPlaceholder')}
-            value={message}
-            onChangeText={setMessage}
             sessionId={sessionId}
             permissionMode={permissionMode}
             onPermissionModeChange={updatePermissionMode}
@@ -562,47 +734,22 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
             availableEffortLevels={availableEffortLevels}
             onEffortLevelChange={updateEffortLevel}
             metadata={session.metadata}
-            connectionStatus={{
-                text: sessionStatus.statusText,
-                color: sessionStatus.statusColor,
-                dotColor: sessionStatus.statusDotColor,
-                isPulsing: sessionStatus.isPulsing
-            }}
+            connectionStatus={connectionStatus}
             blockSend={false}
-            onSend={() => {
-                if (message.trim() || (expImageUpload && selectedImages.length > 0)) {
-                    const attachments = expImageUpload ? selectedImages : undefined;
-                    setMessage('');
-                    clearDraft();
-                    if (expImageUpload) clearImages();
-                    sync.sendMessage(sessionId, message, { source: 'chat', attachments });
-                }
-            }}
+            onSend={handleSend}
             onMicPress={isDisconnected ? undefined : micButtonState.onMicPress}
             isMicActive={isDisconnected ? false : micButtonState.isMicActive}
-            onAbort={isDisconnected ? undefined : () => sessionAbort(sessionId)}
+            onAbort={isDisconnected ? undefined : handleAbort}
             showAbortButton={sessionStatus.state === 'thinking' || sessionStatus.state === 'waiting'}
             onClear={canRestart ? restartSession : undefined}
-            onFileViewerPress={experiments && !isTablet ? () => router.push(`/session/${sessionId}/files`) : undefined}
+            onFileViewerPress={experiments && !isTablet ? handleFileViewerPress : undefined}
             selectedImages={expImageUpload ? selectedImages : undefined}
             onPickImages={expImageUpload ? pickImages : undefined}
             onRemoveImage={expImageUpload ? removeImage : undefined}
             onAddImages={expImageUpload ? addImages : undefined}
-            autocompletePrefixes={['@', '/']}
-            autocompleteSuggestions={(query) => getSuggestions(sessionId, query)}
-            usageData={sessionUsage ? {
-                inputTokens: sessionUsage.inputTokens,
-                outputTokens: sessionUsage.outputTokens,
-                cacheCreation: sessionUsage.cacheCreation,
-                cacheRead: sessionUsage.cacheRead,
-                contextSize: sessionUsage.contextSize
-            } : session.latestUsage ? {
-                inputTokens: session.latestUsage.inputTokens,
-                outputTokens: session.latestUsage.outputTokens,
-                cacheCreation: session.latestUsage.cacheCreation,
-                cacheRead: session.latestUsage.cacheRead,
-                contextSize: session.latestUsage.contextSize
-            } : undefined}
+            autocompletePrefixes={AGENT_INPUT_AUTOCOMPLETE_PREFIXES}
+            autocompleteSuggestions={handleAutocompleteSuggestions}
+            usageData={usageData}
             alwaysShowContextSize={alwaysShowContextSize}
             zenMode={zenMode}
         />

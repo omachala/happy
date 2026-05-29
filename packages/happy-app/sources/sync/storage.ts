@@ -23,13 +23,11 @@ import { Purchases, customerInfoToPurchases } from "./purchases";
 import { Profile } from "./profile";
 import { UserProfile, RelationshipUpdatedEvent } from "./friendTypes";
 import { loadSettings, loadLocalSettings, saveLocalSettings, saveSettings, loadPurchases, savePurchases, loadProfile, saveProfile, loadSessionDrafts, saveSessionDrafts, loadSessionPermissionModes, saveSessionPermissionModes, loadSessionModelModes, saveSessionModelModes, loadSessionEffortLevels, saveSessionEffortLevels } from "./persistence";
-import type { PermissionModeKey } from '@/components/PermissionModeSelector';
 import type { CustomerInfo } from './revenueCat/types';
 import React from "react";
 import { sync } from "./sync";
 import { getCurrentRealtimeSessionId, getVoiceSession } from '@/realtime/RealtimeSession';
 import { isMutableTool } from "@/components/tools/knownTools";
-import { projectManager } from "./projectManager";
 import { DecryptedArtifact } from "./artifactTypes";
 import { FeedItem } from "./feedTypes";
 
@@ -54,11 +52,6 @@ function isSessionActive(session: { active: boolean; activeAt: number }): boolea
     return session.active;
 }
 
-function isSandboxEnabled(metadata: Session['metadata'] | null | undefined): boolean {
-    const sandbox = metadata?.sandbox;
-    return !!sandbox && typeof sandbox === 'object' && (sandbox as { enabled?: unknown }).enabled === true;
-}
-
 // Known entitlement IDs
 export type KnownEntitlements = 'pro';
 
@@ -67,6 +60,15 @@ interface SessionMessages {
     messagesMap: Record<string, Message>;
     reducerState: ReducerState;
     isLoaded: boolean;
+    // True when the server reported more older messages exist beyond the
+    // oldest one we currently have. Drives the "load older" affordance in
+    // the chat list. Defaults to false until the initial fetch resolves —
+    // the UI must not show a stale paginate-up spinner before that.
+    hasMoreOlder: boolean;
+    // True while a backward (older-history) page is in flight. Used by the
+    // chat list to render a loading footer at the top of the inverted list
+    // and to suppress duplicate triggers from FlatList onEndReached.
+    isLoadingOlder: boolean;
 }
 
 // Machine type is now imported from storageTypes - represents persisted machine data
@@ -177,6 +179,8 @@ interface StorageState {
     applyReady: () => void;
     applyMessages: (sessionId: string, messages: NormalizedMessage[]) => { changed: string[], hasReadyEvent: boolean };
     applyMessagesLoaded: (sessionId: string) => void;
+    applyOlderMessagesPagination: (sessionId: string, info: { hasMore: boolean }) => void;
+    applyOlderMessagesLoading: (sessionId: string, isLoading: boolean) => void;
     applySettings: (settings: Settings, version: number) => void;
     applySettingsLocal: (settings: Partial<Settings>) => void;
     applyLocalSettings: (settings: Partial<LocalSettings>) => void;
@@ -196,20 +200,16 @@ interface StorageState {
     setSocketStatus: (status: 'disconnected' | 'connecting' | 'connected' | 'error') => void;
     getActiveSessions: () => Session[];
     updateSessionDraft: (sessionId: string, draft: string | null) => void;
-    updateSessionPermissionMode: (sessionId: string, mode: string) => void;
-    updateSessionModelMode: (sessionId: string, mode: string) => void;
-    updateSessionEffortLevel: (sessionId: string, level: string) => void;
+    updateSessionPermissionMode: (sessionId: string, mode: string | null) => void;
+    updateSessionModelMode: (sessionId: string, mode: string | null) => void;
+    updateSessionEffortLevel: (sessionId: string, level: string | null) => void;
+    resetSessionAgentOverrides: (sessionId: string) => void;
     // Artifact methods
     applyArtifacts: (artifacts: DecryptedArtifact[]) => void;
     addArtifact: (artifact: DecryptedArtifact) => void;
     updateArtifact: (artifact: DecryptedArtifact) => void;
     deleteArtifact: (artifactId: string) => void;
     deleteSession: (sessionId: string) => void;
-    // Project management methods
-    getProjects: () => import('./projectManager').Project[];
-    getProject: (projectId: string) => import('./projectManager').Project | null;
-    getProjectForSession: (sessionId: string) => import('./projectManager').Project | null;
-    getProjectSessions: (projectId: string) => string[];
     // Friend management methods
     applyFriends: (friends: UserProfile[]) => void;
     applyRelationshipUpdate: (event: RelationshipUpdatedEvent) => void;
@@ -405,23 +405,27 @@ export const storage = create<StorageState>()((set, get) => {
                 // Use centralized resolver for consistent state management
                 const presence = resolveSessionOnlineState(session);
 
-                // Preserve existing draft and permission mode if they exist, or load from saved data
+                // Preserve explicit local overrides if they exist, or load from
+                // saved data. Missing/null means "no user override"; the UI and
+                // CLI resolve code defaults later.
                 const existingDraft = state.sessions[session.id]?.draft;
                 const savedDraft = savedDrafts[session.id];
-                const existingPermissionMode = state.sessions[session.id]?.permissionMode;
-                const savedPermissionMode = savedPermissionModes[session.id];
-                const defaultPermissionMode: PermissionModeKey = isSandboxEnabled(session.metadata) ? 'bypassPermissions' : 'default';
-                const resolvedPermissionMode: PermissionModeKey =
-                    (existingPermissionMode && existingPermissionMode !== 'default' ? existingPermissionMode : undefined) ||
-                    (savedPermissionMode && savedPermissionMode !== 'default' ? savedPermissionMode : undefined) ||
-                    (session.permissionMode && session.permissionMode !== 'default' ? session.permissionMode : undefined) ||
-                    defaultPermissionMode;
+                const savedPermissionMode = savedPermissionModes[session.id] ?? null;
+                const existingPermissionModeRaw = state.sessions[session.id]?.permissionMode ?? null;
+                const existingPermissionMode = existingPermissionModeRaw === 'default' && savedPermissionMode !== 'default'
+                    ? null
+                    : existingPermissionModeRaw;
+                const resolvedPermissionMode = existingPermissionMode ?? savedPermissionMode ?? session.permissionMode ?? null;
 
                 // Restore model mode / effort level from MMKV on first load — server
                 // does not sync these, and they used to reset on every app restart (#1028).
-                const existingModelMode = state.sessions[session.id]?.modelMode;
-                const resolvedModelMode = existingModelMode ?? savedModelModes[session.id] ?? session.modelMode ?? null;
-                const existingEffortLevel = state.sessions[session.id]?.effortLevel;
+                const savedModelMode = savedModelModes[session.id] ?? null;
+                const existingModelModeRaw = state.sessions[session.id]?.modelMode ?? null;
+                const existingModelMode = existingModelModeRaw === 'default' && savedModelMode !== 'default'
+                    ? null
+                    : existingModelModeRaw;
+                const resolvedModelMode = existingModelMode ?? savedModelMode ?? session.modelMode ?? null;
+                const existingEffortLevel = state.sessions[session.id]?.effortLevel ?? null;
                 const resolvedEffortLevel = existingEffortLevel ?? savedEffortLevels[session.id] ?? session.effortLevel ?? null;
 
                 mergedSessions[session.id] = {
@@ -537,7 +541,9 @@ export const storage = create<StorageState>()((set, get) => {
                         messages: messagesArray,
                         messagesMap: mergedMessagesMap,
                         reducerState: existingSessionMessages.reducerState, // The reducer modifies state in-place, so this has the updates
-                        isLoaded: existingSessionMessages.isLoaded
+                        isLoaded: existingSessionMessages.isLoaded,
+                        hasMoreOlder: existingSessionMessages.hasMoreOlder,
+                        isLoadingOlder: existingSessionMessages.isLoadingOlder
                     };
 
                     // IMPORTANT: Copy latestUsage from reducerState to Session for immediate availability
@@ -577,15 +583,6 @@ export const storage = create<StorageState>()((set, get) => {
                 mergedSessions,
                 unreadSessionIds,
             );
-
-            // Update project manager with current sessions and machines
-            const machineMetadataMap = new Map<string, any>();
-            Object.values(state.machines).forEach(machine => {
-                if (machine.metadata) {
-                    machineMetadataMap.set(machine.id, machine.metadata);
-                }
-            });
-            projectManager.updateSessions(Object.values(mergedSessions), machineMetadataMap);
 
             return {
                 ...state,
@@ -634,11 +631,13 @@ export const storage = create<StorageState>()((set, get) => {
             set((state) => {
 
                 // Resolve session messages state
-                const existingSession = state.sessionMessages[sessionId] || {
+                const existingSession: SessionMessages = state.sessionMessages[sessionId] || {
                     messages: [],
                     messagesMap: {},
                     reducerState: createReducer(),
-                    isLoaded: false
+                    isLoaded: false,
+                    hasMoreOlder: false,
+                    isLoadingOlder: false
                 };
 
                 // Get the session's agentState if available
@@ -777,7 +776,9 @@ export const storage = create<StorageState>()((set, get) => {
                             reducerState,
                             messages,
                             messagesMap,
-                            isLoaded: true
+                            isLoaded: true,
+                            hasMoreOlder: false,
+                            isLoadingOlder: false
                         } satisfies SessionMessages
                     }
                 };
@@ -795,6 +796,46 @@ export const storage = create<StorageState>()((set, get) => {
             }
 
             return result;
+        }),
+        applyOlderMessagesPagination: (sessionId: string, info: { hasMore: boolean }) => set((state) => {
+            const existing = state.sessionMessages[sessionId];
+            if (!existing) {
+                // Pagination metadata is only meaningful once the session has
+                // a SessionMessages entry. The fetch path always creates one
+                // through applyMessages / applyMessagesLoaded before calling
+                // this — but if for any reason it hasn't, ignore the update
+                // rather than synthesize a partial entry.
+                return state;
+            }
+            return {
+                ...state,
+                sessionMessages: {
+                    ...state.sessionMessages,
+                    [sessionId]: {
+                        ...existing,
+                        hasMoreOlder: info.hasMore
+                    } satisfies SessionMessages
+                }
+            };
+        }),
+        applyOlderMessagesLoading: (sessionId: string, isLoading: boolean) => set((state) => {
+            const existing = state.sessionMessages[sessionId];
+            if (!existing) {
+                return state;
+            }
+            if (existing.isLoadingOlder === isLoading) {
+                return state;
+            }
+            return {
+                ...state,
+                sessionMessages: {
+                    ...state.sessionMessages,
+                    [sessionId]: {
+                        ...existing,
+                        isLoadingOlder: isLoading
+                    } satisfies SessionMessages
+                }
+            };
         }),
         applySettingsLocal: (settings: Partial<Settings>) => set((state) => {
             saveSettings(applySettings(state.settings, settings), state.settingsVersion ?? 0);
@@ -849,13 +890,25 @@ export const storage = create<StorageState>()((set, get) => {
                 [pathKey]: status
             }
         })),
-        applyGitStatusFiles: (pathKey: string, files: GitStatusFiles | null) => set((state) => ({
-            ...state,
-            pathGitStatusFiles: {
-                ...state.pathGitStatusFiles,
-                [pathKey]: files
+        applyGitStatusFiles: (pathKey: string, files: GitStatusFiles | null) => set((state) => {
+            // Short-circuit on no-op writes. gitStatusSync.invalidate fires on every
+            // mutable-tool message and on every update-session, but most of those
+            // don't actually change the file set. Without this guard, every fetch
+            // produces a fresh object reference, the useSessionGitStatusFiles
+            // subscription fires, and AllFilesDiffView nukes its scroll position
+            // and re-runs every git diff. fast-deep-equal handles arrays + nested
+            // objects so we don't have to enumerate fields.
+            if (equal(state.pathGitStatusFiles[pathKey] ?? null, files)) {
+                return state;
             }
-        })),
+            return {
+                ...state,
+                pathGitStatusFiles: {
+                    ...state.pathGitStatusFiles,
+                    [pathKey]: files
+                }
+            };
+        }),
         applyProjectFiles: (pathKey: string, files: ProjectFilesList | null) => set((state) => ({
             ...state,
             pathProjectFiles: {
@@ -964,7 +1017,7 @@ export const storage = create<StorageState>()((set, get) => {
                 sessionListViewData: buildSessionListViewData(updatedSessions)
             };
         }),
-        updateSessionPermissionMode: (sessionId: string, mode: string) => set((state) => {
+        updateSessionPermissionMode: (sessionId: string, mode: string | null) => set((state) => {
             const session = state.sessions[sessionId];
             if (!session) return state;
 
@@ -980,12 +1033,12 @@ export const storage = create<StorageState>()((set, get) => {
             // Collect all permission modes for persistence
             const allModes: Record<string, string> = {};
             Object.entries(updatedSessions).forEach(([id, sess]) => {
-                if (sess.permissionMode && sess.permissionMode !== 'default') {
+                if (sess.permissionMode) {
                     allModes[id] = sess.permissionMode;
                 }
             });
 
-            // Persist permission modes (only non-default values to save space)
+            // Persist only explicit overrides; null/missing means code default.
             saveSessionPermissionModes(allModes);
 
             // No need to rebuild sessionListViewData since permission mode doesn't affect the list display
@@ -994,7 +1047,7 @@ export const storage = create<StorageState>()((set, get) => {
                 sessions: updatedSessions
             };
         }),
-        updateSessionModelMode: (sessionId: string, mode: string) => set((state) => {
+        updateSessionModelMode: (sessionId: string, mode: string | null) => set((state) => {
             const session = state.sessions[sessionId];
             if (!session) return state;
 
@@ -1007,11 +1060,10 @@ export const storage = create<StorageState>()((set, get) => {
                 }
             };
 
-            // Persist model modes so the selection survives app restart (#1028).
-            // Only non-default values are kept — matches the permissionMode pattern above.
+            // Persist only explicit overrides; null/missing means code default.
             const allModes: Record<string, string> = {};
             Object.entries(updatedSessions).forEach(([id, sess]) => {
-                if (sess.modelMode && sess.modelMode !== 'default') {
+                if (sess.modelMode) {
                     allModes[id] = sess.modelMode;
                 }
             });
@@ -1023,7 +1075,7 @@ export const storage = create<StorageState>()((set, get) => {
                 sessions: updatedSessions
             };
         }),
-        updateSessionEffortLevel: (sessionId: string, level: string) => set((state) => {
+        updateSessionEffortLevel: (sessionId: string, level: string | null) => set((state) => {
             const session = state.sessions[sessionId];
             if (!session) return state;
 
@@ -1049,11 +1101,37 @@ export const storage = create<StorageState>()((set, get) => {
                 sessions: updatedSessions
             };
         }),
-        // Project management methods
-        getProjects: () => projectManager.getProjects(),
-        getProject: (projectId: string) => projectManager.getProject(projectId),
-        getProjectForSession: (sessionId: string) => projectManager.getProjectForSession(sessionId),
-        getProjectSessions: (projectId: string) => projectManager.getProjectSessions(projectId),
+        resetSessionAgentOverrides: (sessionId: string) => set((state) => {
+            const session = state.sessions[sessionId];
+            if (!session) return state;
+
+            const updatedSessions = {
+                ...state.sessions,
+                [sessionId]: {
+                    ...session,
+                    permissionMode: null,
+                    modelMode: null,
+                    effortLevel: null,
+                }
+            };
+
+            const permissionModes: Record<string, string> = {};
+            const modelModes: Record<string, string> = {};
+            const effortLevels: Record<string, string> = {};
+            Object.entries(updatedSessions).forEach(([id, sess]) => {
+                if (sess.permissionMode) permissionModes[id] = sess.permissionMode;
+                if (sess.modelMode) modelModes[id] = sess.modelMode;
+                if (sess.effortLevel) effortLevels[id] = sess.effortLevel;
+            });
+            saveSessionPermissionModes(permissionModes);
+            saveSessionModelModes(modelModes);
+            saveSessionEffortLevels(effortLevels);
+
+            return {
+                ...state,
+                sessions: updatedSessions
+            };
+        }),
         getSessionPathKey: (sessionId: string): string | null => {
             const session = get().sessions[sessionId];
             if (!session?.metadata?.machineId || !session?.metadata?.path) return null;
@@ -1351,12 +1429,19 @@ export function useSession(id: string): Session | null {
 
 const emptyArray: unknown[] = [];
 
-export function useSessionMessages(sessionId: string): { messages: Message[], isLoaded: boolean } {
+export function useSessionMessages(sessionId: string): {
+    messages: Message[],
+    isLoaded: boolean,
+    hasMoreOlder: boolean,
+    isLoadingOlder: boolean
+} {
     return storage(useShallow((state) => {
         const session = state.sessionMessages[sessionId];
         return {
             messages: session?.messages ?? emptyArray,
-            isLoaded: session?.isLoaded ?? false
+            isLoaded: session?.isLoaded ?? false,
+            hasMoreOlder: session?.hasMoreOlder ?? false,
+            isLoadingOlder: session?.isLoadingOlder ?? false
         };
     }));
 }
@@ -1426,24 +1511,6 @@ export function useLocalSettingMutable<K extends keyof LocalSettings>(name: K): 
     const value = useLocalSetting(name);
     return [value, setValue];
 }
-
-// Project management hooks
-export function useProjects() {
-    return storage(useShallow((state) => state.getProjects()));
-}
-
-export function useProject(projectId: string | null) {
-    return storage(useShallow((state) => projectId ? state.getProject(projectId) : null));
-}
-
-export function useProjectForSession(sessionId: string | null) {
-    return storage(useShallow((state) => sessionId ? state.getProjectForSession(sessionId) : null));
-}
-
-export function useProjectSessions(projectId: string | null) {
-    return storage(useShallow((state) => projectId ? state.getProjectSessions(projectId) : []));
-}
-
 
 export function useLocalSetting<K extends keyof LocalSettings>(name: K): LocalSettings[K] {
     return storage(useShallow((state) => state.localSettings[name]));
