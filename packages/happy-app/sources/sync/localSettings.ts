@@ -17,8 +17,6 @@ export const LocalSettingsSchema = z.object({
     zenMode: z.boolean().describe('Hide all sidebars and non-essential UI for focused work'),
     // CLI version acknowledgments - keyed by machineId
     acknowledgedCliVersions: z.record(z.string(), z.string()).describe('Acknowledged CLI versions per machine'),
-    // Anthropic Claude Code OAuth access token (copy from `security find-generic-password -s "Claude Code-credentials" -w` then jq .claudeAiOauth.accessToken)
-    anthropicOauthAccessToken: z.string().nullable().describe('Anthropic OAuth access token for /api/oauth/usage queries'),
 });
 
 //
@@ -45,7 +43,6 @@ export const localSettingsDefaults: LocalSettings = {
     verboseLogging: false,
     zenMode: false,
     acknowledgedCliVersions: {},
-    anthropicOauthAccessToken: null,
 };
 Object.freeze(localSettingsDefaults);
 

@@ -1,11 +1,11 @@
 import * as React from 'react';
-import { useLocalSetting } from '@/sync/storage';
+import { useAuth } from '@/auth/AuthContext';
+import { getServerUrl } from '@/sync/serverConfig';
 
-// Polls Anthropic's /api/oauth/usage endpoint using the user's Claude Code
-// OAuth access token (pasted once into Settings). The token is the same one
-// `claude` reads from the macOS Keychain entry "Claude Code-credentials" —
-// see the omachala/claude-usage gist for the CLI version of this call.
-// On token absence or fetch failure we return null and let the UI hide.
+// Polls happy-server's /v1/account/anthropic/usage endpoint, which forwards
+// to Anthropic's OAuth usage API using the user's CLI-registered token
+// (server-side refresh handled). No token paste needed in-app — relies on
+// `happy connect claude` having been run on at least one machine.
 
 export type ClaudeUsage = {
     fiveHour: { utilization: number; resetsAt: string | null };
@@ -18,7 +18,6 @@ export type ClaudeUsage = {
     } | null;
 };
 
-const ENDPOINT = 'https://api.anthropic.com/api/oauth/usage';
 const REFRESH_MS = 60_000;
 
 export function useClaudeUsage(): {
@@ -26,7 +25,8 @@ export function useClaudeUsage(): {
     error: string | null;
     refresh: () => void;
 } {
-    const token = useLocalSetting('anthropicOauthAccessToken');
+    const auth = useAuth();
+    const token = auth.credentials?.token ?? null;
     const [usage, setUsage] = React.useState<ClaudeUsage | null>(null);
     const [error, setError] = React.useState<string | null>(null);
     const [tick, setTick] = React.useState(0);
@@ -40,14 +40,16 @@ export function useClaudeUsage(): {
         let cancelled = false;
         (async () => {
             try {
-                const res = await fetch(ENDPOINT, {
-                    headers: {
-                        'Authorization': `Bearer ${token}`,
-                        'anthropic-beta': 'oauth-2025-04-20',
-                        'User-Agent': 'claude-code/2.0.32',
-                    },
+                const res = await fetch(`${getServerUrl()}/v1/account/anthropic/usage`, {
+                    headers: { 'Authorization': `Bearer ${token}` },
                 });
                 if (cancelled) return;
+                if (res.status === 404) {
+                    // Account not connected on the server — silently no-op.
+                    setUsage(null);
+                    setError(null);
+                    return;
+                }
                 if (!res.ok) {
                     setError(`HTTP ${res.status}`);
                     return;
