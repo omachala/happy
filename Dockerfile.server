@@ -33,7 +33,10 @@ COPY packages/happy-wire ./packages/happy-wire
 COPY packages/happy-server ./packages/happy-server
 
 RUN pnpm --filter @slopus/happy-wire build
-RUN pnpm --filter happy-server-self-host build
+# Skip happy-server-self-host build: it produces dist/standalone.mjs via bun
+# (used by the bundled CLI subcommand), but our runtime uses `tsx start` from
+# source — no bundling needed. Avoids installing bun in the image.
+RUN pnpm --filter happy-server-self-host typecheck
 
 # Stage 3: runtime
 FROM node:20 AS runner
