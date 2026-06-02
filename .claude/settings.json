@@ -7,5 +7,17 @@
             "Bash(npm view *)",
             "Bash(pnpm lint)"
         ]
+    },
+    "hooks": {
+        "UserPromptSubmit": [
+            {
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": "COUNTER_FILE=\"${TMPDIR:-/tmp}/happy_title_check_${CLAUDE_SESSION_ID:-shared}\"; COUNT=$(cat \"$COUNTER_FILE\" 2>/dev/null || echo 0); COUNT=$((COUNT + 1)); echo \"$COUNT\" > \"$COUNTER_FILE\"; if [ $((COUNT % 10)) -eq 0 ]; then printf '{\"hookSpecificOutput\":{\"hookEventName\":\"UserPromptSubmit\",\"additionalContext\":\"SYSTEM REMINDER: %d messages into this conversation. Re-evaluate whether the current chat title is still accurate and specific. If it has drifted or is too generic, call mcp__happy__change_title now before responding to the user.\"}}' \"$COUNT\"; fi"
+                    }
+                ]
+            }
+        ]
     }
 }
