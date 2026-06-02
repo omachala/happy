@@ -611,6 +611,13 @@ function normalizeSessionEnvelope(
             } satisfies NormalizedMessage;
         }
 
+        // Old CLI versions (pre-isMeta filtering) emitted skill injection bodies
+        // as plain agent text envelopes. Claude Code always prepends this prefix
+        // before the skill file content, so it's a reliable signal to drop them.
+        if (envelope.ev.text.trimStart().startsWith('Base directory for this skill:')) {
+            return null;
+        }
+
         return {
             id: messageId,
             localId,
