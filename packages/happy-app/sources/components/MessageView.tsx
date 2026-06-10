@@ -51,6 +51,7 @@ function RenderBlock(props: {
       return (
         <UserTextBlock
           message={props.message}
+          metadata={props.metadata}
           sessionId={props.sessionId}
           onForkFromUserMessage={props.onForkFromUserMessage}
         />
@@ -95,6 +96,7 @@ function collapseCommandInvocation(text: string): string | null {
 
 function UserTextBlock(props: {
   message: UserTextMessage;
+  metadata: Metadata | null;
   sessionId: string;
   onForkFromUserMessage?: (messageId: string, rewindPointId: string | undefined, messageText: string) => void;
 }) {
