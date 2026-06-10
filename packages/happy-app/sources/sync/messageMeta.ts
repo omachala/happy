@@ -1,6 +1,6 @@
 import type { Session } from './storageTypes';
 import type { Settings } from './settings';
-import { getAgentDefaultOverride } from './agentDefaults';
+import { getAgentDefaultOverride, getCodeAgentDefaults } from './agentDefaults';
 import type { PermissionModeKey } from '@/components/PermissionModeSelector';
 
 export type MessageModeMeta = {
@@ -14,13 +14,16 @@ export function resolveMessageModeMeta(
     settings?: Pick<Settings, 'agentDefaultOverrides'>,
 ): MessageModeMeta {
     const agentOverrides = getAgentDefaultOverride(settings?.agentDefaultOverrides, session.metadata?.flavor);
+    const codeDefaults = getCodeAgentDefaults(session.metadata?.flavor);
     const meta: MessageModeMeta = {};
 
-    if (session.permissionMode !== null && session.permissionMode !== undefined) {
-        meta.permissionMode = session.permissionMode;
-    } else if (agentOverrides.permissionMode !== undefined) {
-        meta.permissionMode = agentOverrides.permissionMode;
-    }
+    // Always send an explicit permissionMode so the daemon never falls back to
+    // its own internal default ('yolo'). The daemon's permission handler only
+    // checks for 'bypassPermissions', not 'yolo', so omitting the field causes
+    // yolo/bypassPermissions sessions to incorrectly prompt for confirmation.
+    meta.permissionMode = session.permissionMode
+        ?? agentOverrides.permissionMode
+        ?? codeDefaults.permissionMode;
 
     const modelMode = session.modelMode ?? agentOverrides.modelMode;
     if (modelMode !== undefined) {

@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { resolveMessageModeMeta } from './messageMeta';
 
 describe('resolveMessageModeMeta', () => {
-    it('omits agent mode metadata when nothing was explicitly overridden', () => {
+    it('always sends permissionMode from hardcoded defaults when nothing overridden', () => {
         const meta = resolveMessageModeMeta({
             permissionMode: null,
             modelMode: null,
@@ -10,7 +10,9 @@ describe('resolveMessageModeMeta', () => {
             metadata: { flavor: 'codex' },
         } as any);
 
-        expect(meta).toEqual({});
+        // codex default is 'yolo' — must always be sent so the daemon never
+        // falls back to its own internal default and misroutes permissions.
+        expect(meta).toEqual({ permissionMode: 'yolo' });
     });
 
     it('sends explicit per-session overrides', () => {
@@ -82,6 +84,7 @@ describe('resolveMessageModeMeta', () => {
             metadata: { flavor: 'claude' },
         } as any);
 
-        expect(meta).toEqual({ model: null });
+        // permissionMode is always included (claude default = 'bypassPermissions')
+        expect(meta).toEqual({ permissionMode: 'bypassPermissions', model: null });
     });
 });
