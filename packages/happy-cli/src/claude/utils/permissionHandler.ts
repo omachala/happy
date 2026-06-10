@@ -10,7 +10,6 @@ import { PermissionResult } from "../sdk/types";
 import { Session } from "../session";
 import { EnhancedMode, PermissionMode } from "../loop";
 import { getToolDescriptor } from "./getToolDescriptor";
-import { mapToClaudeMode } from "./permissionMode";
 
 interface PermissionResponse {
     id: string;
@@ -55,7 +54,7 @@ export class PermissionHandler {
     }
 
     handleModeChange(mode: PermissionMode) {
-        this.permissionMode = mapToClaudeMode(mode);
+        this.permissionMode = mode;
     }
 
     /**
