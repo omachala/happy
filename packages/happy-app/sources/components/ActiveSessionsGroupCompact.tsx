@@ -141,6 +141,10 @@ const ProjectTile = React.memo(({ group, selected, isLast }: {
         [group.sessions],
     );
     const lead = React.useMemo(() => pickLeadSession(group.sessions), [group.sessions]);
+    const groupHasUnread = React.useMemo(
+        () => group.sessions.some(s => s.hasUnread),
+        [group.sessions],
+    );
 
     const statusColor = lead.hasUnread
         ? { color: '#007AFF', pulsing: false }
@@ -177,11 +181,11 @@ const ProjectTile = React.memo(({ group, selected, isLast }: {
                 {...menuProps}
             >
                 <View style={styles.tileTextColumn}>
-                    <Text style={styles.tileTitle} numberOfLines={1}>
+                    <Text style={[styles.tileTitle, groupHasUnread && styles.tileTitleUnread]} numberOfLines={1}>
                         {group.projectName}
                     </Text>
                     {mostRecent.name ? (
-                        <Text style={styles.tileSubtitle} numberOfLines={1}>
+                        <Text style={[styles.tileSubtitle, groupHasUnread && styles.tileSubtitleUnread]} numberOfLines={1}>
                             {mostRecent.name}
                         </Text>
                     ) : null}
@@ -362,11 +366,18 @@ const stylesheet = StyleSheet.create((theme) => ({
         ...Typography.default('regular'),
         letterSpacing: -0.1,
     },
+    tileTitleUnread: {
+        ...Typography.default('semiBold'),
+    },
     tileSubtitle: {
         fontSize: 12,
         color: theme.colors.textSecondary,
         marginTop: 2,
         ...Typography.default('regular'),
+    },
+    tileSubtitleUnread: {
+        color: theme.colors.text,
+        ...Typography.default('semiBold'),
     },
     tileDot: {
         marginLeft: 10,
