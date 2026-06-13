@@ -2789,8 +2789,8 @@ async function syncInit(credentials: AuthCredentials, restore: boolean) {
     apiSocket.initialize({ endpoint: API_ENDPOINT, token: credentials.token }, encryption);
 
     // Wire socket status to storage
-    apiSocket.onStatusChange((status) => {
-        storage.getState().setSocketStatus(status);
+    apiSocket.onStatusChange((status, error) => {
+        storage.getState().setSocketStatus(status, error);
     });
 
     // Initialize sessions engine

@@ -47,7 +47,56 @@ export interface SyncSocketState {
     lastError: Error | null;
 }
 
+export interface SocketErrorDetails {
+    at: number;
+    kind: 'connect_error' | 'error' | 'disconnect';
+    message: string;
+    name?: string;
+    description?: string;
+    cause?: string;
+    stack?: string;
+    extra?: Record<string, unknown>;
+}
+
 export type SyncSocketListener = (state: SyncSocketState) => void;
+
+function serializeSocketError(
+    kind: SocketErrorDetails['kind'],
+    error: unknown,
+    extra?: Record<string, unknown>
+): SocketErrorDetails {
+    const result: SocketErrorDetails = {
+        at: Date.now(),
+        kind,
+        message: '',
+    };
+    const anyErr = error as any;
+    if (error instanceof Error) {
+        result.message = error.message;
+        result.name = error.name;
+        if (error.stack) result.stack = error.stack;
+    } else if (typeof error === 'string') {
+        result.message = error;
+    } else if (error != null) {
+        try { result.message = JSON.stringify(error); } catch { result.message = String(error); }
+    }
+    if (anyErr && anyErr.description !== undefined) {
+        try {
+            result.description = typeof anyErr.description === 'string'
+                ? anyErr.description
+                : JSON.stringify(anyErr.description);
+        } catch { /* ignore */ }
+    }
+    if (anyErr && anyErr.cause !== undefined) {
+        try {
+            result.cause = typeof anyErr.cause === 'string'
+                ? anyErr.cause
+                : JSON.stringify(anyErr.cause);
+        } catch { /* ignore */ }
+    }
+    if (extra) result.extra = extra;
+    return result;
+}
 
 //
 // Main Class
@@ -61,8 +110,9 @@ class ApiSocket {
     private encryption: Encryption | null = null;
     private messageHandlers: Map<string, (data: any) => void> = new Map();
     private reconnectedListeners: Set<() => void> = new Set();
-    private statusListeners: Set<(status: 'disconnected' | 'connecting' | 'connected' | 'error') => void> = new Set();
+    private statusListeners: Set<(status: 'disconnected' | 'connecting' | 'connected' | 'error', error: SocketErrorDetails | null) => void> = new Set();
     private currentStatus: 'disconnected' | 'connecting' | 'connected' | 'error' = 'disconnected';
+    private currentError: SocketErrorDetails | null = null;
 
     //
     // Initialization
@@ -120,10 +170,10 @@ class ApiSocket {
         return () => this.reconnectedListeners.delete(listener);
     };
 
-    onStatusChange = (listener: (status: 'disconnected' | 'connecting' | 'connected' | 'error') => void) => {
+    onStatusChange = (listener: (status: 'disconnected' | 'connecting' | 'connected' | 'error', error: SocketErrorDetails | null) => void) => {
         this.statusListeners.add(listener);
         // Immediately notify with current status
-        listener(this.currentStatus);
+        listener(this.currentStatus, this.currentError);
         return () => this.statusListeners.delete(listener);
     };
 
@@ -254,10 +304,20 @@ class ApiSocket {
         }
     }
 
-    private updateStatus(status: 'disconnected' | 'connecting' | 'connected' | 'error') {
-        if (this.currentStatus !== status) {
+    private updateStatus(
+        status: 'disconnected' | 'connecting' | 'connected' | 'error',
+        error: SocketErrorDetails | null = null
+    ) {
+        const prevStatus = this.currentStatus;
+        const prevError = this.currentError;
+        if (status === 'connected') {
+            this.currentError = null;
+        } else if (error) {
+            this.currentError = error;
+        }
+        if (prevStatus !== status || prevError !== this.currentError) {
             this.currentStatus = status;
-            this.statusListeners.forEach(listener => listener(status));
+            this.statusListeners.forEach(listener => listener(status, this.currentError));
         }
     }
 
@@ -276,11 +336,18 @@ class ApiSocket {
             }
         });
 
-        this.socket.on('disconnect', (reason) => {
+        this.socket.on('disconnect', (reason, description) => {
             if (this.isVerboseLogging()) {
-                console.log('🔌 SyncSocket: Disconnected', reason);
+                console.log('🔌 SyncSocket: Disconnected', reason, description);
             }
-            this.updateStatus('disconnected');
+            const details = serializeSocketError('disconnect', new Error(String(reason)), {
+                reason,
+                description: description ? (() => {
+                    try { return JSON.stringify(description); } catch { return String(description); }
+                })() : undefined,
+                endpoint: this.config?.endpoint,
+            });
+            this.updateStatus('disconnected', details);
         });
 
         // Error events
@@ -288,14 +355,18 @@ class ApiSocket {
             if (this.isVerboseLogging()) {
                 console.error('🔌 SyncSocket: Connection error', error);
             }
-            this.updateStatus('error');
+            this.updateStatus('error', serializeSocketError('connect_error', error, {
+                endpoint: this.config?.endpoint,
+            }));
         });
 
         this.socket.on('error', (error) => {
             if (this.isVerboseLogging()) {
                 console.error('🔌 SyncSocket: Error', error);
             }
-            this.updateStatus('error');
+            this.updateStatus('error', serializeSocketError('error', error, {
+                endpoint: this.config?.endpoint,
+            }));
         });
 
         // Message handling

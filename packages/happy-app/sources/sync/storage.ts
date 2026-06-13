@@ -26,6 +26,7 @@ import { loadSettings, loadLocalSettings, saveLocalSettings, saveSettings, loadP
 import type { CustomerInfo } from './revenueCat/types';
 import React from "react";
 import { sync } from "./sync";
+import type { SocketErrorDetails } from "./apiSocket";
 import { getCurrentRealtimeSessionId, getVoiceSession } from '@/realtime/RealtimeSession';
 import { isMutableTool } from "@/components/tools/knownTools";
 import { DecryptedArtifact } from "./artifactTypes";
@@ -170,6 +171,7 @@ interface StorageState {
     socketStatus: 'disconnected' | 'connecting' | 'connected' | 'error';
     socketLastConnectedAt: number | null;
     socketLastDisconnectedAt: number | null;
+    socketLastError: SocketErrorDetails | null;
     isDataReady: boolean;
     nativeUpdateStatus: { available: boolean; updateUrl?: string } | null;
     applySessions: (sessions: (Omit<Session, 'presence'> & { presence?: "online" | number })[]) => void;
@@ -197,7 +199,7 @@ interface StorageState {
     setRealtimeMode: (mode: 'idle' | 'agent-speaking' | 'user-speaking', immediate?: boolean) => void;
     clearRealtimeModeDebounce: () => void;
     incrementVoiceSessionGeneration: () => void;
-    setSocketStatus: (status: 'disconnected' | 'connecting' | 'connected' | 'error') => void;
+    setSocketStatus: (status: 'disconnected' | 'connecting' | 'connected' | 'error', error?: SocketErrorDetails | null) => void;
     getActiveSessions: () => Session[];
     updateSessionDraft: (sessionId: string, draft: string | null) => void;
     updateSessionPermissionMode: (sessionId: string, mode: string | null) => void;
@@ -366,6 +368,7 @@ export const storage = create<StorageState>()((set, get) => {
         socketStatus: 'disconnected',
         socketLastConnectedAt: null,
         socketLastDisconnectedAt: null,
+        socketLastError: null,
         isDataReady: false,
         nativeUpdateStatus: null,
         unreadSessionIds: new Set<string>(),
@@ -963,7 +966,7 @@ export const storage = create<StorageState>()((set, get) => {
             ...state,
             voiceSessionGeneration: state.voiceSessionGeneration + 1
         })),
-        setSocketStatus: (status: 'disconnected' | 'connecting' | 'connected' | 'error') => set((state) => {
+        setSocketStatus: (status: 'disconnected' | 'connecting' | 'connected' | 'error', error?: SocketErrorDetails | null) => set((state) => {
             const now = Date.now();
             const updates: Partial<StorageState> = {
                 socketStatus: status
@@ -972,8 +975,15 @@ export const storage = create<StorageState>()((set, get) => {
             // Update timestamp based on status
             if (status === 'connected') {
                 updates.socketLastConnectedAt = now;
+                updates.socketLastError = null;
             } else if (status === 'disconnected' || status === 'error') {
                 updates.socketLastDisconnectedAt = now;
+            }
+
+            // Only overwrite stored error if caller passed something explicit
+            // (undefined = leave existing error; null = clear)
+            if (error !== undefined && status !== 'connected') {
+                updates.socketLastError = error;
             }
 
             return {
@@ -1580,8 +1590,13 @@ export function useSocketStatus() {
     return storage(useShallow((state) => ({
         status: state.socketStatus,
         lastConnectedAt: state.socketLastConnectedAt,
-        lastDisconnectedAt: state.socketLastDisconnectedAt
+        lastDisconnectedAt: state.socketLastDisconnectedAt,
+        lastError: state.socketLastError,
     })));
+}
+
+export function useSocketLastError(): SocketErrorDetails | null {
+    return storage(useShallow((state) => state.socketLastError));
 }
 
 export function useSessionGitStatus(sessionId: string): GitStatus | null {

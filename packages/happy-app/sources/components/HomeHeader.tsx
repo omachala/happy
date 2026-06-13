@@ -164,6 +164,7 @@ function HeaderLeft() {
 
 function HeaderTitleWithSubtitle({ subtitle }: { subtitle?: string }) {
     const socketStatus = useSocketStatus();
+    const router = useRouter();
     const styles = stylesheet;
 
     // Get connection status styling (matching sessionUtils.ts pattern)
@@ -211,6 +212,32 @@ function HeaderTitleWithSubtitle({ subtitle }: { subtitle?: string }) {
     const hasCustomSubtitle = !!subtitle;
     const connectionStatus = getConnectionStatus();
     const showConnectionStatus = !hasCustomSubtitle && connectionStatus.text;
+    const isTappable = socketStatus.status !== 'connected' && (socketStatus.lastError != null || socketStatus.status === 'error');
+
+    const statusRow = showConnectionStatus ? (
+        <View style={styles.statusContainer}>
+            <StatusDot
+                color={connectionStatus.color}
+                isPulsing={connectionStatus.isPulsing}
+                size={6}
+                style={styles.statusDot}
+            />
+            <Text style={[
+                styles.statusText,
+                { color: connectionStatus.textColor }
+            ]}>
+                {connectionStatus.text}
+            </Text>
+            {isTappable && (
+                <Ionicons
+                    name="information-circle-outline"
+                    size={12}
+                    color={connectionStatus.textColor}
+                    style={{ marginLeft: 4 }}
+                />
+            )}
+        </View>
+    ) : null;
 
     return (
         <View style={styles.titleContainer}>
@@ -222,21 +249,15 @@ function HeaderTitleWithSubtitle({ subtitle }: { subtitle?: string }) {
                     {subtitle}
                 </Text>
             )}
-            {showConnectionStatus && (
-                <View style={styles.statusContainer}>
-                    <StatusDot
-                        color={connectionStatus.color}
-                        isPulsing={connectionStatus.isPulsing}
-                        size={6}
-                        style={styles.statusDot}
-                    />
-                    <Text style={[
-                        styles.statusText,
-                        { color: connectionStatus.textColor }
-                    ]}>
-                        {connectionStatus.text}
-                    </Text>
-                </View>
+            {statusRow && (
+                isTappable ? (
+                    <Pressable
+                        onPress={() => router.push('/connection-error')}
+                        hitSlop={10}
+                    >
+                        {statusRow}
+                    </Pressable>
+                ) : statusRow
             )}
         </View>
     );

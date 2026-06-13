@@ -316,6 +316,14 @@ export default function RootLayout() {
                     headerBackTitle: t('common.back'),
                 }}
             />
+            <Stack.Screen
+                name="connection-error"
+                options={{
+                    headerShown: true,
+                    headerTitle: 'Connection Error',
+                    headerBackTitle: t('common.back'),
+                }}
+            />
         </Stack>
     );
 }
