@@ -93,6 +93,7 @@ const styles = StyleSheet.create((theme) => ({
 const HeaderTitle = React.memo(() => {
     const { theme } = useUnistyles();
     const socketStatus = useSocketStatus();
+    const router = useRouter();
 
     const connectionStatus = React.useMemo(() => {
         const { status } = socketStatus;
@@ -110,14 +111,30 @@ const HeaderTitle = React.memo(() => {
         }
     }, [socketStatus, theme]);
 
+    const isTappable = socketStatus.status !== 'connected'
+        && (socketStatus.lastError != null || socketStatus.status === 'error');
+
+    if (!connectionStatus.text) {
+        return <View style={styles.titleContainer} />;
+    }
+
+    const inner = (
+        <View style={styles.statusContainer}>
+            <StatusDot color={connectionStatus.color} isPulsing={connectionStatus.isPulsing} size={6} style={{ marginRight: 4 }} />
+            <Text style={[styles.statusText, { color: connectionStatus.color }]}>{connectionStatus.text}</Text>
+            {isTappable && (
+                <Ionicons name="information-circle-outline" size={12} color={connectionStatus.color} style={{ marginLeft: 4 }} />
+            )}
+        </View>
+    );
+
     return (
         <View style={styles.titleContainer}>
-            {connectionStatus.text && (
-                <View style={styles.statusContainer}>
-                    <StatusDot color={connectionStatus.color} isPulsing={connectionStatus.isPulsing} size={6} style={{ marginRight: 4 }} />
-                    <Text style={[styles.statusText, { color: connectionStatus.color }]}>{connectionStatus.text}</Text>
-                </View>
-            )}
+            {isTappable ? (
+                <Pressable onPress={() => router.push('/connection-error')} hitSlop={10}>
+                    {inner}
+                </Pressable>
+            ) : inner}
         </View>
     );
 });
