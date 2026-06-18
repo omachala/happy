@@ -16,6 +16,7 @@ import { syncCurrentPushToken } from './pushRegistration';
 import { Platform, AppState, type AppStateStatus } from 'react-native';
 import { isRunningOnMac } from '@/utils/platform';
 import { NormalizedMessage, normalizeRawMessage, RawRecord } from './typesRaw';
+import { deriveTitleFromText } from '@/utils/sessionUtils';
 import { applySettings, Settings, settingsDefaults, settingsParse, settingsToSyncPayload, SUPPORTED_SCHEMA_VERSION } from './settings';
 import { Profile, profileParse } from './profile';
 import { loadPendingSettings, savePendingSettings } from './persistence';
@@ -90,6 +91,22 @@ type SendMessageOptions = {
     /** Optional image attachments to send before the text message. */
     attachments?: AttachmentPreview[];
 };
+
+/**
+ * Pulls plain text out of a normalized message for use as a fallback session
+ * title. Handles user prompts and the first text block of an agent turn;
+ * returns null for tool-only / event messages that carry no readable text.
+ */
+function normalizedMessageToTitleText(message: NormalizedMessage): string | null {
+    if (message.role === 'user') {
+        return message.content.text || null;
+    }
+    if (message.role === 'agent') {
+        const textBlock = message.content.find((c) => c.type === 'text');
+        return textBlock && textBlock.type === 'text' ? textBlock.text || null : null;
+    }
+    return null;
+}
 
 class Sync {
     private static readonly BACKGROUND_SEND_TIMEOUT_MS = 30_000;
@@ -955,13 +972,30 @@ class Sync {
             // Decrypt agent state using session-specific encryption
             let agentState = await sessionEncryption.decryptAgentState(session.agentStateVersion, session.agentState);
 
+            // Decrypt the server-provided lastMessage into a fallback list title.
+            // This is the only message text available for chats not opened in
+            // this app session, so it backstops "New chat" until a richer
+            // firstPromptText is learned (see getSessionName).
+            let lastMessageText: string | undefined;
+            if (session.lastMessage) {
+                const decryptedLast = await sessionEncryption.decryptMessage(session.lastMessage);
+                if (decryptedLast) {
+                    const normalized = normalizeRawMessage(decryptedLast.id, decryptedLast.localId, decryptedLast.createdAt, decryptedLast.content);
+                    const text = normalized ? normalizedMessageToTitleText(normalized) : null;
+                    if (text) {
+                        lastMessageText = deriveTitleFromText(text);
+                    }
+                }
+            }
+
             // Put it all together
             const processedSession = {
                 ...session,
                 thinking: false,
                 thinkingAt: 0,
                 metadata,
-                agentState
+                agentState,
+                ...(lastMessageText ? { lastMessageText } : {})
             };
             decryptedSessions.push(processedSession);
         }

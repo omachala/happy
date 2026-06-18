@@ -113,6 +113,12 @@ export interface Session {
     presence: "online" | number, // "online" when active, timestamp when last seen
     todos?: TodoItem[];
     draft?: string | null; // Local draft message, not synced to server
+    // Fallback list titles shown when metadata.summary is absent (agent never
+    // called change_title). Not synced to server, derived locally:
+    //   firstPromptText — earliest user prompt seen once messages load/are sent
+    //   lastMessageText — decrypted /v1/sessions lastMessage, covers never-opened chats
+    firstPromptText?: string | null;
+    lastMessageText?: string | null;
     permissionMode?: string | null; // Local permission mode key, not synced to server
     modelMode?: string | null; // Local model key, not synced to server
     effortLevel?: string | null; // Local effort level key, not synced to server

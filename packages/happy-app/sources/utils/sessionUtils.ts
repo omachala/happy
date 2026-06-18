@@ -81,7 +81,28 @@ export function getSessionName(session: Session): string {
     if (session.metadata?.summary) {
         return session.metadata.summary.text;
     }
+    // Fallbacks when the agent never set a title via change_title: prefer the
+    // user's first prompt (best signal), then the last message (covers chats
+    // never opened in this app session). See storageTypes.Session.
+    if (session.firstPromptText) {
+        return session.firstPromptText;
+    }
+    if (session.lastMessageText) {
+        return session.lastMessageText;
+    }
     return t('session.newChat');
+}
+
+/**
+ * Collapses whitespace and truncates a message body into a single-line title
+ * suitable for the session list. Returns an empty string for blank input.
+ */
+export function deriveTitleFromText(text: string): string {
+    const collapsed = text.replace(/\s+/g, ' ').trim();
+    if (collapsed.length <= 80) {
+        return collapsed;
+    }
+    return collapsed.slice(0, 80).trimEnd() + '…';
 }
 
 /**

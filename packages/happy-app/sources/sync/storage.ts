@@ -16,7 +16,7 @@ import { createReducer, reducer, ReducerState } from "./reducer/reducer";
 import { Message } from "./typesMessage";
 import { NormalizedMessage } from "./typesRaw";
 import { isMachineOnline } from '@/utils/machineUtils';
-import { getSessionName, getSessionSubtitle, getSessionAvatarId, type SessionState } from '@/utils/sessionUtils';
+import { getSessionName, getSessionSubtitle, getSessionAvatarId, deriveTitleFromText, type SessionState } from '@/utils/sessionUtils';
 import { applySettings, Settings } from "./settings";
 import { LocalSettings, applyLocalSettings } from "./localSettings";
 import { Purchases, customerInfoToPurchases } from "./purchases";
@@ -438,6 +438,12 @@ export const storage = create<StorageState>()((set, get) => {
                     permissionMode: resolvedPermissionMode,
                     modelMode: resolvedModelMode,
                     effortLevel: resolvedEffortLevel,
+                    // Fallback titles are derived locally and absent from server
+                    // session payloads — keep any already learned. firstPromptText
+                    // (set once messages load) outranks the lastMessageText that
+                    // each fetch recomputes, so never let a refetch erase it.
+                    firstPromptText: state.sessions[session.id]?.firstPromptText ?? session.firstPromptText ?? null,
+                    lastMessageText: session.lastMessageText ?? state.sessions[session.id]?.lastMessageText ?? null,
                 };
             });
 
@@ -680,8 +686,28 @@ export const storage = create<StorageState>()((set, get) => {
                 // Update session with todos and latestUsage
                 // IMPORTANT: We extract latestUsage from the mutable reducerState and copy it to the Session object
                 // This ensures latestUsage is available immediately on load, even before messages are fully loaded
+                // Derive a fallback list title from the earliest known user
+                // prompt while the session has no server summary. As older
+                // history pages load, the earliest user-text only moves earlier,
+                // so recomputing each batch converges to the true first prompt.
+                let firstPromptUpdate: string | undefined;
+                if (session && !session.metadata?.summary) {
+                    let earliest: Extract<Message, { kind: 'user-text' }> | undefined;
+                    for (const m of messagesArray) {
+                        if (m.kind === 'user-text' && (!earliest || m.createdAt < earliest.createdAt)) {
+                            earliest = m;
+                        }
+                    }
+                    if (earliest) {
+                        const derived = deriveTitleFromText(earliest.displayText ?? earliest.text);
+                        if (derived && derived !== session.firstPromptText) {
+                            firstPromptUpdate = derived;
+                        }
+                    }
+                }
+
                 let updatedSessions = state.sessions;
-                const needsUpdate = (reducerResult.todos !== undefined || existingSession.reducerState.latestUsage || shouldEnterPlanMode) && session;
+                const needsUpdate = (reducerResult.todos !== undefined || existingSession.reducerState.latestUsage || shouldEnterPlanMode || firstPromptUpdate !== undefined) && session;
 
                 if (needsUpdate) {
                     updatedSessions = {
@@ -694,7 +720,8 @@ export const storage = create<StorageState>()((set, get) => {
                                 ...existingSession.reducerState.latestUsage
                             } : session.latestUsage,
                             // Auto-switch to plan mode when EnterPlanMode tool call is detected
-                            ...(shouldEnterPlanMode && { permissionMode: 'plan' })
+                            ...(shouldEnterPlanMode && { permissionMode: 'plan' }),
+                            ...(firstPromptUpdate !== undefined && { firstPromptText: firstPromptUpdate })
                         }
                     };
                 }
