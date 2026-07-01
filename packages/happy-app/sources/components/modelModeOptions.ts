@@ -75,12 +75,13 @@ export function getGeminiPermissionModes(translate: Translate): PermissionMode[]
 }
 
 export function getClaudeModelModes(): ModelMode[] {
+    // Family names only — each key always resolves to the latest model in that
+    // family, so we deliberately omit version numbers from the display name.
     return [
-        { key: 'default', name: 'default model', description: null },
-        { key: 'claude-fable-5', name: 'fable 5', description: 'latest & most capable' },
-        { key: 'opus', name: 'opus 4.8', description: null },
-        { key: 'sonnet', name: 'sonnet 4.6', description: null },
-        { key: 'haiku', name: 'haiku 4.5', description: null },
+        { key: 'claude-fable-5', name: 'fable', description: 'latest & most capable' },
+        { key: 'opus', name: 'opus', description: null },
+        { key: 'sonnet', name: 'sonnet', description: null },
+        { key: 'haiku', name: 'haiku', description: null },
     ];
 }
 
