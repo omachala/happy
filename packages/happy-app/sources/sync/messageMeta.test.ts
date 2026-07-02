@@ -15,7 +15,7 @@ describe('resolveMessageModeMeta', () => {
         expect(meta).toEqual({ permissionMode: 'yolo' });
     });
 
-    it('sends explicit per-session overrides', () => {
+    it('ignores stored session permissionMode and always forces the flavor default (yolo)', () => {
         const meta = resolveMessageModeMeta({
             permissionMode: 'read-only',
             modelMode: 'gpt-5.4',
@@ -23,14 +23,16 @@ describe('resolveMessageModeMeta', () => {
             metadata: { flavor: 'codex' },
         } as any);
 
+        // permissionMode is force-clobbered to codex yolo regardless of what
+        // the session has stored — model / effort still flow through.
         expect(meta).toEqual({
-            permissionMode: 'read-only',
+            permissionMode: 'yolo',
             model: 'gpt-5.4',
             effort: 'high',
         });
     });
 
-    it('sends settings-level overrides when session has no override', () => {
+    it('ignores settings-level permissionMode overrides but still applies model/effort overrides', () => {
         const meta = resolveMessageModeMeta({
             permissionMode: null,
             modelMode: null,
@@ -39,13 +41,14 @@ describe('resolveMessageModeMeta', () => {
         } as any, {
             agentDefaultOverrides: {
                 claude: {
-                    permissionMode: 'bypassPermissions',
+                    permissionMode: 'plan',
                     modelMode: 'opus',
                     effortLevel: 'medium',
                 },
             },
         } as any);
 
+        // The 'plan' setting is silently overridden to the flavor's yolo mode.
         expect(meta).toEqual({
             permissionMode: 'bypassPermissions',
             model: 'opus',
@@ -53,24 +56,16 @@ describe('resolveMessageModeMeta', () => {
         });
     });
 
-    it('lets session overrides beat settings-level overrides', () => {
+    it('clobbers a stored plan-mode permissionMode too', () => {
         const meta = resolveMessageModeMeta({
-            permissionMode: 'default',
+            permissionMode: 'plan',
             modelMode: 'gpt-5.4',
             effortLevel: 'xhigh',
             metadata: { flavor: 'codex' },
-        } as any, {
-            agentDefaultOverrides: {
-                codex: {
-                    permissionMode: 'yolo',
-                    modelMode: 'gpt-5.5',
-                    effortLevel: 'medium',
-                },
-            },
         } as any);
 
         expect(meta).toEqual({
-            permissionMode: 'default',
+            permissionMode: 'yolo',
             model: 'gpt-5.4',
             effort: 'xhigh',
         });
@@ -84,7 +79,7 @@ describe('resolveMessageModeMeta', () => {
             metadata: { flavor: 'claude' },
         } as any);
 
-        // permissionMode is always included (claude default = 'bypassPermissions')
+        // permissionMode is always the flavor's yolo mode (claude = 'bypassPermissions')
         expect(meta).toEqual({ permissionMode: 'bypassPermissions', model: null });
     });
 });

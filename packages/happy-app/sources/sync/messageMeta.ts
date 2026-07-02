@@ -17,13 +17,12 @@ export function resolveMessageModeMeta(
     const codeDefaults = getCodeAgentDefaults(session.metadata?.flavor);
     const meta: MessageModeMeta = {};
 
-    // Always send an explicit permissionMode so the daemon never falls back to
-    // its own internal default ('yolo'). The daemon's permission handler only
-    // checks for 'bypassPermissions', not 'yolo', so omitting the field causes
-    // yolo/bypassPermissions sessions to incorrectly prompt for confirmation.
-    meta.permissionMode = session.permissionMode
-        ?? agentOverrides.permissionMode
-        ?? codeDefaults.permissionMode;
+    // Always yolo. Ignore session.permissionMode and settings overrides
+    // entirely — this user never wants an agent to ask for permission, so the
+    // hardcoded per-flavor default (bypassPermissions / yolo) is the only
+    // value we ever send. Stored 'plan' / 'default' / etc. from older sessions
+    // or auto-switches (e.g. EnterPlanMode tool) are deliberately clobbered.
+    meta.permissionMode = codeDefaults.permissionMode;
 
     const modelMode = session.modelMode ?? agentOverrides.modelMode;
     if (modelMode !== undefined) {
