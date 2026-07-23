@@ -1,6 +1,6 @@
 import * as React from "react";
-import { View, Text, Pressable } from "react-native";
-import { StyleSheet } from 'react-native-unistyles';
+import { View, Text, Pressable, Platform } from "react-native";
+import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { Ionicons } from '@expo/vector-icons';
 import { MarkdownView } from "./markdown/MarkdownView";
 import { t } from '@/text';
@@ -10,7 +10,10 @@ import { layout } from "./layout";
 import { ToolView } from "./tools/ToolView";
 import { AgentEvent } from "@/sync/typesRaw";
 import { sync } from '@/sync/sync';
+import { useSetting } from '@/sync/storage';
 import { Option } from './markdown/MarkdownView';
+import { parseLocalCommandMessage, isUserSlashCommandEcho } from './parseLocalCommandMessage';
+import { resolveUserMessageBubbleColor } from '@/utils/userMessageBubbleColor';
 
 
 export const MessageView = (props: {
@@ -80,21 +83,6 @@ function RenderBlock(props: {
   }
 }
 
-// Slash-command and skill invocations arrive wrapped in <command-name>,
-// <command-message>, <command-args> (and sometimes inlined skill bodies).
-// Collapse them to just `/name args` so the chat shows the invocation,
-// not the full skill markdown.
-function collapseCommandInvocation(text: string): string | null {
-  const nameMatch = text.match(/<command-name>([\s\S]*?)<\/command-name>/);
-  if (!nameMatch) return null;
-  const name = nameMatch[1].trim();
-  if (!name) return null;
-  const argsMatch = text.match(/<command-args>([\s\S]*?)<\/command-args>/);
-  const args = argsMatch ? argsMatch[1].trim() : '';
-  const prefixed = name.startsWith('/') ? name : `/${name}`;
-  return args ? `\`${prefixed} ${args}\`` : `\`${prefixed}\``;
-}
-
 function UserTextBlock(props: {
   message: UserTextMessage;
   metadata: Metadata | null;
@@ -108,25 +96,87 @@ function UserTextBlock(props: {
   const rewindPointId = props.message.claudeUuid ?? props.message.codexItemId;
   const canFork = Boolean(props.onForkFromUserMessage)
     && (Boolean(rewindPointId) || props.metadata?.flavor === 'codex');
+  const userMessageBubbleColor = useSetting('userMessageBubbleColor');
+  const { theme } = useUnistyles();
+  const bubblePalette = resolveUserMessageBubbleColor(userMessageBubbleColor, theme.dark);
+  // No border — matches the pre-picker bubble; color presets only tint the background
+  const bubbleStyle = {
+    backgroundColor: bubblePalette.background,
+  };
   const handleLongPress = React.useCallback(() => {
     if (props.onForkFromUserMessage) {
       props.onForkFromUserMessage(props.message.id, rewindPointId, props.message.text);
     }
   }, [props.message.id, props.message.text, props.onForkFromUserMessage, rewindPointId]);
 
-  const rendered = React.useMemo(() => {
-    if (props.message.displayText) return props.message.displayText;
-    return collapseCommandInvocation(props.message.text) ?? props.message.text;
-  }, [props.message.displayText, props.message.text]);
+  // Claude Agent SDK emits synthetic user messages wrapped in tags like
+  // <local-command-caveat>…</local-command-caveat> and
+  // <command-message>…</command-message><command-name>/foo</command-name>
+  // whenever a slash command runs. The plain MarkdownView renders these as
+  // literal text, which looks broken. Collapse them into chips or hide
+  // them entirely depending on what kind of wrapper this is.
+  // The user's own slash-command input is shown optimistically (carries a
+  // localId); the SDK then injects the canonical wrapper chip. Hide the raw
+  // echo so we don't render the command twice. Gated to Claude flavor only:
+  // Codex/Gemini don't reliably emit the <command-*> wrapper, so hiding the
+  // echo there would drop the command with nothing to replace it. (Absent
+  // flavor == Claude, matching the convention used elsewhere.)
+  const isClaudeFlavor = !props.metadata?.flavor || props.metadata.flavor === 'claude';
+  if (isClaudeFlavor && isUserSlashCommandEcho(props.message.text, props.message.localId != null)) {
+    return null;
+  }
+
+  const parsed = parseLocalCommandMessage(props.message.displayText || props.message.text);
+  if (parsed.kind === 'caveat') {
+    return null;
+  }
+  if (parsed.kind === 'goal-confirmation') {
+    return null;
+  }
+  if (parsed.kind === 'goal-run') {
+    return (
+      <View style={styles.userMessageContainer}>
+        <Pressable
+          onLongPress={canFork ? handleLongPress : undefined}
+          delayLongPress={400}
+          style={[styles.userMessageBubble, bubbleStyle, styles.goalMessageBubble]}
+        >
+          <MarkdownView markdown={parsed.goal} onOptionPress={handleOptionPress} sessionId={props.sessionId} />
+        </Pressable>
+        <View style={styles.goalSentRow}>
+          <Ionicons name="locate-outline" size={16} color={styles.goalSentText.color} />
+          <Text style={styles.goalSentText}>{t('message.sentAsGoal')}</Text>
+        </View>
+      </View>
+    );
+  }
+  if (parsed.kind === 'command-run') {
+    return (
+      <View style={styles.userMessageContainer}>
+        {parsed.args ? (
+          <Pressable
+            onLongPress={canFork ? handleLongPress : undefined}
+            delayLongPress={400}
+            style={[styles.userMessageBubble, bubbleStyle, styles.commandMessageBubble]}
+          >
+            <MarkdownView markdown={parsed.args} onOptionPress={handleOptionPress} sessionId={props.sessionId} />
+          </Pressable>
+        ) : null}
+        <View style={[styles.commandChip, bubbleStyle]}>
+          <Text style={styles.commandChipText}>/{parsed.commandName}</Text>
+        </View>
+      </View>
+    );
+  }
 
   return (
     <View style={styles.userMessageContainer}>
       <Pressable
         onLongPress={canFork ? handleLongPress : undefined}
         delayLongPress={400}
-        style={styles.userMessageBubble}
+        style={[styles.userMessageBubble, bubbleStyle]}
       >
-        <MarkdownView markdown={rendered} onOptionPress={handleOptionPress} sessionId={props.sessionId} />
+        <MarkdownView markdown={parsed.text} onOptionPress={handleOptionPress} sessionId={props.sessionId} />
       </Pressable>
     </View>
   );
@@ -245,9 +295,44 @@ const styles = StyleSheet.create((theme) => ({
     marginBottom: 12,
     maxWidth: '100%',
   },
+  goalMessageBubble: {
+    marginBottom: 6,
+  },
+  commandMessageBubble: {
+    marginBottom: 6,
+  },
+  goalSentRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginBottom: 12,
+    maxWidth: '100%',
+    opacity: 0.72,
+  },
+  goalSentText: {
+    color: theme.colors.agentEventText,
+    fontSize: 14,
+  },
+  commandChip: {
+    backgroundColor: theme.colors.userMessageBackground,
+    borderColor: theme.colors.divider,
+    borderWidth: 1,
+    paddingHorizontal: 10,
+    paddingVertical: 2,
+    borderRadius: 10,
+    marginBottom: 12,
+    maxWidth: '100%',
+    opacity: 0.65,
+  },
+  commandChipText: {
+    color: theme.colors.input.text,
+    fontSize: 13,
+    fontFamily: 'monospace',
+  },
   agentMessageContainer: {
     marginHorizontal: 16,
-    marginBottom: 12,
+    marginTop: 4,
+    marginBottom: 16,
     borderRadius: 16,
     maxWidth: '100%',
   },

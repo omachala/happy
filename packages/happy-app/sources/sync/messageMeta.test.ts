@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { resolveMessageModeMeta } from './messageMeta';
+import { rigMetadataFixture } from './__testdata__/rigMetadata';
 
 describe('resolveMessageModeMeta', () => {
     it('always sends permissionMode from hardcoded defaults when nothing overridden', () => {
@@ -81,5 +82,33 @@ describe('resolveMessageModeMeta', () => {
 
         // permissionMode is always the flavor's yolo mode (claude = 'bypassPermissions')
         expect(meta).toEqual({ permissionMode: 'bypassPermissions', model: null });
+    });
+
+    it('sends canonical Rig selection metadata using mode code rather than semantic kind', () => {
+        const meta = resolveMessageModeMeta({
+            permissionMode: 'auto',
+            modelMode: 'claude:shared-model',
+            effortLevel: 'max',
+            metadata: rigMetadataFixture,
+        } as any);
+
+        expect(meta).toEqual({
+            permissionMode: 'auto',
+            model: 'shared-model',
+            modelProviderId: 'claude',
+            effort: 'max',
+        });
+        expect(meta.permissionMode).not.toBe('safe-yolo');
+    });
+
+    it('does not carry an unsupported reasoning value across a Rig model change', () => {
+        const meta = resolveMessageModeMeta({
+            permissionMode: null,
+            modelMode: 'claude:shared-model',
+            effortLevel: 'medium',
+            metadata: rigMetadataFixture,
+        } as any);
+
+        expect(meta.effort).toBe('high');
     });
 });

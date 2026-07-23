@@ -72,10 +72,15 @@ interface AgentInputProps {
         cacheCreation: number;
         cacheRead: number;
         contextSize: number;
+        contextWindow?: number;
     };
     alwaysShowContextSize?: boolean;
+    showSessionStatusInfoInSettings?: boolean;
+    sessionStatusGitBranch?: string | null;
+    sessionStatusModelLabel?: string | null;
+    sessionStatusEffortLabel?: string | null;
     onFileViewerPress?: () => void;
-    agentType?: 'claude' | 'codex' | 'gemini' | 'openclaw';
+    agentType?: 'claude' | 'codex' | 'gemini' | 'openclaw' | 'agy';
     onAgentClick?: () => void;
     machineName?: string | null;
     onMachineClick?: () => void;
@@ -150,6 +155,11 @@ const stylesheet = StyleSheet.create((theme, runtime) => ({
     },
     overlaySection: {
         paddingVertical: 8,
+    },
+    settingsStatusInfo: {
+        paddingTop: 6,
+        paddingBottom: 4,
+        paddingHorizontal: 8,
     },
     overlaySectionTitle: {
         fontSize: 12,
@@ -300,8 +310,9 @@ const stylesheet = StyleSheet.create((theme, runtime) => ({
     },
 }));
 
-const getContextWarning = (contextSize: number, alwaysShow: boolean = false, theme: Theme) => {
-    const percentageUsed = (contextSize / MAX_CONTEXT_SIZE) * 100;
+const getContextWarning = (contextSize: number, alwaysShow: boolean = false, theme: Theme, contextWindow: number = MAX_CONTEXT_SIZE) => {
+    const maxContextSize = Number.isFinite(contextWindow) && contextWindow > 0 ? contextWindow : MAX_CONTEXT_SIZE;
+    const percentageUsed = (contextSize / maxContextSize) * 100;
     const percentageRemaining = Math.max(0, Math.min(100, 100 - percentageUsed));
 
     if (percentageRemaining <= 5) {
@@ -524,12 +535,11 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
     const canPressSendButton = !props.isSending
         && !props.isSendDisabled
         && (isSendBlocked ? (hasText || hasImages) : (hasText || hasImages || !!props.onMicPress));
-
     const availableModels = props.availableModels ?? [];
     const availableEffortLevels = props.availableEffortLevels ?? [];
     // Calculate context warning
     const contextWarning = props.usageData?.contextSize
-        ? getContextWarning(props.usageData.contextSize, props.alwaysShowContextSize ?? false, theme)
+        ? getContextWarning(props.usageData.contextSize, props.alwaysShowContextSize ?? false, theme, props.usageData.contextWindow)
         : null;
 
     const agentInputEnterToSend = useSetting('agentInputEnterToSend');

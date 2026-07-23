@@ -18,6 +18,7 @@ import { SessionActionsAnchor, SessionActionsPopover } from './SessionActionsPop
 import { useSessionActionAlert } from '@/hooks/useSessionQuickActions';
 import { useNewSessionDraft } from '@/hooks/useNewSessionDraft';
 import { useRouter } from 'expo-router';
+import { ProviderIcon } from './ProviderIcon';
 
 // Status visualization for a project tile. We surface the most-active session's
 // state — pulsing-blue (thinking) > orange (permission) > green (waiting) > gray.
@@ -189,6 +190,14 @@ const ProjectTile = React.memo(({ group, selected, isLast }: {
                             {mostRecent.name}
                         </Text>
                     ) : null}
+                    {mostRecent.identityLine && (
+                        <View style={styles.sessionIdentityRow}>
+                            <ProviderIcon kind={mostRecent.providerKind} size={11} />
+                            <Text style={styles.sessionIdentity} numberOfLines={1}>
+                                {mostRecent.identityLine}{mostRecent.modelName ? ` · ${mostRecent.modelName}` : ''}{mostRecent.activitySummary ? ` · ${mostRecent.activitySummary}` : ''}
+                            </Text>
+                        </View>
+                    )}
                 </View>
                 <View style={styles.tileDot}>
                     <StatusDot color={statusColor.color} isPulsing={statusColor.pulsing} />
@@ -378,6 +387,18 @@ const stylesheet = StyleSheet.create((theme) => ({
     tileSubtitleUnread: {
         color: theme.colors.text,
         ...Typography.default('semiBold'),
+    },
+    sessionIdentity: {
+        fontSize: 11,
+        color: theme.colors.textSecondary,
+        ...Typography.default('regular'),
+        flexShrink: 1,
+    },
+    sessionIdentityRow: {
+        marginTop: 2,
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 4,
     },
     tileDot: {
         marginLeft: 10,
