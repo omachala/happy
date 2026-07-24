@@ -58,7 +58,7 @@ export interface StartOptions {
 }
 
 const DEFAULT_CLAUDE_PERMISSION_MODE: PermissionMode = 'yolo';
-const DEFAULT_CLAUDE_MODEL = 'opus';
+const DEFAULT_CLAUDE_MODEL = 'claude-opus-5';
 const DEFAULT_CLAUDE_EFFORT: 'low' | 'medium' | 'high' | 'xhigh' | 'max' = 'medium';
 type ClaudeGoalCommand = NonNullable<ReturnType<typeof parseClaudeGoalActionParams>>;
 type PendingClaudeGoalAction = {

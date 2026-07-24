@@ -94,11 +94,13 @@ export function getGeminiPermissionModes(translate: Translate): PermissionMode[]
 }
 
 export function getClaudeModelModes(): ModelMode[] {
-    // Family names only — each key always resolves to the latest model in that
-    // family, so we deliberately omit version numbers from the display name.
+    // Opus is pinned to `claude-opus-5` explicitly (not the family alias) so
+    // the fork can never silently drop to an older Opus if Anthropic's alias
+    // lags behind a release. Sonnet/Haiku stay as family aliases and resolve
+    // to whatever the CLI considers current. Display names remain plain.
     return [
         { key: 'claude-fable-5', name: 'fable', description: 'latest & most capable' },
-        { key: 'opus', name: 'opus', description: null },
+        { key: 'claude-opus-5', name: 'opus', description: null },
         { key: 'sonnet', name: 'sonnet', description: null },
         { key: 'haiku', name: 'haiku', description: null },
     ];
@@ -114,7 +116,7 @@ export function getClaudeFamilyKeyFromModelId(rawModel: string | null | undefine
     if (!rawModel) return null;
     const id = rawModel.toLowerCase();
     if (id.includes('fable')) return 'claude-fable-5';
-    if (id.includes('opus')) return 'opus';
+    if (id.includes('opus')) return 'claude-opus-5';
     if (id.includes('sonnet')) return 'sonnet';
     if (id.includes('haiku')) return 'haiku';
     return null;

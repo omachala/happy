@@ -32,7 +32,7 @@ export type AgentDefaultConfig = {
 // on every outgoing message so no stored session state can reintroduce a
 // prompting mode.
 const codeAgentDefaults: Record<AgentKey, AgentDefaultConfig> = {
-    claude: { permissionMode: 'bypassPermissions', modelMode: 'opus', effortLevel: 'medium' },
+    claude: { permissionMode: 'bypassPermissions', modelMode: 'claude-opus-5', effortLevel: 'medium' },
     codex: { permissionMode: 'yolo', modelMode: 'gpt-5.5', effortLevel: 'medium' },
     gemini: { permissionMode: 'yolo', modelMode: 'gemini-2.5-pro', effortLevel: null },
     openclaw: { permissionMode: 'bypassPermissions', modelMode: 'default', effortLevel: null },
