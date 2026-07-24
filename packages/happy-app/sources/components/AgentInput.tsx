@@ -44,6 +44,11 @@ interface AgentInputProps {
     availableModes?: PermissionMode[];
     onPermissionModeChange?: (mode: PermissionMode) => void;
     modelMode?: ModelMode | null;
+    /** Whether the current model selection has been confirmed by a fresh
+     * metadata push from happy-cli during this component's lifetime. Drives
+     * the chip's text color: green when true (server-confirmed), gray when
+     * false (unconfirmed — fresh mount or just switched). */
+    modelConfirmed?: boolean;
     availableModels?: ModelMode[];
     onModelModeChange?: (mode: ModelMode) => void;
     effortLevel?: EffortLevel | null;
@@ -1023,7 +1028,7 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
                                         />
                                         <Text style={{
                                             fontSize: 13,
-                                            color: theme.colors.button.secondary.tint,
+                                            color: props.modelConfirmed ? theme.colors.success : theme.colors.button.secondary.tint,
                                             fontWeight: '600',
                                             ...Typography.default('semiBold'),
                                         }}>

@@ -23,6 +23,7 @@ import { Avatar } from '@/components/Avatar';
 import { VoiceAssistantStatusBar } from '@/components/VoiceAssistantStatusBar';
 import { useDraft } from '@/hooks/useDraft';
 import { useImagePicker } from '@/hooks/useImagePicker';
+import { useModelConfirmed } from '@/hooks/useModelConfirmed';
 import { Modal } from '@/modal';
 import { voiceHooks } from '@/realtime/hooks/voiceHooks';
 import { getCurrentVoiceConversationId, getCurrentVoiceSessionDurationSeconds, startRealtimeSession, stopRealtimeSession } from '@/realtime/RealtimeSession';
@@ -515,6 +516,9 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
         ])
     ), [availableModels, session.modelMode, effectiveAgentDefaults.modelMode, session.metadata, isRig]);
 
+    // Fresh-from-server confirmation for the model chip color.
+    const modelConfirmed = useModelConfirmed(session.metadata, isRig ? undefined : modelMode?.key);
+
     // Effort level state
     const modelKey = modelMode?.key ?? 'default';
     const availableEffortLevels = React.useMemo<EffortLevel[]>(() => (
@@ -826,6 +830,7 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
             onPermissionModeChange={isRigPermissionSelectionEnabled(session.metadata) ? updatePermissionMode : undefined}
             availableModes={availableModes}
             modelMode={modelMode}
+            modelConfirmed={modelConfirmed}
             availableModels={availableModels}
             onModelModeChange={isRigModelSelectionEnabled(session.metadata) ? updateModelMode : undefined}
             effortLevel={effortLevel}

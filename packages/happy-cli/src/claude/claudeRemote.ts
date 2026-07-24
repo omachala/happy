@@ -313,6 +313,15 @@ export async function claudeRemote(opts: {
                 // Send ready event
                 opts.onReady();
 
+                // Re-emit the current model on every turn boundary, bypassing
+                // the dedupe. The app uses each fresh metadata push as its
+                // "server-confirmed" signal to flip the model chip from gray
+                // to green, so we need at least one write per completed turn
+                // even when the model didn't change.
+                if (lastReportedModel !== null) {
+                    opts.onCurrentModelChange?.(lastReportedModel);
+                }
+
                 // Follow-up messages are streamed in continuously by
                 // `pumpNextMessage` above. If it already discovered there's
                 // nothing more to send for this turn's mode (session end or
