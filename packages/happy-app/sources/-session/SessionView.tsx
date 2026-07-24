@@ -7,6 +7,7 @@ import { layout } from '@/components/layout';
 import {
     getAvailableModels,
     getAvailablePermissionModes,
+    getClaudeFamilyKeyFromModelId,
     getEffortLevelsForModel,
     getRigCurrentModelOptionKey,
     resolveCurrentOption,
@@ -499,8 +500,15 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
         ])
     ), [availableModes, session.permissionMode, effectiveAgentDefaults.permissionMode, session.metadata?.currentOperatingModeCode, session.metadata?.permissionMode, session.metadata?.session?.permissionMode, isRig]);
 
+    // For plain Claude sessions, prefer the raw model id happy-cli last saw
+    // running (`currentAgentModel`, written on every system/init and on any
+    // out-of-band `/model` switch typed at a terminal attached to the same
+    // Claude session). Falls back to the local pick / agent default when the
+    // CLI hasn't reported anything yet, so the chip stays populated on a
+    // fresh session before the first turn init lands.
     const modelMode = React.useMemo<ModelMode | null>(() => (
         resolveCurrentOption(availableModels, [
+            isRig ? undefined : getClaudeFamilyKeyFromModelId(session.metadata?.currentAgentModel),
             session.modelMode,
             isRig ? getRigCurrentModelOptionKey(session.metadata) : effectiveAgentDefaults.modelMode,
             isRig ? undefined : session.metadata?.currentModelCode,

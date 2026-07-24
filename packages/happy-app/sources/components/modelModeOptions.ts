@@ -104,6 +104,22 @@ export function getClaudeModelModes(): ModelMode[] {
     ];
 }
 
+/**
+ * Collapse a raw Anthropic model id (e.g. "claude-opus-4-5-20260614",
+ * "claude-fable-5-0-20260701") to the picker key of its family so the
+ * model chip can show the live CLI-reported model even when it differs
+ * from the user's picked `modelMode`.
+ */
+export function getClaudeFamilyKeyFromModelId(rawModel: string | null | undefined): string | null {
+    if (!rawModel) return null;
+    const id = rawModel.toLowerCase();
+    if (id.includes('fable')) return 'claude-fable-5';
+    if (id.includes('opus')) return 'opus';
+    if (id.includes('sonnet')) return 'sonnet';
+    if (id.includes('haiku')) return 'haiku';
+    return null;
+}
+
 export function getCodexModelModes(): ModelMode[] {
     return [
         { key: 'default', name: 'default model', description: null },

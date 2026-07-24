@@ -154,6 +154,15 @@ export const MetadataSchema = z.object({
     permissionMode: z.string().nullish(),
     modelMode: z.string().nullish(),
     effortLevel: z.string().nullish(),
+    /**
+     * Raw model id (e.g. "claude-opus-4-5-20260614") last observed running
+     * in the agent process — written by happy-cli whenever the SDK reports
+     * a different model on a system/init or assistant message. Lets the
+     * app UI reflect out-of-band `/model` switches made directly in a
+     * terminal attached to the same session, since the user's selected
+     * `modelMode` above only carries their intent.
+     */
+    currentAgentModel: z.string().nullish(),
     // Passthrough so read-modify-write metadata updates from this app never
     // drop fields written by newer CLI or app versions.
 }).passthrough();

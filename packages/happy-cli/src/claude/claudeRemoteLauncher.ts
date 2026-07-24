@@ -400,6 +400,13 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                             skills: metadata.skills,
                         }));
                     },
+                    onCurrentModelChange: (currentModel) => {
+                        logger.debug(`[remote] Current model changed: ${currentModel}`);
+                        session.client.updateMetadata((currentMetadata) => ({
+                            ...currentMetadata,
+                            currentAgentModel: currentModel,
+                        }));
+                    },
                     onQueryReady: (q) => {
                         permissionHandler.setPermissionModeUpdater(async (mode) => {
                             await q.setPermissionMode(mode);

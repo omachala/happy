@@ -42,7 +42,12 @@ export async function claudeRemote(opts: {
     onMessage: (message: SDKMessage) => void,
     onCompletionEvent?: (message: string) => void,
     onSessionReset?: () => void,
-    onSDKMetadata?: (metadata: { tools?: string[]; slashCommands?: string[]; mcpServers?: { name: string; status: string }[]; skills?: string[] }) => void
+    onSDKMetadata?: (metadata: { tools?: string[]; slashCommands?: string[]; mcpServers?: { name: string; status: string }[]; skills?: string[] }) => void,
+    /** Fires when the SDK first reports a running model, and again whenever the
+     * observed model id changes (e.g. `/model` typed in a terminal attached to
+     * the same Claude session). Enables the app UI to reflect the real model,
+     * not just the user's picked mode. */
+    onCurrentModelChange?: (model: string) => void
 }) {
 
     // Check if session is valid
@@ -216,6 +221,16 @@ export async function claudeRemote(opts: {
     };
     pumpNextMessage();
 
+    // Track the last raw model id we surfaced upstream so the callback
+    // fires only on genuine changes (init and every out-of-band /model
+    // switch), not once per assistant chunk.
+    let lastReportedModel: string | null = null;
+    const reportModel = (candidate: string | null | undefined) => {
+        if (!candidate || candidate === lastReportedModel) return;
+        lastReportedModel = candidate;
+        opts.onCurrentModelChange?.(candidate);
+    };
+
     try {
         logger.debug(`[claudeRemote] Starting to iterate over response`);
 
@@ -231,12 +246,21 @@ export async function claudeRemote(opts: {
                 : message;
             opts.onMessage(outboundMessage);
 
+            // Every assistant reply carries the model it was generated with —
+            // pick out changes so a `/model` switch typed directly at the
+            // Claude CLI (bypassing the app) still propagates back to the UI.
+            if (message.type === 'assistant') {
+                reportModel(message.message.model);
+            }
+
             // Handle special system messages
             if (message.type === 'system' && message.subtype === 'init') {
                 // Start thinking when session initializes
                 updateThinking(true);
 
                 const systemInit = message as SDKSystemMessage;
+
+                reportModel(systemInit.model);
 
                 // Session id is still in memory, wait until session file is written to disk
                 // Start a watcher for to detect the session id
