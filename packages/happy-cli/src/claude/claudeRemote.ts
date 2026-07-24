@@ -174,6 +174,48 @@ export async function claudeRemote(opts: {
     }
 
     updateThinking(true);
+
+    // Continuously pull queued follow-up messages and stream them straight
+    // into the live SDK input as soon as they're available, instead of
+    // waiting for the current turn's `result` event. This lets a message
+    // typed while Claude is still working reach it immediately, the same
+    // way typing ahead in an interactive terminal session behaves.
+    //
+    // `opts.nextMessage()` returns null both when the session is ending and
+    // when the queued message's mode (permission mode/model/effort) differs
+    // from the current turn's — in the latter case a fresh `claudeRemote`
+    // call is required to apply it, so the live stream must only be closed
+    // once the in-flight turn actually finishes (`thinking` is false).
+    // Otherwise we'd truncate a turn that's still running.
+    let messagesEnded = false;
+    let endMessagesOnceIdle = false;
+    const endMessages = () => {
+        if (!messagesEnded) {
+            messagesEnded = true;
+            messages.end();
+        }
+    };
+    const pumpNextMessage = (): void => {
+        opts.nextMessage().then((next) => {
+            if (!next) {
+                endMessagesOnceIdle = true;
+                if (!thinking) {
+                    endMessages();
+                }
+                return;
+            }
+            mode = next.mode;
+            messages.push({ type: 'user', parent_tool_use_id: null, message: { role: 'user', content: next.message } });
+            pumpNextMessage();
+        }).catch(() => {
+            endMessagesOnceIdle = true;
+            if (!thinking) {
+                endMessages();
+            }
+        });
+    };
+    pumpNextMessage();
+
     try {
         logger.debug(`[claudeRemote] Starting to iterate over response`);
 
@@ -247,19 +289,14 @@ export async function claudeRemote(opts: {
                 // Send ready event
                 opts.onReady();
 
-                // Wait for next user message without blocking the message loop.
-                // Background task messages (task_started, task_progress, task_notification)
-                // continue flowing through while we wait for user input.
-                opts.nextMessage().then((next) => {
-                    if (!next) {
-                        messages.end();
-                    } else {
-                        mode = next.mode;
-                        messages.push({ type: 'user', parent_tool_use_id: null, message: { role: 'user', content: next.message } });
-                    }
-                }).catch(() => {
-                    messages.end();
-                });
+                // Follow-up messages are streamed in continuously by
+                // `pumpNextMessage` above. If it already discovered there's
+                // nothing more to send for this turn's mode (session end or
+                // a pending mode change), it deferred closing the live
+                // stream until now — the turn just finished, so it's safe.
+                if (endMessagesOnceIdle) {
+                    endMessages();
+                }
             }
 
             // Handle tool result
