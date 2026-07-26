@@ -12,6 +12,7 @@ import { Metadata, Session } from '@/sync/storageTypes';
 import { ChatFooter } from './ChatFooter';
 import { Message } from '@/sync/typesMessage';
 import { DisplayItem, ToolGroupItem, useGroupedMessages } from '@/hooks/useGroupedMessages';
+import { useChatScrollToBottomRequest } from '@/hooks/useChatScrollToBottom';
 import { Octicons } from '@expo/vector-icons';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { Modal } from '@/modal';
@@ -295,6 +296,19 @@ const ChatListInternal = React.memo((props: {
     const scrollToBottom = useCallback(() => {
         flatListRef.current?.scrollToOffset({ offset: 0, animated: true });
     }, []);
+
+    // Sending is the one case where we must override the "don't move the
+    // user's viewport" rule above: the user just produced this message, so
+    // they expect to see it. We snap to the bottom on the send itself rather
+    // than after the bubble lands (the optimistic insert goes through an
+    // async lock, so it arrives a tick later) — once the viewport sits at
+    // offset 0, maintainVisibleContentPosition keeps it pinned as the new
+    // item is inserted. The second, deferred scroll covers platforms where
+    // that native anchoring doesn't apply (web).
+    useChatScrollToBottomRequest(props.sessionId, useCallback(() => {
+        scrollToBottom();
+        requestAnimationFrame(scrollToBottom);
+    }, [scrollToBottom]));
 
     // In an inverted FlatList, `onEndReached` fires when the user scrolls
     // past the visual top — i.e. when they want to see older history.

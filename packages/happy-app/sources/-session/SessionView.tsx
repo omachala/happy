@@ -16,6 +16,7 @@ import {
 import { getSuggestions } from '@/components/autocomplete/suggestions';
 import { ChatHeaderView } from '@/components/ChatHeaderView';
 import { ChatList } from '@/components/ChatList';
+import { requestChatScrollToBottom } from '@/hooks/useChatScrollToBottom';
 import { Deferred } from '@/components/Deferred';
 import { EmptyMessages } from '@/components/EmptyMessages';
 import { SessionStatusBar } from '@/components/SessionStatusBar';
@@ -651,6 +652,10 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
             composerHandleRef.current?.clearMessage();
             if (expImageUpload) clearImages();
             sync.sendMessage(sessionId, liveMessage, { source: 'chat', attachments });
+            // The chat list only auto-follows new messages while it is already
+            // parked at the bottom, so sending from scrolled-up history would
+            // otherwise drop the user's own bubble off-screen.
+            requestChatScrollToBottom(sessionId);
         }
     }, [sessionId, expImageUpload, selectedImages, clearImages]);
 

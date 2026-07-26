@@ -10,6 +10,7 @@ import { layout } from "./layout";
 import { ToolView } from "./tools/ToolView";
 import { AgentEvent } from "@/sync/typesRaw";
 import { sync } from '@/sync/sync';
+import { requestChatScrollToBottom } from '@/hooks/useChatScrollToBottom';
 import { useSetting } from '@/sync/storage';
 import { Option } from './markdown/MarkdownView';
 import { parseLocalCommandMessage, isUserSlashCommandEcho } from './parseLocalCommandMessage';
@@ -91,6 +92,7 @@ function UserTextBlock(props: {
 }) {
   const handleOptionPress = React.useCallback((option: Option) => {
     sync.sendMessage(props.sessionId, option.title, { source: 'option' });
+    requestChatScrollToBottom(props.sessionId);
   }, [props.sessionId]);
 
   const rewindPointId = props.message.claudeUuid ?? props.message.codexItemId;
@@ -188,6 +190,7 @@ function AgentTextBlock(props: {
 }) {
   const handleOptionPress = React.useCallback((option: Option) => {
     sync.sendMessage(props.sessionId, option.title, { source: 'option' });
+    requestChatScrollToBottom(props.sessionId);
   }, [props.sessionId]);
 
   // Hide thinking messages
