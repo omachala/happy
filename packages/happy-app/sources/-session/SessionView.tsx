@@ -510,8 +510,8 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
     // fresh session before the first turn init lands.
     const modelMode = React.useMemo<ModelMode | null>(() => (
         resolveCurrentOption(availableModels, [
-            isRig ? undefined : getClaudeFamilyKeyFromModelId(session.metadata?.currentAgentModel),
             session.modelMode,
+            isRig ? undefined : getClaudeFamilyKeyFromModelId(session.metadata?.currentAgentModel),
             isRig ? getRigCurrentModelOptionKey(session.metadata) : effectiveAgentDefaults.modelMode,
             isRig ? undefined : session.metadata?.currentModelCode,
         ])
