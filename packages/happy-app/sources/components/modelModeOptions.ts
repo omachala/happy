@@ -158,6 +158,16 @@ export function getAgyPermissionModes(translate: Translate): PermissionMode[] {
     ];
 }
 
+// opencode is driven over ACP and reports its real mode list at session start,
+// so `getAvailablePermissionModes` prefers metadata. This is only the pre-connect
+// fallback, kept to the same two entries as the other bypass-by-default agents.
+export function getOpenCodePermissionModes(translate: Translate): PermissionMode[] {
+    return [
+        { key: 'default', name: translate('agentInput.permissionMode.default'), description: null },
+        { key: 'bypassPermissions', name: translate('agentInput.permissionMode.bypassPermissions'), description: null },
+    ];
+}
+
 export function getHardcodedPermissionModes(flavor: AgentFlavor, translate: Translate): PermissionMode[] {
     if (flavor === 'codex') {
         return getCodexPermissionModes(translate);
@@ -170,6 +180,9 @@ export function getHardcodedPermissionModes(flavor: AgentFlavor, translate: Tran
     }
     if (flavor === 'agy') {
         return getAgyPermissionModes(translate);
+    }
+    if (flavor === 'opencode') {
+        return getOpenCodePermissionModes(translate);
     }
     return getClaudePermissionModes(translate);
 }
@@ -194,6 +207,15 @@ export function getAgyModelModes(): ModelMode[] {
     ];
 }
 
+// opencode only ever talks to the local Qwen on Cara — the CLI filters its
+// advertised ACP model list down to the same single entry, so this fallback and
+// the metadata path agree. The key is opencode's `provider/model` id.
+export function getOpenCodeModelModes(): ModelMode[] {
+    return [
+        { key: 'cara/qwen3.8-27b', name: 'qwen', description: 'Cara · 32K' },
+    ];
+}
+
 export function getHardcodedModelModes(flavor: AgentFlavor, _translate: Translate): ModelMode[] {
     if (flavor === 'codex') {
         return getCodexModelModes();
@@ -206,6 +228,9 @@ export function getHardcodedModelModes(flavor: AgentFlavor, _translate: Translat
     }
     if (flavor === 'agy') {
         return getAgyModelModes();
+    }
+    if (flavor === 'opencode') {
+        return getOpenCodeModelModes();
     }
     return getClaudeModelModes();
 }

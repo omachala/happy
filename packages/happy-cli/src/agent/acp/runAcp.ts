@@ -4,7 +4,7 @@ import { ApiClient } from '@/api/api';
 import type { ApiSessionClient } from '@/api/apiSession';
 import type { AgentMessage } from '@/agent/core';
 import { AcpBackend, type AcpPermissionHandler } from './AcpBackend';
-import { DefaultTransport } from '@/agent/transport';
+import { DefaultTransport, opencodeTransport, type TransportHandler } from '@/agent/transport';
 import { AcpSessionManager } from './AcpSessionManager';
 import type { SessionEnvelope } from '@slopus/happy-wire';
 import { logger } from '@/ui/logger';
@@ -21,6 +21,7 @@ import { startHappyServer } from '@/claude/utils/startHappyServer';
 import { projectPath } from '@/projectPath';
 import { BasePermissionHandler, type PermissionResult } from '@/utils/BasePermissionHandler';
 import { connectionState } from '@/utils/serverConnectionErrors';
+import { acquireExclusiveAgentLock } from '@/utils/exclusiveAgentLock';
 import {
   extractConfigOptionsFromPayload,
   extractCurrentModeIdFromPayload,
@@ -28,6 +29,11 @@ import {
   extractModelStateFromPayload,
   mergeAcpSessionConfigIntoMetadata,
 } from './sessionConfigMetadata';
+import {
+  applyAcpModelPolicyToConfigOptions,
+  applyAcpModelPolicyToModelState,
+  type AcpModelPolicy,
+} from './acpModelPolicy';
 import type { SessionConfigOption, SessionModeState, SessionModelState } from '@agentclientprotocol/sdk';
 
 const TURN_TIMEOUT_MS = 5 * 60 * 1000;
@@ -436,6 +442,13 @@ type PendingTurn = {
   timeout: NodeJS.Timeout;
 };
 
+function resolveTransportHandler(agentName: string): TransportHandler {
+  if (agentName === 'opencode') {
+    return opencodeTransport;
+  }
+  return new DefaultTransport(agentName);
+}
+
 function resolveSessionFlavor(agentName: string): 'gemini' | 'opencode' | 'acp' {
   if (agentName === 'gemini') {
     return 'gemini';
@@ -453,10 +466,22 @@ export async function runAcp(opts: {
   args: string[];
   startedBy?: 'daemon' | 'terminal';
   verbose?: boolean;
+  /** Only one session of this agent may run per machine (single-slot local model server) */
+  exclusive?: boolean;
+  /** Steal an existing exclusive lock instead of refusing to start */
+  force?: boolean;
+  /** Restricts advertised models and pins the model selected at session start (opencode) */
+  modelPolicy?: AcpModelPolicy;
 }): Promise<void> {
   const verbose = opts.verbose === true;
   const sessionTag = randomUUID();
   connectionState.setBackend(opts.agentName);
+
+  // Acquired before ApiClient.create so that a refused second attempt never creates a
+  // server-side session, which would leave a ghost session sitting in the app.
+  const exclusiveLock = opts.exclusive
+    ? await acquireExclusiveAgentLock(opts.agentName, { force: opts.force })
+    : null;
 
   const api = await ApiClient.create(opts.credentials);
   const settings = await readSettings();
@@ -543,7 +568,7 @@ export async function runAcp(opts: {
     args: opts.args,
     mcpServers,
     permissionHandler,
-    transportHandler: new DefaultTransport(opts.agentName),
+    transportHandler: resolveTransportHandler(opts.agentName),
     verbose,
   });
 
@@ -641,7 +666,11 @@ export async function runAcp(opts: {
     }
   };
 
-  const switchModelIfRequested = async (requestedModel: string): Promise<void> => {
+  /**
+   * `force` skips the "already current" shortcut. Used when pinning a model policy at session
+   * start, where the agent's advertised current value is known to be unreliable.
+   */
+  const switchModelIfRequested = async (requestedModel: string, force = false): Promise<void> => {
     if (!requestedModel) {
       return;
     }
@@ -652,7 +681,7 @@ export async function runAcp(opts: {
         logger.debug(`[${opts.agentName}] Ignoring unknown ACP model request: ${requestedModel}`);
         return;
       }
-      if (resolved === modelSelector.currentCode) {
+      if (resolved === modelSelector.currentCode && !force) {
         return;
       }
       const switched = await backend.setSessionConfigOption(modelSelector.configId, resolved);
@@ -671,7 +700,7 @@ export async function runAcp(opts: {
       logger.debug(`[${opts.agentName}] Ignoring unknown ACP legacy model request: ${requestedModel}`);
       return;
     }
-    if (resolvedLegacyModel === legacyModels.currentModelId) {
+    if (resolvedLegacyModel === legacyModels.currentModelId && !force) {
       return;
     }
 
@@ -682,6 +711,38 @@ export async function runAcp(opts: {
         currentModelId: resolvedLegacyModel,
       };
     }
+  };
+
+  const modelPolicy = opts.modelPolicy ?? null;
+
+  const describeModelPolicy = (): string => modelPolicy?.allowedModelIdPrefixes.join(', ') ?? '';
+
+  const filterConfigOptionsByModelPolicy = (configOptions: SessionConfigOption[]): SessionConfigOption[] => {
+    if (!modelPolicy) {
+      return configOptions;
+    }
+    const outcome = applyAcpModelPolicyToConfigOptions(configOptions, modelPolicy);
+    if (outcome.fellBack) {
+      logAcp('error', `Model policy for ${opts.agentName} matched no model (allowed prefixes: ${describeModelPolicy()}); advertising the unfiltered list`);
+      logger.debug(`[${opts.agentName}] Model policy matched no advertised model; keeping the unfiltered config options`);
+    } else if (outcome.removedCount > 0) {
+      logger.debug(`[${opts.agentName}] Model policy hid ${outcome.removedCount} model(s) not matching ${describeModelPolicy()}`);
+    }
+    return outcome.value;
+  };
+
+  const filterModelStateByModelPolicy = (models: SessionModelState): SessionModelState => {
+    if (!modelPolicy) {
+      return models;
+    }
+    const outcome = applyAcpModelPolicyToModelState(models, modelPolicy);
+    if (outcome.fellBack) {
+      logAcp('error', `Model policy for ${opts.agentName} matched no model (allowed prefixes: ${describeModelPolicy()}); advertising the unfiltered list`);
+      logger.debug(`[${opts.agentName}] Model policy matched no advertised model; keeping the unfiltered model state`);
+    } else if (outcome.removedCount > 0) {
+      logger.debug(`[${opts.agentName}] Model policy hid ${outcome.removedCount} legacy model(s) not matching ${describeModelPolicy()}`);
+    }
+    return outcome.value;
   };
 
   const onBackendMessage = (msg: AgentMessage) => {
@@ -706,7 +767,8 @@ export async function runAcp(opts: {
     }
 
     if (msg.type === 'event' && msg.name === 'config_options_update') {
-      const configOptions = extractConfigOptionsFromPayload(msg.payload);
+      const advertisedConfigOptions = extractConfigOptionsFromPayload(msg.payload);
+      const configOptions = advertisedConfigOptions ? filterConfigOptionsByModelPolicy(advertisedConfigOptions) : null;
       if (configOptions) {
         if (verbose) {
           logAcp('muted', `Outgoing config options from ${opts.agentName} (${configOptions.length}):`);
@@ -766,7 +828,8 @@ export async function runAcp(opts: {
     }
 
     if (msg.type === 'event' && msg.name === 'models_update') {
-      const models = extractModelStateFromPayload(msg.payload);
+      const advertisedModels = extractModelStateFromPayload(msg.payload);
+      const models = advertisedModels ? filterModelStateByModelPolicy(advertisedModels) : null;
       if (models) {
         legacyModels = models;
         sawModels = true;
@@ -812,9 +875,12 @@ export async function runAcp(opts: {
         thinking = nextThinking;
         session.keepAlive(thinking, 'remote');
       }
-      if (msg.status === 'idle') {
-        clearPendingTurn();
-      }
+      // NOTE: `status: 'idle'` deliberately does NOT end the turn. It is produced by a short
+      // inactivity timer (DEFAULT_IDLE_TIMEOUT_MS), which fires routinely between chunks on slow
+      // local models and around tool round-trips. Ending the turn there made every later chunk
+      // turn-less, and the app drops turn-less agent envelopes. The turn now ends when the ACP
+      // `session/prompt` request resolves, which is the protocol's actual end-of-turn signal.
+      // `idle` still drives the thinking indicator above.
       if (msg.status === 'error' || msg.status === 'stopped') {
         stopRunnerFromBackendStatus(msg.status, msg.detail);
       }
@@ -881,6 +947,19 @@ export async function runAcp(opts: {
   try {
     const started = await backend.startSession();
     acpSessionId = started.sessionId;
+
+    // OpenCode's ACP mode reports (and runs) a hosted model regardless of the `model` set in
+    // its own config, so the pinned model is selected explicitly rather than trusted from
+    // the advertised `currentValue`.
+    if (modelPolicy) {
+      try {
+        await switchModelIfRequested(modelPolicy.preferredModelId, true);
+        logAcp('muted', `Pinned ${opts.agentName} model to ${modelPolicy.preferredModelId}`);
+      } catch (error) {
+        logAcp('error', `Failed to pin ${opts.agentName} model to ${modelPolicy.preferredModelId}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+
     if (verbose) {
       if (!sawSlashCommands) {
         logAcp('muted', `Outgoing slash commands from ${opts.agentName}: not reported yet`);
@@ -921,6 +1000,10 @@ export async function runAcp(opts: {
           await switchModelIfRequested(batch.mode.model);
         }
         await backend.sendPrompt(acpSessionId, batch.message);
+        // `sendPrompt` awaits the ACP `session/prompt` request, which resolves only once the agent
+        // has finished the turn. That is the end-of-turn signal; `turnEnded` remains as the
+        // timeout backstop and as the path used by error/stopped statuses.
+        clearPendingTurn();
         await turnEnded;
         sendEnvelopes(sessionManager.endTurn('completed'));
         session.sendSessionEvent({ type: 'ready' });
@@ -936,6 +1019,7 @@ export async function runAcp(opts: {
       }
     }
   } finally {
+    await exclusiveLock?.release();
     clearInterval(keepAliveInterval);
     reconnectionHandle?.cancel();
     clearPendingTurn(new Error('ACP runner shutting down'));

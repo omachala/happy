@@ -1,6 +1,6 @@
 import * as z from 'zod';
 
-export const agentKeys = ['claude', 'codex', 'gemini', 'openclaw', 'agy'] as const;
+export const agentKeys = ['claude', 'codex', 'gemini', 'openclaw', 'agy', 'opencode'] as const;
 export type AgentKey = typeof agentKeys[number];
 
 export const AgentDefaultOverrideSchema = z.object({
@@ -15,6 +15,7 @@ export const AgentDefaultOverridesSchema = z.object({
     gemini: AgentDefaultOverrideSchema.optional(),
     openclaw: AgentDefaultOverrideSchema.optional(),
     agy: AgentDefaultOverrideSchema.optional(),
+    opencode: AgentDefaultOverrideSchema.optional(),
 }).passthrough().default({});
 
 export type AgentDefaultOverride = z.infer<typeof AgentDefaultOverrideSchema>;
@@ -37,10 +38,14 @@ const codeAgentDefaults: Record<AgentKey, AgentDefaultConfig> = {
     gemini: { permissionMode: 'yolo', modelMode: 'gemini-2.5-pro', effortLevel: null },
     openclaw: { permissionMode: 'bypassPermissions', modelMode: 'default', effortLevel: null },
     agy: { permissionMode: 'yolo', modelMode: 'Gemini 3.1 Pro (High)', effortLevel: null },
+    // opencode runs against the local Cara Qwen only. Its live ACP mode list wins
+    // over this default when the CLI reports one; `bypassPermissions` just keeps
+    // the never-prompt invariant before the session has connected.
+    opencode: { permissionMode: 'bypassPermissions', modelMode: 'cara/qwen3.8-27b', effortLevel: null },
 };
 
 export function normalizeAgentKey(flavor: string | null | undefined): AgentKey {
-    if (flavor === 'codex' || flavor === 'gemini' || flavor === 'openclaw' || flavor === 'agy') {
+    if (flavor === 'codex' || flavor === 'gemini' || flavor === 'openclaw' || flavor === 'agy' || flavor === 'opencode') {
         return flavor;
     }
     return 'claude';

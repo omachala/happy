@@ -37,6 +37,13 @@ export { createAcpBackend, type CreateAcpBackendOptions } from './createAcpBacke
 export { AcpSessionManager } from './AcpSessionManager';
 export { runAcp } from './runAcp';
 export { KNOWN_ACP_AGENTS, resolveAcpAgentConfig, type AcpAgentConfig, type ResolvedAcpAgentConfig } from './acpAgentConfig';
+export {
+  OPENCODE_MODEL_POLICY,
+  applyAcpModelPolicyToConfigOptions,
+  applyAcpModelPolicyToModelState,
+  type AcpModelPolicy,
+  type AcpModelPolicyOutcome,
+} from './acpModelPolicy';
 
 // Legacy aliases for backwards compatibility
 export { AcpBackend as AcpSdkBackend } from './AcpBackend';

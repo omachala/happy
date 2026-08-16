@@ -103,6 +103,53 @@ describe('mapClaudeLogMessageToSessionEnvelopes', () => {
         expect(result.envelopes[2]).toMatchObject({ usage });
     });
 
+    it('derives a 1M context window from a [1m] model id', () => {
+        const result = mapClaudeLogMessageToSessionEnvelopes({
+            type: 'assistant',
+            uuid: 'a-usage-1m',
+            message: {
+                role: 'assistant',
+                model: 'claude-opus-4-5-20260614[1m]',
+                usage: {
+                    input_tokens: 1200,
+                    output_tokens: 80,
+                },
+                content: [{ type: 'text', text: 'working...' }],
+            },
+            timestamp: '2025-01-01T00:00:01.000Z',
+        } as any, { currentTurnId: null });
+
+        expect(result.envelopes).toHaveLength(2);
+        expect(result.envelopes[1].usage).toMatchObject({
+            input_tokens: 1200,
+            output_tokens: 80,
+            context_window: 1_000_000,
+        });
+    });
+
+    it('omits the context window when the message carries no model', () => {
+        const result = mapClaudeLogMessageToSessionEnvelopes({
+            type: 'assistant',
+            uuid: 'a-usage-no-model',
+            message: {
+                role: 'assistant',
+                usage: {
+                    input_tokens: 1200,
+                    output_tokens: 80,
+                },
+                content: [{ type: 'text', text: 'working...' }],
+            },
+            timestamp: '2025-01-01T00:00:01.000Z',
+        } as any, { currentTurnId: null });
+
+        expect(result.envelopes).toHaveLength(2);
+        expect(result.envelopes[1].usage).toEqual({
+            input_tokens: 1200,
+            output_tokens: 80,
+        });
+        expect(result.envelopes[1].usage).not.toHaveProperty('context_window');
+    });
+
     it('maps tool use and tool result blocks to tool-call lifecycle', () => {
         const usage = {
             input_tokens: 900,

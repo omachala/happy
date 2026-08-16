@@ -67,6 +67,7 @@ const agentIcons = {
     openclaw: require('@/assets/images/icon-openclaw.png'),
     gemini: require('@/assets/images/icon-gemini.png'),
     agy: require('@/assets/images/icon-agy.png'),
+    opencode: require('@/assets/images/icon-opencode.png'),
 };
 
 type AgentKey = NewSessionAgentType;
@@ -76,6 +77,7 @@ const ALL_AGENTS: { key: AgentKey; label: string }[] = [
     { key: 'openclaw', label: 'openclaw' },
     { key: 'gemini', label: 'gemini (deprecated)' },
     { key: 'agy', label: 'agy' },
+    { key: 'opencode', label: 'opencode' },
 ];
 
 type PickerItem = { key: string; label: string; subtitle?: string; dimmed?: boolean };
@@ -734,7 +736,10 @@ function NewSessionScreen() {
     const availableAgents = React.useMemo(() => {
         const availability = selectedMachine?.metadata?.cliAvailability;
         if (!availability) return ALL_AGENTS;
-        return ALL_AGENTS.filter(a => availability[a.key]);
+        // Agents the daemon doesn't probe for (agy, opencode) come back as
+        // `undefined` — treat only an explicit `false` as "not installed" so a
+        // stale CLI can't hide them from the picker.
+        return ALL_AGENTS.filter(a => availability[a.key] !== false);
     }, [selectedMachine]);
 
     // If current agent not available on this machine, switch to first available

@@ -33,6 +33,7 @@ export type AgentMessage =
   | { type: 'terminal-output'; data: string }
   | { type: 'event'; name: string; payload: unknown }
   | { type: 'token-count'; [key: string]: unknown } // Token count information (format may vary)
+  | { type: 'usage'; used: number; size: number; costUsd?: number } // Context-window occupancy (ACP usage_update)
   | { type: 'exec-approval-request'; call_id: string; [key: string]: unknown } // Exec approval request (like Codex exec_approval_request)
   | { type: 'patch-apply-begin'; call_id: string; auto_approved?: boolean; changes: Record<string, unknown> } // Patch operation begin (like Codex patch_apply_begin)
   | { type: 'patch-apply-end'; call_id: string; stdout?: string; stderr?: string; success: boolean } // Patch operation end (like Codex patch_apply_end)

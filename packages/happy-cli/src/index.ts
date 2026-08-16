@@ -363,6 +363,7 @@ Conversation history is preserved on the server, but in-flight tool calls are in
 
       let startedBy: 'daemon' | 'terminal' | undefined = undefined;
       let verbose = false;
+      let force = false;
       const acpArgs: string[] = [];
       let customCommandMode = false;
       for (let i = 1; i < args.length; i++) {
@@ -372,6 +373,10 @@ Conversation history is preserved on the server, but in-flight tool calls are in
         }
         if (!customCommandMode && args[i] === '--verbose') {
           verbose = true;
+          continue;
+        }
+        if (!customCommandMode && args[i] === '--force') {
+          force = true;
           continue;
         }
         if (args[i] === '--') {
@@ -391,6 +396,51 @@ Conversation history is preserved on the server, but in-flight tool calls are in
         agentName: resolved.agentName,
         command: resolved.command,
         args: resolved.args,
+        exclusive: resolved.exclusive,
+        modelPolicy: resolved.modelPolicy,
+        force,
+      });
+    } catch (error) {
+      console.error(chalk.red('Error:'), error instanceof Error ? error.message : 'Unknown error')
+      if (process.env.DEBUG) {
+        console.error(error)
+      }
+      process.exit(1)
+    }
+    return;
+  } else if (subcommand === 'opencode') {
+    // opencode is an ACP agent, but it gets a first-class subcommand so the
+    // daemon can spawn it the same way it spawns every other agent
+    // (`happy <agent> --happy-starting-mode remote --started-by daemon`).
+    try {
+      const { runAcp, KNOWN_ACP_AGENTS } = await import('@/agent/acp');
+
+      let startedBy: 'daemon' | 'terminal' | undefined = undefined;
+      let verbose = false;
+      let force = false;
+      for (let i = 1; i < args.length; i++) {
+        if (args[i] === '--started-by') {
+          startedBy = args[++i] as 'daemon' | 'terminal';
+        } else if (args[i] === '--verbose') {
+          verbose = true;
+        } else if (args[i] === '--force') {
+          force = true;
+        }
+      }
+
+      const { credentials } = await authAndSetupMachineIfNeeded();
+      await ensureDaemonRunning()
+
+      await runAcp({
+        credentials,
+        startedBy,
+        verbose,
+        agentName: 'opencode',
+        command: KNOWN_ACP_AGENTS.opencode.command,
+        args: KNOWN_ACP_AGENTS.opencode.args,
+        exclusive: KNOWN_ACP_AGENTS.opencode.exclusive,
+        modelPolicy: KNOWN_ACP_AGENTS.opencode.modelPolicy,
+        force,
       });
     } catch (error) {
       console.error(chalk.red('Error:'), error instanceof Error ? error.message : 'Unknown error')
@@ -717,6 +767,7 @@ ${chalk.bold('Usage:')}
   happy codex             Start Codex mode
   happy gemini            Start Gemini mode (ACP) [deprecated — use agy]
   happy agy               Start agy (Antigravity CLI) mode
+  happy opencode          Start OpenCode mode (ACP)
   happy acp               Start a generic ACP-compatible agent
   happy connect           Connect AI vendor API keys
   happy sandbox           Configure and manage OS-level sandboxing

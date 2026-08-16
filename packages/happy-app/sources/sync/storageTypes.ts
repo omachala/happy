@@ -336,6 +336,7 @@ export const MachineMetadataSchema = z.object({
         gemini: z.boolean(),
         openclaw: z.boolean(),
         agy: z.boolean().optional(), // optional: older CLIs don't report agy
+        opencode: z.boolean().optional(), // optional: the CLI doesn't probe for opencode yet
         detectedAt: z.number(),
     }).optional(),
     resumeSupport: z.object({

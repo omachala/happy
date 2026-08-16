@@ -24,8 +24,21 @@ const flavorIcons = {
     codex: require('@/assets/images/icon-gpt.png'),
     gemini: require('@/assets/images/icon-gemini.png'),
     openclaw: require('@/assets/images/icon-openclaw.png'),
+    opencode: require('@/assets/images/icon-opencode.png'),
     rig: require('@/assets/images/icon-rig.png'),
 };
+
+// Icons are drawn inside a `circleSize` (0.35 * size) plate. Most marks are
+// transparent glyphs and can fill it; claude/codex read better inset a little.
+// opencode ships its own opaque dark rounded-square tile, so it gets inset too —
+// otherwise it covers the plate entirely and the badge loses its light ring on
+// light themes and any separation from a dark avatar on dark themes.
+function getFlavorIconSize(flavor: string, size: number): number {
+    if (flavor === 'codex') return Math.round(size * 0.25);
+    if (flavor === 'claude') return Math.round(size * 0.28);
+    if (flavor === 'opencode') return Math.round(size * 0.27);
+    return Math.round(size * 0.35);
+}
 
 const styles = StyleSheet.create((theme) => ({
     container: {
@@ -79,11 +92,7 @@ export const Avatar = React.memo((props: AvatarProps) => {
             const effectiveFlavor = clientId === 'rig' ? 'rig' : (flavor || 'claude');
             const flavorIcon = flavorIcons[effectiveFlavor as keyof typeof flavorIcons] || flavorIcons.claude;
             const circleSize = Math.round(size * 0.35);
-            const iconSize = effectiveFlavor === 'codex'
-                ? Math.round(size * 0.25)
-                : effectiveFlavor === 'claude'
-                    ? Math.round(size * 0.28)
-                    : Math.round(size * 0.35);
+            const iconSize = getFlavorIconSize(effectiveFlavor, size);
 
             return (
                 <View style={[styles.container, { width: size, height: size }]}>
@@ -125,11 +134,7 @@ export const Avatar = React.memo((props: AvatarProps) => {
     // Make icons smaller while keeping same circle size
     // Claude slightly bigger than codex
     const circleSize = Math.round(size * 0.35);
-    const iconSize = effectiveFlavor === 'codex'
-        ? Math.round(size * 0.25)
-        : effectiveFlavor === 'claude'
-            ? Math.round(size * 0.28)
-            : Math.round(size * 0.35);
+    const iconSize = getFlavorIconSize(effectiveFlavor, size);
 
     // Only wrap in container if showing flavor icons and flavor was provided
     if (showFlavorIcons && (flavor !== null || clientId === 'rig')) {

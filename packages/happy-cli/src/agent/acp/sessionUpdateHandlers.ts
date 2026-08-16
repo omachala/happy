@@ -8,7 +8,7 @@
  * Extracted from AcpBackend to improve maintainability and testability.
  */
 
-import type { AgentMessage } from '../core';
+import type { AgentMessage, UsageMessage } from '../core';
 import type { TransportHandler } from '../transport';
 import { logger } from '@/ui/logger';
 
@@ -42,6 +42,15 @@ export interface SessionUpdate {
   };
   plan?: unknown;
   thinking?: unknown;
+  /** `usage_update`: tokens currently occupying the context window */
+  used?: number;
+  /** `usage_update`: context window size of the active model */
+  size?: number;
+  /** `usage_update`: accumulated cost, reported as an amount plus a currency code */
+  cost?: {
+    amount?: number;
+    currency?: string;
+  };
   [key: string]: unknown;
 }
 
@@ -81,6 +90,34 @@ export interface HandlerResult {
   handled: boolean;
   /** Updated tool call counter */
   toolCallCountSincePrompt?: number;
+}
+
+/**
+ * Parse a `usage_update` session update into a {@link UsageMessage}.
+ *
+ * Pure, so it is trivially testable without a live agent. Returns `null` for any payload that
+ * cannot produce a meaningful occupancy ratio — a zero or negative `size` would make the app
+ * divide by zero, and a negative `used` is nonsense. Callers should skip emitting on `null`
+ * rather than substituting a guess, so the app keeps its own fallback.
+ *
+ * opencode reports cost as `{ amount, currency }` rather than a bare number; only USD amounts are
+ * carried through, since the field is typed as USD downstream.
+ */
+export function parseUsageUpdate(update: SessionUpdate): UsageMessage | null {
+  const { used, size, cost } = update;
+  if (typeof used !== 'number' || !Number.isFinite(used) || used < 0) {
+    return null;
+  }
+  if (typeof size !== 'number' || !Number.isFinite(size) || size <= 0) {
+    return null;
+  }
+
+  const amount = cost?.amount;
+  const costUsd = typeof amount === 'number' && Number.isFinite(amount) && cost?.currency === 'USD'
+    ? amount
+    : undefined;
+
+  return { type: 'usage', used, size, ...(costUsd === undefined ? {} : { costUsd }) };
 }
 
 /**
