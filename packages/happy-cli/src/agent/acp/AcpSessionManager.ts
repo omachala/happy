@@ -39,6 +39,13 @@ export class AcpSessionManager {
   private pendingText = '';
   private pendingType: 'thinking' | 'output' | null = null;
 
+  /**
+   * Last emitted usage, for deduping. Agents re-report a stationary meter on mode change and
+   * session load, and we don't want envelope spam for an unchanged value.
+   */
+  private lastUsageUsed: number | null = null;
+  private lastUsageSize: number | null = null;
+
   private nextTime(): number {
     this.lastTime = Math.max(this.lastTime + 1, Date.now());
     return this.lastTime;
@@ -128,6 +135,28 @@ export class AcpSessionManager {
 
     if (msg.type === 'status') {
       return [];
+    }
+
+    if (msg.type === 'usage') {
+      if (msg.used === this.lastUsageUsed && msg.size === this.lastUsageSize) {
+        return [];
+      }
+      this.lastUsageUsed = msg.used;
+      this.lastUsageSize = msg.size;
+
+      // Deliberately turn-less and non-flushing: the app exempts usage-only service envelopes from
+      // the "agent envelopes need a turn id" rule and renders zero chat rows for them. Attaching a
+      // turn would make it a chat row; flushing would split the in-progress message in two.
+      //
+      // `used` is already the fully-collapsed tokens-in-context, so folding it entirely into
+      // `input_tokens` makes the app's derived context size come out exactly equal to `used`.
+      // Do not guess a cache split.
+      return [
+        createEnvelope('agent', { t: 'service', text: '' }, {
+          time: this.nextTime(),
+          usage: { input_tokens: msg.used, output_tokens: 0, context_window: msg.size },
+        }),
+      ];
     }
 
     if (msg.type === 'model-output') {

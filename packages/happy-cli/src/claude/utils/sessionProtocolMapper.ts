@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { createId } from '@paralleldrive/cuid2';
 import type { RawJSONLines } from '@/claude/types';
+import { claudeContextWindowForModel } from '@/claude/utils/claudeContextWindow';
 import {
     createEnvelope,
     type SessionEnvelope,
@@ -411,7 +412,17 @@ function usageFromClaudeMessage(message: RawJSONLines): SessionUsage | undefined
     if (message.type !== 'assistant') {
         return undefined;
     }
-    return message.message?.usage;
+    const usage = message.message?.usage;
+    if (!usage) {
+        return undefined;
+    }
+    // Claude never reports the context window, so derive it from the model id
+    // (1M-context sessions otherwise render against the app's 190k fallback).
+    const contextWindow = claudeContextWindowForModel(message.message?.model);
+    return {
+        ...usage,
+        ...(contextWindow !== undefined ? { context_window: contextWindow } : {}),
+    };
 }
 
 function canCarryUsage(envelope: SessionEnvelope): boolean {

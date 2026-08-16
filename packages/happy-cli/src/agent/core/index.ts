@@ -54,6 +54,7 @@ export type {
   TerminalOutputMessage,
   EventMessage,
   TokenCountMessage,
+  UsageMessage,
   ExecApprovalRequestMessage,
   PatchApplyBeginMessage,
   PatchApplyEndMessage,

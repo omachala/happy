@@ -106,6 +106,7 @@ import {
   handleLegacyMessageChunk,
   handlePlanUpdate,
   handleThinkingUpdate,
+  parseUsageUpdate,
 } from './sessionUpdateHandlers';
 
 /**
@@ -1007,6 +1008,16 @@ export class AcpBackend implements AgentBackend {
       return;
     }
 
+    // Context-window occupancy. Generic ACP concern, so this benefits any agent that reports it,
+    // not just opencode. Dropped silently before this dispatch existed.
+    if (updateType === 'usage_update') {
+      const usage = parseUsageUpdate(update as SessionUpdate);
+      if (usage) {
+        this.emit(usage);
+      }
+      return;
+    }
+
     // Handle legacy and auxiliary update types
     handleLegacyMessageChunk(update as SessionUpdate, ctx);
     handlePlanUpdate(update as SessionUpdate, ctx);
@@ -1023,6 +1034,7 @@ export class AcpBackend implements AgentBackend {
       'config_option_update',
       'config_options_update',
       'current_mode_update',
+      'usage_update',
     ];
     if (updateType &&
         !handledTypes.includes(updateType) &&

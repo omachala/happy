@@ -393,3 +393,48 @@ describe('AcpSessionManager id consistency', () => {
     expect(isCuid(secondStart.turn!)).toBe(true);
   });
 });
+
+describe('AcpSessionManager usage envelopes', () => {
+  it('emits a turn-less usage-only service envelope', () => {
+    const mapper = new AcpSessionManager();
+    const envelopes = mapper.mapMessage({ type: 'usage', used: 22848, size: 200000 });
+
+    expect(envelopes).toHaveLength(1);
+    expect(envelopes[0].ev).toEqual({ t: 'service', text: '' });
+    // The app exempts usage-only service envelopes from the "agent envelopes need a turn id"
+    // rule; attaching a turn here would render it as a chat row.
+    expect(envelopes[0].turn).toBeUndefined();
+    expect(envelopes[0].usage).toEqual({
+      input_tokens: 22848,
+      output_tokens: 0,
+      context_window: 200000,
+    });
+  });
+
+  it('dedupes an unchanged meter', () => {
+    const mapper = new AcpSessionManager();
+
+    expect(mapper.mapMessage({ type: 'usage', used: 100, size: 32768 })).toHaveLength(1);
+    // Agents re-report on mode change and session load; a stationary meter must not spam.
+    expect(mapper.mapMessage({ type: 'usage', used: 100, size: 32768 })).toHaveLength(0);
+    expect(mapper.mapMessage({ type: 'usage', used: 101, size: 32768 })).toHaveLength(1);
+    // A model switch changes the denominator even when `used` holds still.
+    expect(mapper.mapMessage({ type: 'usage', used: 101, size: 200000 })).toHaveLength(1);
+  });
+
+  it('neither flushes pending text nor steals the turn id mid-turn', () => {
+    const mapper = new AcpSessionManager();
+    const start = mapper.startTurn();
+    mapper.mapMessage({ type: 'model-output', textDelta: 'half an answer' });
+
+    const usage = mapper.mapMessage({ type: 'usage', used: 5, size: 32768 });
+    expect(usage).toHaveLength(1);
+    expect(usage[0].turn).toBeUndefined();
+
+    // The in-progress message must still be intact and land under the original turn.
+    const ended = mapper.endTurn('completed');
+    expect(ended.map((e) => e.ev.t)).toEqual(['text', 'turn-end']);
+    expect((ended[0].ev as { text: string }).text).toBe('half an answer');
+    expect(ended[0].turn).toBe(start[0].turn);
+  });
+});

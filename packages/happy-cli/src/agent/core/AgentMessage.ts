@@ -119,6 +119,25 @@ export interface TokenCountMessage {
 }
 
 /**
+ * Usage message - context-window occupancy reported by the agent.
+ *
+ * Distinct from the loose {@link TokenCountMessage}: this is strictly typed so it can be
+ * discriminated safely. ACP agents report it via the `usage_update` session update.
+ *
+ * `used` is the fully-collapsed "tokens currently in context" (opencode already folds cache reads
+ * into it), and `size` is the model's context limit — so `used / size` is the occupancy ratio.
+ */
+export interface UsageMessage {
+  type: 'usage';
+  /** Tokens currently occupying the context window */
+  used: number;
+  /** Total context window size for the active model */
+  size: number;
+  /** Accumulated cost in USD, when the agent reports one */
+  costUsd?: number;
+}
+
+/**
  * Exec approval request message (Codex-style)
  */
 export interface ExecApprovalRequestMessage {
@@ -165,6 +184,7 @@ export type AgentMessage =
   | TerminalOutputMessage
   | EventMessage
   | TokenCountMessage
+  | UsageMessage
   | ExecApprovalRequestMessage
   | PatchApplyBeginMessage
   | PatchApplyEndMessage;
