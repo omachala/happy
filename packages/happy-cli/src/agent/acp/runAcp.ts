@@ -4,7 +4,7 @@ import { ApiClient } from '@/api/api';
 import type { ApiSessionClient } from '@/api/apiSession';
 import type { AgentMessage } from '@/agent/core';
 import { AcpBackend, type AcpPermissionHandler } from './AcpBackend';
-import { DefaultTransport } from '@/agent/transport';
+import { DefaultTransport, opencodeTransport, type TransportHandler } from '@/agent/transport';
 import { AcpSessionManager } from './AcpSessionManager';
 import type { SessionEnvelope } from '@slopus/happy-wire';
 import { logger } from '@/ui/logger';
@@ -436,6 +436,13 @@ type PendingTurn = {
   timeout: NodeJS.Timeout;
 };
 
+function resolveTransportHandler(agentName: string): TransportHandler {
+  if (agentName === 'opencode') {
+    return opencodeTransport;
+  }
+  return new DefaultTransport(agentName);
+}
+
 function resolveSessionFlavor(agentName: string): 'gemini' | 'opencode' | 'acp' {
   if (agentName === 'gemini') {
     return 'gemini';
@@ -543,7 +550,7 @@ export async function runAcp(opts: {
     args: opts.args,
     mcpServers,
     permissionHandler,
-    transportHandler: new DefaultTransport(opts.agentName),
+    transportHandler: resolveTransportHandler(opts.agentName),
     verbose,
   });
 
@@ -812,9 +819,12 @@ export async function runAcp(opts: {
         thinking = nextThinking;
         session.keepAlive(thinking, 'remote');
       }
-      if (msg.status === 'idle') {
-        clearPendingTurn();
-      }
+      // NOTE: `status: 'idle'` deliberately does NOT end the turn. It is produced by a short
+      // inactivity timer (DEFAULT_IDLE_TIMEOUT_MS), which fires routinely between chunks on slow
+      // local models and around tool round-trips. Ending the turn there made every later chunk
+      // turn-less, and the app drops turn-less agent envelopes. The turn now ends when the ACP
+      // `session/prompt` request resolves, which is the protocol's actual end-of-turn signal.
+      // `idle` still drives the thinking indicator above.
       if (msg.status === 'error' || msg.status === 'stopped') {
         stopRunnerFromBackendStatus(msg.status, msg.detail);
       }
@@ -921,6 +931,10 @@ export async function runAcp(opts: {
           await switchModelIfRequested(batch.mode.model);
         }
         await backend.sendPrompt(acpSessionId, batch.message);
+        // `sendPrompt` awaits the ACP `session/prompt` request, which resolves only once the agent
+        // has finished the turn. That is the end-of-turn signal; `turnEnded` remains as the
+        // timeout backstop and as the path used by error/stopped statuses.
+        clearPendingTurn();
         await turnEnded;
         sendEnvelopes(sessionManager.endTurn('completed'));
         session.sendSessionEvent({ type: 'ready' });

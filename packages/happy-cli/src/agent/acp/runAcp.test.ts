@@ -37,6 +37,13 @@ const mocks = vi.hoisted(() => {
     cancelCalls: [] as string[],
     disposeCalls: 0,
     constructorArgs: null as any,
+    /**
+     * Overrides the default prompt behaviour. Receives the backend listeners so a test can
+     * control exactly when messages are emitted relative to the prompt promise resolving —
+     * which is what distinguishes "turn ended by the idle heuristic" from "turn ended by the
+     * ACP prompt response".
+     */
+    promptImpl: null as null | ((emit: (message: any) => void) => Promise<void>),
   };
 
   return {
@@ -144,13 +151,20 @@ vi.mock('./AcpBackend', () => ({
 
     async sendPrompt(sessionId: string, prompt: string) {
       mocks.backendState.prompts.push({ sessionId, prompt });
-      for (const listener of mocks.backendState.listeners) {
-        listener({ type: 'status', status: 'running' });
-        listener({ type: 'model-output', textDelta: 'hello' });
-        listener({ type: 'tool-call', toolName: 'ReadFile', args: { path: 'README.md' }, callId: 'tool-1' });
-        listener({ type: 'tool-result', toolName: 'ReadFile', result: { ok: true }, callId: 'tool-1' });
-        listener({ type: 'status', status: 'idle' });
+      const emit = (message: any) => {
+        for (const listener of mocks.backendState.listeners) {
+          listener(message);
+        }
+      };
+      if (mocks.backendState.promptImpl) {
+        await mocks.backendState.promptImpl(emit);
+        return;
       }
+      emit({ type: 'status', status: 'running' });
+      emit({ type: 'model-output', textDelta: 'hello' });
+      emit({ type: 'tool-call', toolName: 'ReadFile', args: { path: 'README.md' }, callId: 'tool-1' });
+      emit({ type: 'tool-result', toolName: 'ReadFile', result: { ok: true }, callId: 'tool-1' });
+      emit({ type: 'status', status: 'idle' });
     }
 
     async setSessionConfigOption(configId: string, value: string) {
@@ -205,6 +219,7 @@ describe('runAcp', () => {
     mocks.backendState.cancelCalls = [];
     mocks.backendState.disposeCalls = 0;
     mocks.backendState.constructorArgs = null;
+    mocks.backendState.promptImpl = null;
 
     mocks.mockApiCreate.mockResolvedValue({
       getOrCreateMachine: mocks.mockGetOrCreateMachine,
@@ -265,6 +280,125 @@ describe('runAcp', () => {
       'Tool: ReadFile completed (callId=tool-1)',
       'Status: idle',
     ]));
+  });
+
+  it('keeps the turn open when the backend reports idle mid-stream', async () => {
+    // `status: 'idle'` comes from a short inactivity timer, not from the protocol. On slow local
+    // models it fires between ordinary chunks. If it ended the turn, every later chunk would be
+    // emitted without a turn id and the app would drop it.
+    mocks.backendState.promptImpl = async (emit) => {
+      emit({ type: 'status', status: 'running' });
+      emit({ type: 'model-output', textDelta: 'first half' });
+      emit({ type: 'status', status: 'idle' });
+      emit({ type: 'model-output', textDelta: 'second half' });
+    };
+
+    const runPromise = runAcp({
+      credentials: { token: 'token', encryption: { type: 'legacy', secret: new Uint8Array(32) } },
+      agentName: 'opencode',
+      command: 'opencode',
+      args: ['acp'],
+    });
+
+    await vi.waitFor(() => {
+      expect(mocks.getUserMessageHandler()).toBeTypeOf('function');
+    });
+
+    mocks.getUserMessageHandler()!({
+      role: 'user',
+      content: { type: 'text', text: 'Write a long answer' },
+    });
+
+    await vi.waitFor(() => {
+      expect(mocks.backendState.prompts).toHaveLength(1);
+    });
+
+    await mocks.getKillHandler()!();
+    await runPromise;
+
+    const envelopes = mocks.mockSession.sendSessionProtocolMessage.mock.calls.map(([envelope]) => envelope);
+    // The intervening `idle` does not flush: consecutive model-output deltas accumulate and are
+    // emitted as a single text envelope when the turn ends. Pre-fix, `idle` closed the turn here,
+    // so 'second half' was flushed turn-less and the app dropped it.
+    expect(envelopes.map((envelope) => envelope.ev.t)).toEqual([
+      'turn-start',
+      'text',
+      'turn-end',
+    ]);
+    expect(envelopes[1].ev.text).toContain('first half');
+    expect(envelopes[1].ev.text).toContain('second half');
+
+    // Every envelope must carry the same turn id, otherwise the app discards it.
+    const turnId = envelopes[0].turn;
+    expect(turnId).toBeTruthy();
+    for (const envelope of envelopes) {
+      expect(envelope.turn).toBe(turnId);
+    }
+  });
+
+  it('ends the turn when the ACP prompt request resolves', async () => {
+    let resolvePrompt: (() => void) | null = null;
+    mocks.backendState.promptImpl = async (emit) => {
+      emit({ type: 'status', status: 'running' });
+      emit({ type: 'model-output', textDelta: 'working' });
+      await new Promise<void>((resolve) => {
+        resolvePrompt = resolve;
+      });
+    };
+
+    const runPromise = runAcp({
+      credentials: { token: 'token', encryption: { type: 'legacy', secret: new Uint8Array(32) } },
+      agentName: 'opencode',
+      command: 'opencode',
+      args: ['acp'],
+    });
+
+    await vi.waitFor(() => {
+      expect(mocks.getUserMessageHandler()).toBeTypeOf('function');
+    });
+
+    mocks.getUserMessageHandler()!({
+      role: 'user',
+      content: { type: 'text', text: 'Take your time' },
+    });
+
+    await vi.waitFor(() => {
+      expect(resolvePrompt).toBeTypeOf('function');
+    });
+
+    const envelopeTypes = () => mocks.mockSession.sendSessionProtocolMessage.mock.calls
+      .map(([envelope]) => envelope.ev.t);
+
+    // Prompt still in flight: the turn must not have been closed.
+    expect(envelopeTypes()).not.toContain('turn-end');
+
+    resolvePrompt!();
+
+    await vi.waitFor(() => {
+      expect(envelopeTypes()).toContain('turn-end');
+    });
+
+    await mocks.getKillHandler()!();
+    await runPromise;
+  });
+
+  it('uses the opencode transport handler for opencode sessions', async () => {
+    const runPromise = runAcp({
+      credentials: { token: 'token', encryption: { type: 'legacy', secret: new Uint8Array(32) } },
+      agentName: 'opencode',
+      command: 'opencode',
+      args: ['acp'],
+    });
+
+    await vi.waitFor(() => {
+      expect(mocks.backendState.startSessionCalls).toBe(1);
+    });
+
+    await mocks.getKillHandler()!();
+    await runPromise;
+
+    // Local models routinely pause longer than the 500ms default between chunks.
+    expect(mocks.backendState.constructorArgs.transportHandler.getIdleTimeout()).toBe(15_000);
   });
 
   it('registers abort handler that cancels the ACP backend session', async () => {
