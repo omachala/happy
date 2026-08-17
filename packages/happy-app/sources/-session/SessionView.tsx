@@ -554,8 +554,9 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
             throw new HappyError('Cannot restart: session is missing machine or directory metadata', false);
         }
         const flavorRaw = session.metadata?.flavor;
-        const agent: 'claude' | 'codex' | 'gemini' | 'openclaw' =
+        const agent: 'claude' | 'codex' | 'gemini' | 'openclaw' | 'agy' | 'opencode' =
             flavorRaw === 'codex' || flavorRaw === 'gemini' || flavorRaw === 'openclaw'
+                || flavorRaw === 'agy' || flavorRaw === 'opencode'
                 ? flavorRaw
                 : 'claude';
 

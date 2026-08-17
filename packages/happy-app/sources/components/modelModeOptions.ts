@@ -216,6 +216,18 @@ export function getOpenCodeModelModes(): ModelMode[] {
     ];
 }
 
+// opencode advertises its ACP models with the provider-qualified id as the display
+// name (`cara/qwen3.8-27b`). That label is long enough to push the abort and clear
+// buttons out of the input's action row, so collapse it to the model family.
+function shortenOpenCodeModelName(key: string, name: string): string {
+    const hardcoded = getOpenCodeModelModes().find((model) => model.key === key);
+    if (hardcoded) {
+        return hardcoded.name;
+    }
+    const withoutProvider = name.slice(name.lastIndexOf('/') + 1);
+    return withoutProvider.match(/^[a-z]+/i)?.[0].toLowerCase() ?? withoutProvider;
+}
+
 export function getHardcodedModelModes(flavor: AgentFlavor, _translate: Translate): ModelMode[] {
     if (flavor === 'codex') {
         return getCodexModelModes();
@@ -292,6 +304,12 @@ export function getAvailableModels(
     }
     const metadataModels = mapMetadataOptions(metadata?.models);
     if (metadataModels.length > 0) {
+        if (flavor === 'opencode') {
+            return metadataModels.map((model) => ({
+                ...model,
+                name: shortenOpenCodeModelName(model.key, model.name),
+            }));
+        }
         if (flavor === 'codex' && !metadataModels.some((model) => model.key === 'default')) {
             return [{ key: 'default', name: 'default model', description: null }, ...metadataModels];
         }

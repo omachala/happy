@@ -1019,6 +1019,10 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
                                             height: 32,
                                             opacity: p.pressed ? 0.7 : 1,
                                             gap: 6,
+                                            // The action row clips its overflow, so an unusually long
+                                            // model name would otherwise push the abort and clear
+                                            // buttons off the edge instead of truncating itself.
+                                            flexShrink: 1,
                                         })}
                                     >
                                         <Octicons
@@ -1026,12 +1030,17 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
                                             size={13}
                                             color={theme.colors.button.secondary.tint}
                                         />
-                                        <Text style={{
-                                            fontSize: 13,
-                                            color: props.modelConfirmed ? theme.colors.success : theme.colors.button.secondary.tint,
-                                            fontWeight: '600',
-                                            ...Typography.default('semiBold'),
-                                        }}>
+                                        <Text
+                                            numberOfLines={1}
+                                            ellipsizeMode="tail"
+                                            style={{
+                                                fontSize: 13,
+                                                color: props.modelConfirmed ? theme.colors.success : theme.colors.button.secondary.tint,
+                                                fontWeight: '600',
+                                                flexShrink: 1,
+                                                ...Typography.default('semiBold'),
+                                            }}
+                                        >
                                             {props.modelMode?.name ?? t('agentInput.model.title')}
                                         </Text>
                                     </Pressable>

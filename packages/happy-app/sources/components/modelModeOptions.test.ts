@@ -89,6 +89,28 @@ describe('modelModeOptions', () => {
         ]);
     });
 
+    it('shortens opencode metadata model names to the model family', () => {
+        const models = getAvailableModels('opencode', {
+            models: [
+                { code: 'cara/qwen3.8-27b', value: 'cara/qwen3.8-27b', description: 'Cara · 32K' },
+            ],
+        } as any, translate);
+
+        expect(models).toEqual([
+            { key: 'cara/qwen3.8-27b', name: 'qwen', description: 'Cara · 32K' },
+        ]);
+    });
+
+    it('shortens unknown opencode models that miss the hardcoded list', () => {
+        const models = getAvailableModels('opencode', {
+            models: [
+                { code: 'cara/llama4-70b-instruct', value: 'cara/llama4-70b-instruct', description: null },
+            ],
+        } as any, translate);
+
+        expect(models[0].name).toBe('llama');
+    });
+
     it('adds codex default model option when metadata models are present', () => {
         const models = getAvailableModels('codex', {
             models: [
