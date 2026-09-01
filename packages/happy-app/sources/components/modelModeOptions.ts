@@ -94,31 +94,31 @@ export function getGeminiPermissionModes(translate: Translate): PermissionMode[]
 }
 
 export function getClaudeModelModes(): ModelMode[] {
-    // Opus is pinned to `claude-opus-5` explicitly (not the family alias) so
-    // the fork can never silently drop to an older Opus if Anthropic's alias
-    // lags behind a release. Sonnet/Haiku stay as family aliases and resolve
-    // to whatever the CLI considers current. Display names remain plain.
+    // Every entry is pinned to an explicit versioned model id (never a family
+    // alias like `sonnet`) so the fork can't silently drop to an older release
+    // when Anthropic's alias lags. Display names carry the version number so
+    // what the picker shows is exactly what gets sent as `--model`.
     return [
-        { key: 'claude-fable-5', name: 'fable', description: 'latest & most capable' },
-        { key: 'claude-opus-5', name: 'opus', description: null },
-        { key: 'sonnet', name: 'sonnet', description: null },
-        { key: 'haiku', name: 'haiku', description: null },
+        { key: 'claude-fable-5-1', name: 'fable 5.1', description: 'latest & most capable' },
+        { key: 'claude-opus-5', name: 'opus 5', description: null },
+        { key: 'claude-sonnet-5', name: 'sonnet 5', description: null },
+        { key: 'claude-haiku-4-5', name: 'haiku 4.5', description: null },
     ];
 }
 
 /**
  * Collapse a raw Anthropic model id (e.g. "claude-opus-4-5-20260614",
- * "claude-fable-5-0-20260701") to the picker key of its family so the
+ * "claude-fable-5-1-20260901") to the picker key of its family so the
  * model chip can show the live CLI-reported model even when it differs
  * from the user's picked `modelMode`.
  */
 export function getClaudeFamilyKeyFromModelId(rawModel: string | null | undefined): string | null {
     if (!rawModel) return null;
     const id = rawModel.toLowerCase();
-    if (id.includes('fable')) return 'claude-fable-5';
+    if (id.includes('fable')) return 'claude-fable-5-1';
     if (id.includes('opus')) return 'claude-opus-5';
-    if (id.includes('sonnet')) return 'sonnet';
-    if (id.includes('haiku')) return 'haiku';
+    if (id.includes('sonnet')) return 'claude-sonnet-5';
+    if (id.includes('haiku')) return 'claude-haiku-4-5';
     return null;
 }
 

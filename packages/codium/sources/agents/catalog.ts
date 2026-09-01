@@ -27,16 +27,16 @@ export const AGENT_MODELS: AgentModel[] = [
     {
         id: 'claude-sonnet',
         engine: 'claude',
-        label: 'Sonnet',
+        label: 'Sonnet 5',
         group: 'Anthropic',
-        model: 'sonnet',
+        model: 'claude-sonnet-5',
     },
     {
         id: 'claude-opus',
         engine: 'claude',
-        label: 'Opus',
+        label: 'Opus 5',
         group: 'Anthropic',
-        model: 'opus',
+        model: 'claude-opus-5',
     },
 ]
 

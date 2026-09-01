@@ -10,11 +10,10 @@ import type {
 const STORAGE_KEY = 'codium.plugin.anthropic.apiKey'
 
 const MODELS: ModelDescriptor[] = [
-    { id: 'claude-fable-5',    label: 'Fable 5',    group: 'Anthropic', description: 'Latest Mythos-class model.' },
-    { id: 'claude-opus-4-8',   label: 'Opus 4.8',   group: 'Anthropic', description: 'Latest Opus generation.' },
-    { id: 'claude-opus-4-7',   label: 'Opus 4.7',   group: 'Anthropic', description: 'Previous Opus generation.' },
-    { id: 'claude-opus-4-6',   label: 'Opus 4.6',   group: 'Anthropic', description: 'Deepest reasoning, slowest.' },
-    { id: 'claude-sonnet-4-6', label: 'Sonnet 4.6', group: 'Anthropic', description: 'Balanced reasoning + speed.' },
+    { id: 'claude-fable-5-1',  label: 'Fable 5.1',  group: 'Anthropic', description: 'Demanding reasoning & long-horizon agentic work.' },
+    { id: 'claude-opus-5',     label: 'Opus 5',     group: 'Anthropic', description: 'Complex agentic coding.' },
+    { id: 'claude-sonnet-5',   label: 'Sonnet 5',   group: 'Anthropic', description: 'Balanced reasoning + speed.' },
+    { id: 'claude-haiku-4-5',  label: 'Haiku 4.5',  group: 'Anthropic', description: 'Fastest, near-frontier.' },
 ]
 
 /**
