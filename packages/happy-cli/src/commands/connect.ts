@@ -5,7 +5,7 @@ import { join } from 'path';
 import { readCredentials } from '@/persistence';
 import { ApiClient } from '@/api/api';
 import { authenticateCodex } from './connect/authenticateCodex';
-import { authenticateClaude } from './connect/authenticateClaude';
+import { authenticateClaude, readLocalClaudeLogin } from './connect/authenticateClaude';
 import { authenticateGemini } from './connect/authenticateGemini';
 import { decodeJwtPayload } from './connect/utils';
 
@@ -98,7 +98,11 @@ async function handleConnectVendor(vendor: 'codex' | 'claude' | 'gemini', displa
         process.exit(0);
     } else if (vendor === 'claude') {
         console.log('🚀 Registering Anthropic token with server');
-        const anthropicAuthTokens = await authenticateClaude();
+        const local = readLocalClaudeLogin();
+        const anthropicAuthTokens = local ?? await authenticateClaude();
+        if (local) {
+            console.log('✅ Found an existing `claude login` session — using it directly (full scope)');
+        }
         await api.registerVendorToken('anthropic', { oauth: anthropicAuthTokens });
         console.log('✅ Anthropic token registered with server');
         process.exit(0);

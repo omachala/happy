@@ -7,6 +7,10 @@
 
 import { createServer, IncomingMessage, ServerResponse } from 'http';
 import { randomBytes, createHash } from 'crypto';
+import { execFileSync } from 'child_process';
+import { readFileSync } from 'fs';
+import { homedir } from 'os';
+import { join } from 'path';
 import { openBrowser } from '@/utils/browser';
 import { ClaudeAuthTokens, PKCECodes } from './types';
 
@@ -192,6 +196,31 @@ async function startCallbackServer(
             reject(new Error('Authentication timeout'));
         }, 5 * 60 * 1000);
     });
+}
+
+/**
+ * Read the token from an existing `claude login` session (macOS Keychain,
+ * or ~/.claude/.credentials.json on Linux). That flow grants full scope
+ * (including user:profile, needed for usage/rate-limit data) — the OAuth
+ * flow below is a "setup-token"-style flow that Anthropic restricts to
+ * user:inference regardless of the scope requested, so we prefer this
+ * local token whenever one is present.
+ */
+export function readLocalClaudeLogin(): ClaudeAuthTokens | null {
+    try {
+        const raw = process.platform === 'darwin'
+            ? execFileSync('security', ['find-generic-password', '-s', 'Claude Code-credentials', '-w'], { encoding: 'utf8' })
+            : readFileSync(join(homedir(), '.claude', '.credentials.json'), 'utf8');
+        const oauth = JSON.parse(raw).claudeAiOauth;
+        if (!oauth?.accessToken || !oauth?.expiresAt) return null;
+        return {
+            raw: { refresh_token: oauth.refreshToken, scope: (oauth.scopes ?? []).join(' ') },
+            token: oauth.accessToken,
+            expires: oauth.expiresAt,
+        };
+    } catch {
+        return null;
+    }
 }
 
 /**
