@@ -31,6 +31,10 @@ FROM deps AS builder
 
 COPY packages/happy-wire ./packages/happy-wire
 COPY packages/happy-server ./packages/happy-server
+# happy-server's spec files cross-import happy-app types for contract checks
+# (e.g. machinesRoutes.spec.ts -> happy-app/sources/sync/apiTypes) — the
+# typecheck below needs the source present even though nothing here builds it.
+COPY packages/happy-app/sources ./packages/happy-app/sources
 
 RUN pnpm --filter @slopus/happy-wire build
 # Skip happy-server-self-host build: it produces dist/standalone.mjs via bun
