@@ -212,13 +212,17 @@ export function readLocalClaudeLogin(): ClaudeAuthTokens | null {
             ? execFileSync('security', ['find-generic-password', '-s', 'Claude Code-credentials', '-w'], { encoding: 'utf8' })
             : readFileSync(join(homedir(), '.claude', '.credentials.json'), 'utf8');
         const oauth = JSON.parse(raw).claudeAiOauth;
-        if (!oauth?.accessToken || !oauth?.expiresAt) return null;
+        if (!oauth?.accessToken) return null;
         return {
             raw: { refresh_token: oauth.refreshToken, scope: (oauth.scopes ?? []).join(' ') },
             token: oauth.accessToken,
-            expires: oauth.expiresAt,
+            // Some claude versions write expiresAt: 0 for an otherwise-valid
+            // token; treat that as "unknown" rather than "already expired"
+            // so the server's refresh logic doesn't spin on a false expiry.
+            expires: oauth.expiresAt || (Date.now() + 60 * 60 * 1000),
         };
-    } catch {
+    } catch (error) {
+        console.log(`(no local \`claude login\` session found: ${error instanceof Error ? error.message : error})`);
         return null;
     }
 }
