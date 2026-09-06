@@ -15,7 +15,9 @@ const CLIENT_ID = '9d1c250a-e61b-44d9-88ed-5944d1962f5e';
 const CLAUDE_AI_AUTHORIZE_URL = 'https://claude.ai/oauth/authorize';
 const TOKEN_URL = 'https://console.anthropic.com/v1/oauth/token';
 const DEFAULT_PORT = 54545;
-const SCOPE = 'user:inference';
+// user:profile is required by api.anthropic.com/api/oauth/usage (the 5h/7d
+// rate-limit endpoint) even though it isn't used for inference itself.
+const SCOPE = 'user:inference user:profile';
 
 /**
  * Generate PKCE codes for OAuth flow
