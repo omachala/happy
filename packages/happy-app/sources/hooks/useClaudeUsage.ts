@@ -1,9 +1,14 @@
 import * as React from 'react';
+import { getCurrentAuth } from '@/auth/AuthContext';
+import { getServerUrl } from '@/sync/serverConfig';
+import { getHappyClientId } from '@/sync/apiSocket';
 
-// Fetches the Anthropic 5h/7d usage snapshot from the local home-network
-// proxy at http://api.home/claude/usage. Endpoint runs on Din and returns
-// the raw Anthropic schema verbatim. Polls every 60s. When unreachable
-// (off the home LAN/VPN, or proxy down) the pill silently hides.
+// Fetches the Anthropic 5h/7d usage snapshot from happy-server, which itself
+// proxies api.anthropic.com/api/oauth/usage using the Claude Code OAuth token
+// registered via `happy connect claude`. Polls every 60s. The pill always
+// renders — on any failure it shows an explicit error state rather than
+// disappearing, so a broken/unreachable/unconnected state is visible instead
+// of silently invisible.
 
 export type ClaudeUsage = {
     fiveHour: { utilization: number; resetsAt: string | null };
@@ -17,7 +22,6 @@ export type ClaudeUsage = {
 };
 
 const REFRESH_MS = 60_000;
-const ENDPOINT = 'http://api.home/claude/usage';
 
 export function useClaudeUsage(): {
     usage: ClaudeUsage | null;
@@ -33,12 +37,25 @@ export function useClaudeUsage(): {
         const controller = new AbortController();
         const timeout = setTimeout(() => controller.abort(), 5000);
         (async () => {
+            const credentials = getCurrentAuth()?.credentials;
+            if (!credentials) {
+                if (cancelled) return;
+                setUsage(null);
+                setError('Not logged in');
+                return;
+            }
             try {
-                const res = await fetch(ENDPOINT, { signal: controller.signal });
+                const res = await fetch(`${getServerUrl()}/v1/account/anthropic/usage`, {
+                    signal: controller.signal,
+                    headers: {
+                        'Authorization': `Bearer ${credentials.token}`,
+                        'X-Happy-Client': getHappyClientId(),
+                    },
+                });
                 if (cancelled) return;
                 if (!res.ok) {
                     setUsage(null);
-                    setError(null);
+                    setError(res.status === 404 ? 'Anthropic account not connected' : `Server error ${res.status}`);
                     return;
                 }
                 const data: any = await res.json();
@@ -62,10 +79,10 @@ export function useClaudeUsage(): {
                         }
                         : null,
                 });
-            } catch {
+            } catch (e) {
                 if (cancelled) return;
                 setUsage(null);
-                setError(null);
+                setError(e instanceof Error && e.name === 'AbortError' ? 'Timed out' : 'Unreachable');
             } finally {
                 clearTimeout(timeout);
             }

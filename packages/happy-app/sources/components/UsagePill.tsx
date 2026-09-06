@@ -31,9 +31,16 @@ function fmtResetIn(isoResetsAt: string | null): string {
 }
 
 export const UsagePill = React.memo(function UsagePill() {
-    const { usage, error } = useClaudeUsage();
-    if (!usage && !error) return null;
-    if (!usage) return null;
+    const { usage, error, refresh } = useClaudeUsage();
+
+    if (!usage) {
+        return (
+            <Pressable onPress={refresh} hitSlop={10} style={styles.pill}>
+                <View style={[styles.dot, { backgroundColor: '#8E8E93' }]} />
+                <Text style={styles.pillText}>{error ?? 'Loading…'}</Text>
+            </Pressable>
+        );
+    }
 
     const pct = usage.fiveHour.utilization;
     const color = pctColor(pct);
