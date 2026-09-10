@@ -61,7 +61,7 @@ export default {
         ios: {
             supportsTablet: true,
             bundleIdentifier: bundleId,
-            buildNumber: "33",
+            buildNumber: "34",
             config: {
                 usesNonExemptEncryption: false
             },
