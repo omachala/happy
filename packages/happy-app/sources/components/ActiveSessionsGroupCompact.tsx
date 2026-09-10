@@ -19,16 +19,10 @@ import { useSessionActionAlert } from '@/hooks/useSessionQuickActions';
 import { useNewSessionDraft } from '@/hooks/useNewSessionDraft';
 import { useRouter } from 'expo-router';
 import { ProviderIcon } from './ProviderIcon';
+import { getRepoPath, getWorktreeName } from '@/utils/worktree';
 
-// Status visualization for a project tile. We surface the most-active session's
-// state — pulsing-blue (thinking) > orange (permission) > green (waiting) > gray.
-const STATUS_PRIORITY: Record<SessionState, number> = {
-    thinking: 4,
-    permission_required: 3,
-    waiting: 2,
-    disconnected: 1,
-};
-
+// Status visualization for a session tile — pulsing-blue (thinking) >
+// orange (permission) > green (waiting) > gray.
 const STATUS_COLOR: Record<SessionState, { color: string; pulsing: boolean }> = {
     thinking: { color: '#007AFF', pulsing: true },
     permission_required: { color: '#FF9500', pulsing: true },
@@ -52,25 +46,6 @@ type MachineGroup = {
     machineName: string;
     projects: ProjectGroup[];
 };
-
-// Pick the session whose state is "most attention-worthy" — drives the tile's
-// status dot. Ties broken by most-recent createdAt.
-function pickLeadSession(sessions: SessionRowData[]): SessionRowData {
-    let best = sessions[0];
-    let bestScore = STATUS_PRIORITY[best.state] * 1e15 + (best.createdAt ?? 0);
-    for (let i = 1; i < sessions.length; i++) {
-        const s = sessions[i];
-        const score = STATUS_PRIORITY[s.state] * 1e15 + (s.createdAt ?? 0);
-        if (s.hasUnread) {
-            // Unread sessions outrank everything except thinking
-            const unreadScore = 5e15 + (s.createdAt ?? 0);
-            if (unreadScore > bestScore) { best = s; bestScore = unreadScore; }
-            continue;
-        }
-        if (score > bestScore) { best = s; bestScore = score; }
-    }
-    return best;
-}
 
 // Machine header — always shown, even with only one machine. Tapping the name
 // jumps to the machine detail screen; tapping "+" opens a new session draft
@@ -125,35 +100,34 @@ const MachineHeader = React.memo(({ machineName, machineId }: {
     );
 });
 
-// One project = one tap target. Opens the most-recent session under this path.
-// Long-press → existing session actions (archive, etc.) on the lead session.
-const ProjectTile = React.memo(({ group, selected, isLast }: {
-    group: ProjectGroup;
+// One session = one tap target. The title repeats the folder name, so several
+// sessions in the same folder read as siblings, told apart by the conversation
+// name in the subtitle. A session running in a git worktree carries a branch
+// badge next to the title.
+// Long-press → session actions (archive, etc.).
+const SessionTile = React.memo(({ session, projectName, selected, isLast }: {
+    session: SessionRowData;
+    projectName: string;
     selected: boolean;
     isLast: boolean;
 }) => {
     const styles = stylesheet;
+    const { theme } = useUnistyles();
     const navigateToSession = useNavigateToSession();
     const [actionsAnchor, setActionsAnchor] = React.useState<SessionActionsAnchor | null>(null);
 
-    // Most-recent session is the tap target; the lead session drives the status dot.
-    const mostRecent = React.useMemo(
-        () => [...group.sessions].sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0))[0],
-        [group.sessions],
-    );
-    const lead = React.useMemo(() => pickLeadSession(group.sessions), [group.sessions]);
-    const groupHasUnread = React.useMemo(
-        () => group.sessions.some(s => s.hasUnread),
-        [group.sessions],
+    const worktreeName = React.useMemo(
+        () => (session.path ? getWorktreeName(session.path) : null),
+        [session.path],
     );
 
-    const statusColor = lead.hasUnread
+    const statusColor = session.hasUnread
         ? { color: '#007AFF', pulsing: false }
-        : STATUS_COLOR[lead.state];
+        : STATUS_COLOR[session.state];
 
     const handlePress = React.useCallback(() => {
-        navigateToSession(mostRecent.id);
-    }, [navigateToSession, mostRecent.id]);
+        navigateToSession(session.id);
+    }, [navigateToSession, session.id]);
 
     const handleContextMenu = React.useCallback((event: any) => {
         event.preventDefault?.();
@@ -165,7 +139,7 @@ const ProjectTile = React.memo(({ group, selected, isLast }: {
         });
     }, []);
 
-    const showActionAlert = useSessionActionAlert(mostRecent.id);
+    const showActionAlert = useSessionActionAlert(session.id);
     const menuProps = Platform.OS === 'web'
         ? ({ onContextMenu: handleContextMenu } as any)
         : { onLongPress: showActionAlert };
@@ -182,19 +156,33 @@ const ProjectTile = React.memo(({ group, selected, isLast }: {
                 {...menuProps}
             >
                 <View style={styles.tileTextColumn}>
-                    <Text style={[styles.tileTitle, groupHasUnread && styles.tileTitleUnread]} numberOfLines={1}>
-                        {group.projectName}
-                    </Text>
-                    {mostRecent.name ? (
-                        <Text style={[styles.tileSubtitle, groupHasUnread && styles.tileSubtitleUnread]} numberOfLines={1}>
-                            {mostRecent.name}
+                    <View style={styles.tileTitleRow}>
+                        <Text style={[styles.tileTitle, session.hasUnread && styles.tileTitleUnread]} numberOfLines={1}>
+                            {projectName}
+                        </Text>
+                        {worktreeName && (
+                            <View style={styles.worktreeBadge}>
+                                <Ionicons
+                                    name="git-branch-outline"
+                                    size={11}
+                                    color={theme.colors.textSecondary}
+                                />
+                                <Text style={styles.worktreeBadgeText} numberOfLines={1}>
+                                    {worktreeName}
+                                </Text>
+                            </View>
+                        )}
+                    </View>
+                    {session.name ? (
+                        <Text style={[styles.tileSubtitle, session.hasUnread && styles.tileSubtitleUnread]} numberOfLines={1}>
+                            {session.name}
                         </Text>
                     ) : null}
-                    {mostRecent.identityLine && (
+                    {session.identityLine && (
                         <View style={styles.sessionIdentityRow}>
-                            <ProviderIcon kind={mostRecent.providerKind} size={11} />
+                            <ProviderIcon kind={session.providerKind} size={11} />
                             <Text style={styles.sessionIdentity} numberOfLines={1}>
-                                {mostRecent.identityLine}{mostRecent.modelName ? ` · ${mostRecent.modelName}` : ''}{mostRecent.activitySummary ? ` · ${mostRecent.activitySummary}` : ''}
+                                {session.identityLine}{session.modelName ? ` · ${session.modelName}` : ''}{session.activitySummary ? ` · ${session.activitySummary}` : ''}
                             </Text>
                         </View>
                     )}
@@ -208,7 +196,7 @@ const ProjectTile = React.memo(({ group, selected, isLast }: {
                 <SessionActionsPopover
                     anchor={actionsAnchor}
                     onClose={() => setActionsAnchor(null)}
-                    sessionId={mostRecent.id}
+                    sessionId={session.id}
                     visible={!!actionsAnchor}
                 />
             )}
@@ -245,7 +233,10 @@ export function ActiveSessionsGroupCompact({ sessions, selectedSessionId }: Acti
                 byMachine.set(machineId, mg);
             }
 
-            const projectPath = session.path || '';
+            // A session running in a git worktree lives at
+            // <repo>/.dev/worktree/<name> — group it under <repo> so it stays
+            // with its project instead of appearing as an unrelated tile.
+            const projectPath = getRepoPath(session.path || '');
             let pg = mg.projects.find(p => p.projectPath === projectPath);
             if (!pg) {
                 const displayPath = formatPathRelativeToHome(projectPath, session.homeDir ?? undefined);
@@ -283,18 +274,17 @@ export function ActiveSessionsGroupCompact({ sessions, selectedSessionId }: Acti
                         machineId={mg.machineId}
                     />
                     <View style={styles.tileGroup}>
-                        {mg.projects.map((pg, idx) => {
-                            const tileSelected = !!selectedSessionId
-                                && pg.sessions.some(s => s.id === selectedSessionId);
-                            return (
-                                <ProjectTile
-                                    key={pg.projectPath}
-                                    group={pg}
-                                    selected={tileSelected}
-                                    isLast={idx === mg.projects.length - 1}
-                                />
-                            );
-                        })}
+                        {mg.projects.flatMap(pg =>
+                            pg.sessions.map(s => ({ session: s, projectName: pg.projectName })),
+                        ).map((entry, idx, all) => (
+                            <SessionTile
+                                key={entry.session.id}
+                                session={entry.session}
+                                projectName={entry.projectName}
+                                selected={entry.session.id === selectedSessionId}
+                                isLast={idx === all.length - 1}
+                            />
+                        ))}
                     </View>
                 </View>
             ))}
@@ -369,11 +359,35 @@ const stylesheet = StyleSheet.create((theme) => ({
         flexShrink: 1,
         minWidth: 0,
     },
+    tileTitleRow: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 8,
+    },
+    worktreeBadge: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 3,
+        flexShrink: 1,
+        minWidth: 0,
+        paddingHorizontal: 6,
+        paddingVertical: 1,
+        borderRadius: 6,
+        backgroundColor: theme.colors.groupped.background,
+    },
+    worktreeBadgeText: {
+        fontSize: 11,
+        color: theme.colors.textSecondary,
+        ...Typography.default('regular'),
+        flexShrink: 1,
+    },
     tileTitle: {
         fontSize: 17,
         color: theme.colors.text,
         ...Typography.default('regular'),
         letterSpacing: -0.1,
+        flexShrink: 1,
+        minWidth: 0,
     },
     tileTitleUnread: {
         ...Typography.default('semiBold'),
