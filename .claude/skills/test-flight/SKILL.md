@@ -9,16 +9,50 @@ argument-hint: "[build number]"
 
 # TestFlight — happy iOS build & deploy
 
-Personal-fork TestFlight pipeline. No EAS / Expo account. Runs locally on Boba.
-Authoritative reference: `BUILD.md` at repo root.
+Personal-fork TestFlight pipeline. No EAS / Expo account. Runs locally on
+**Fennec** (the Mac mini; it took the release role over from Boba, which is being
+decommissioned). Authoritative reference: `BUILD.md` at repo root.
+
+## The Aqua bridge — read this first
+
+On Fennec the signing identities live in the **login keychain**, which a plain
+SSH/agent shell cannot see. Probing from such a shell reports `0 valid
+identities found` and `User interaction is not allowed` **no matter how healthy
+the setup actually is** — that message is a statement about your session, not
+about the keychain. Do not read it as breakage, and above all do not "fix" it by
+revoking certs.
+
+Every command that touches codesign must be re-executed through the GUI (Aqua)
+session:
+
+```bash
+sudo launchctl asuser 502 sudo -u ondrej zsh -lc '<command>'
+```
+
+`502` is `ondrej`'s uid (`id -u`). Verified 2026-09-10 — the archive and export
+steps below both use this form. This is the same self-bridge the **diction**
+`test-flight` skill performs (`~/projects/diction/.claude/skills/test-flight/`),
+where it's automated inside `tf-build.sh`; here it's applied by hand per command.
 
 ## Pre-flight checks
 
 1. **Detect platform** — `uname -s`. Must be **Darwin** with Xcode. Abort otherwise.
 2. **Check working tree** — `git status`. If dirty, ask the user before continuing; the build encodes whatever's on disk after prebuild regenerates `ios/`.
-3. **Branch** — happy fork pushes directly to `main` (see global memory `push_to_main.md`). Confirm the branch you're on is the one you want to ship.
+3. **Branch** — happy fork pushes directly to `main` (see `AGENTS.md` § *Sync To Main*). Confirm the branch you're on is the one you want to ship.
 4. **Build number** — read current `buildNumber` in `packages/happy-app/app.config.js`. New value is current + 1, or whatever the user passed as argument. iOS rejects duplicate `(version, buildNumber)` pairs.
-5. **Keychain health** — `security find-identity -v -p codesigning /Library/Keychains/System.keychain`. **Must show both** `Apple Development: Created via API (T43ZQ8KTCH)` and `Apple Distribution: Ondrej Machala (924FH7MYCN)`. If either is missing — especially after a Boba reboot — run the [Keychain recovery](#keychain-recovery-after-reboot) procedure BEFORE attempting any of the build steps. Skipping this turns a 20-minute build into a 1-hour debugging session.
+5. **GUI session** — `stat -f '%Su' /dev/console`. `ondrej` = fine. `root` = nobody is logged into Fennec's desktop, so there is no Aqua session to bridge into and codesign cannot work; have the user log in via NoMachine/Screen Sharing first, then retry.
+6. **Keychain health — through the bridge, never directly:**
+
+   ```bash
+   sudo launchctl asuser 502 sudo -u ondrej security find-identity -v -p codesigning
+   ```
+
+   **Must show both** `Apple Development: Created via API (T43ZQ8KTCH)` and
+   `Apple Distribution: Ondrej Machala (924FH7MYCN)`. If they're there, signing is
+   healthy — proceed. Only if they're genuinely missing *through the bridge* is
+   something wrong; see [Keychain recovery](#keychain-recovery-after-reboot).
+
+7. **Lock settings** — `sudo launchctl asuser 502 sudo -u ondrej security show-keychain-info ~/Library/Keychains/login.keychain-db` should say `no-timeout`. If it reports a timeout instead, the keychain will auto-lock on idle/sleep and a later build will hang waiting on a password prompt that only renders on the physical console. Make it permanent with `security set-keychain-settings` (no flags) through the bridge.
 
 ## Process
 
@@ -64,10 +98,10 @@ LANG=en_US.UTF-8 pod install
 
 ### 5. Archive (~10–15 min, run in foreground)
 
+Through the Aqua bridge — a direct `xcodebuild archive` will fail to sign:
+
 ```bash
-cd /Users/ondrej/projects/happy/packages/happy-app/ios
-rm -rf build/Happy.xcarchive
-xcodebuild archive \
+sudo launchctl asuser 502 sudo -u ondrej zsh -lc 'cd /Users/ondrej/projects/happy/packages/happy-app/ios && rm -rf build/Happy.xcarchive && xcodebuild archive \
   -workspace Happy.xcworkspace \
   -scheme Happy \
   -configuration Release \
@@ -78,25 +112,33 @@ xcodebuild archive \
   -authenticationKeyID T43ZQ8KTCH \
   -authenticationKeyIssuerID "$(cat ~/.appstoreconnect/issuer-id)" \
   DEVELOPMENT_TEAM=924FH7MYCN \
-  CODE_SIGN_STYLE=Automatic
+  CODE_SIGN_STYLE=Automatic'
 ```
 
 **Run in foreground** (not `run_in_background`) — the user wants to watch progress live. Use `timeout: 1800000` (30 min) on the Bash tool call. Wait for `** ARCHIVE SUCCEEDED **`.
+
+**Redirect to a log rather than relying on `tail`.** A failing archive prints the
+real cause thousands of lines above the summary, so `| tail -25` shows you the
+last compile invocation and the `(2 failures)` count but *not* the error. Send
+output to a file in the scratchpad and `grep -n "error:"` it. Note that `grep
+"error:"` also matches the string inside deprecation-warning text (e.g.
+`setCodecPreferences:error:`), so check the matches rather than the count.
 
 ### 6. Export + upload (single step)
 
 `packages/happy-app/deploy/ExportOptions.plist` has `destination=upload`, so this one command exports and uploads to App Store Connect — no separate altool / Transporter step.
 
+Through the Aqua bridge, same as the archive step:
+
 ```bash
-cd /Users/ondrej/projects/happy/packages/happy-app/ios
-xcodebuild -exportArchive \
+sudo launchctl asuser 502 sudo -u ondrej zsh -lc 'cd /Users/ondrej/projects/happy/packages/happy-app/ios && rm -rf build/ipa && xcodebuild -exportArchive \
   -archivePath build/Happy.xcarchive \
   -exportPath build/ipa \
   -exportOptionsPlist ../deploy/ExportOptions.plist \
   -allowProvisioningUpdates \
   -authenticationKeyPath ~/.appstoreconnect/private_keys/AuthKey_T43ZQ8KTCH.p8 \
   -authenticationKeyID T43ZQ8KTCH \
-  -authenticationKeyIssuerID "$(cat ~/.appstoreconnect/issuer-id)"
+  -authenticationKeyIssuerID "$(cat ~/.appstoreconnect/issuer-id)"'
 ```
 
 **Run in foreground** (not `run_in_background`) so the upload progress is visible. Use `timeout: 1800000` (30 min). Success signals (both must appear):
@@ -167,18 +209,34 @@ Sensitive files for this project live in `.claude/local/` and `.claude/secrets/`
 
 | Problem | Fix |
 | --- | --- |
-| `No Accounts: Add a new account in Accounts settings.` | The `-authenticationKey*` flags are missing or wrong. Don't try to log into Xcode UI — Boba runs headless. |
+| `0 valid identities found` / `User interaction is not allowed` | **Not a fault.** You probed from a plain SSH/agent shell, which can't see the login keychain. Re-probe through the [Aqua bridge](#the-aqua-bridge--read-this-first). Do NOT run the recovery procedure — it revokes certs, and revoking healthy ones to fix a session-visibility problem destroys a working setup. |
+| `errSecInternalComponent` from codesign | Almost always the same thing: the command wasn't run through the Aqua bridge. Wrap it and retry before suspecting anything else. |
+| Archive fails but `tail` shows only warnings and `(N failures)` | The real `error:` is thousands of lines up. Redirect to a log and `grep -n "error:"` — see step 5. |
+| `unknown type name 'size_t'` in `RNAudioAPI` / `audioapi/core/Constants.h` | Upstream react-native-audio-api 0.8.4 bug; Xcode 26.6's clang stopped pulling `size_t` in transitively. Fixed by `patches/fix-audio-api-missing-cstddef.cjs` (wired into `scripts/postinstall.cjs`). If it resurfaces, the patch didn't run — `node patches/fix-audio-api-missing-cstddef.cjs`. |
+| `Cannot find module '@slopus/happy-wire'` during typecheck | The workspace link is stale. A repo-root `pnpm install` fixes it (its postinstall builds happy-wire). |
+| `No Accounts: Add a new account in Accounts settings.` | The `-authenticationKey*` flags are missing or wrong. Don't try to log into Xcode UI. |
 | `No profiles for 'com.omachala.happy' were found` | `-allowProvisioningUpdates` should auto-create. If not, manually register the App ID at the Apple Developer Portal. |
 | `No app record found` | App Store Connect entry for `com.omachala.happy` doesn't exist. Create at App Store Connect → Apps → +. |
 | `Bundle version must be higher than previously uploaded` | Step 1 was skipped or wasn't saved. Bump `buildNumber` in `app.config.js`. |
 | dSYM warnings on React/LiveKit/Hermes/ffmpeg frameworks | Harmless. Those ship without debug symbols. Your own code still symbolicates. |
 | `pnpm prebuild` removed something you hand-edited | Move it outside `ios/` (see `deploy/ExportOptions.plist` for the pattern), or add it to an Expo config plugin. |
-| `errSecInternalComponent` from codesign on a framework | Keychain state broke — usually after a Boba reboot. Run [Keychain recovery](#keychain-recovery-after-reboot). Do not try to "just retry" or revoke certs via Xcode UI. |
-| `Revoke certificate: …private key is not installed in your keychain` | Same root cause. Run [Keychain recovery](#keychain-recovery-after-reboot). |
-| `Certificate installation failed: Write permissions error` | Same — Xcode can't write into the headless-session keychain. Run [Keychain recovery](#keychain-recovery-after-reboot). |
+| `Revoke certificate: …private key is not installed in your keychain` | Same root cause. Confirm through the [Aqua bridge](#the-aqua-bridge--read-this-first) first; only if the identities are missing *there* run [Keychain recovery](#keychain-recovery-after-reboot). |
+| `Certificate installation failed: Write permissions error` | Same — Xcode can't write into the headless-session keychain. Confirm through the [Aqua bridge](#the-aqua-bridge--read-this-first) first; only if the identities are missing *there* run [Keychain recovery](#keychain-recovery-after-reboot). |
 | `Warning: unable to build chain to self-signed root for signer` | Missing intermediate. Apple Root CA + WWDR-G3 must live in `/Library/Keychains/System.keychain` (not just `SystemRootCertificates.keychain`). The recovery procedure adds them. |
 
 ## Keychain recovery after reboot
+
+> ⚠️ **Almost certainly not what you need.** This procedure **revokes certificates
+> on Apple's side** and regenerates them. It exists for Boba, whose headless
+> setup genuinely lost its private keys. On **Fennec** the certs are healthy in
+> the login keychain and the only thing that ever goes wrong is *session
+> visibility*, which the [Aqua bridge](#the-aqua-bridge--read-this-first) solves
+> in one wrapper. Running this against a working setup destroys it.
+>
+> **Entry condition:** `sudo launchctl asuser 502 sudo -u ondrej security
+> find-identity -v -p codesigning` reports the identities missing. If it lists
+> them, stop — signing is fine, bridge your command instead. Confirm with the
+> user before running any step below.
 
 **Why this exists.** Boba is headless (lid closed, garage). When it reboots, no GUI login happens — only SSH sessions. macOS's keychain agent doesn't fully initialize the user-domain keychain context in SSH sessions, so:
 
@@ -191,7 +249,7 @@ The fix is to import the cert+key pairs into `/Library/Keychains/System.keychain
 
 ### Prereqs
 
-- User's login password (Boba account `ondrej`). You will need it for `sudo` and for keychain `-k <password>` flags.
+- User's login password (account `ondrej`). You will need it for `sudo` and for keychain `-k <password>` flags.
 - `fastlane` installed: `which fastlane` should return `/usr/local/bin/fastlane`. (`brew install fastlane` if missing.)
 - `python3` with `pyjwt` and `cryptography`: `python3 -c "import jwt"` should succeed. (`pip3 install pyjwt cryptography` if missing.)
 - `jq` installed: `which jq`. (`brew install jq` if missing.)
@@ -199,10 +257,11 @@ The fix is to import the cert+key pairs into `/Library/Keychains/System.keychain
 ### Step A — assess
 
 ```bash
+sudo launchctl asuser 502 sudo -u ondrej security find-identity -v -p codesigning
 security find-identity -v -p codesigning /Library/Keychains/System.keychain
 ```
 
-If both `Apple Development: Created via API (T43ZQ8KTCH)` and `Apple Distribution: Ondrej Machala (924FH7MYCN)` are present, **stop — recovery is unnecessary, the build should work as-is**. Proceed to the regular pipeline.
+Check the **bridged** result first. If both `Apple Development: Created via API (T43ZQ8KTCH)` and `Apple Distribution: Ondrej Machala (924FH7MYCN)` show up in either listing, **stop — recovery is unnecessary, the build should work as-is**. Proceed to the regular pipeline, bridging the codesign steps.
 
 Otherwise continue.
 
@@ -375,6 +434,8 @@ Leave the cert files in `/tmp/certs*` until the build succeeds. Once it's upload
 ## Rules
 
 - Never deploy without explicit user permission
+- Bridge every codesign-touching command through `sudo launchctl asuser 502 sudo -u ondrej zsh -lc '…'`. A bare keychain probe proves nothing about the keychain — only about your session
+- Never revoke a certificate to resolve a signing error unless the identities are missing *through the bridge* and the user has confirmed
 - Always typecheck before prebuild — caught here, not after a 15-minute archive
 - Always run prebuild before pod install before archive — they are sequential, not idempotent
 - Build numbers must be strictly increasing and unique per `(version, buildNumber)` pair
