@@ -1,5 +1,5 @@
 import * as React from 'react';
-import { getCurrentAuth } from '@/auth/AuthContext';
+import { useAuth } from '@/auth/AuthContext';
 import { getServerUrl } from '@/sync/serverConfig';
 import { getHappyClientId } from '@/sync/apiSocket';
 
@@ -32,12 +32,19 @@ export function useClaudeUsage(): {
     const [error, setError] = React.useState<string | null>(null);
     const [tick, setTick] = React.useState(0);
 
+    // Read auth from context, not getCurrentAuth(). The module-global that
+    // getCurrentAuth() returns is assigned in an AuthProvider *effect*, and
+    // React runs child effects before parent ones — so this hook (a descendant)
+    // always saw null on first mount and latched on "Not logged in" until the
+    // next 60s tick. Context has the credentials from the first render, and
+    // depending on it re-runs the fetch the moment auth changes.
+    const { credentials } = useAuth();
+
     React.useEffect(() => {
         let cancelled = false;
         const controller = new AbortController();
         const timeout = setTimeout(() => controller.abort(), 5000);
         (async () => {
-            const credentials = getCurrentAuth()?.credentials;
             if (!credentials) {
                 if (cancelled) return;
                 setUsage(null);
@@ -88,7 +95,7 @@ export function useClaudeUsage(): {
             }
         })();
         return () => { cancelled = true; controller.abort(); clearTimeout(timeout); };
-    }, [tick]);
+    }, [tick, credentials]);
 
     React.useEffect(() => {
         const id = setInterval(() => setTick(t => t + 1), REFRESH_MS);
