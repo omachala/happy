@@ -32,12 +32,12 @@ export function useClaudeUsage(): {
     const [error, setError] = React.useState<string | null>(null);
     const [tick, setTick] = React.useState(0);
 
-    // Read auth from context, not getCurrentAuth(). The module-global that
-    // getCurrentAuth() returns is assigned in an AuthProvider *effect*, and
-    // React runs child effects before parent ones — so this hook (a descendant)
-    // always saw null on first mount and latched on "Not logged in" until the
-    // next 60s tick. Context has the credentials from the first render, and
-    // depending on it re-runs the fetch the moment auth changes.
+    // Auth comes from context so the effect can depend on it. Reading it from a
+    // module global instead (as this hook used to) meant observing null on first
+    // mount — the global was assigned in an AuthProvider effect, and React runs
+    // child effects before parent ones — which latched the chip on "Not logged
+    // in" until the next 60s tick. AuthProvider gets initialCredentials, so
+    // context is right from the first render.
     const { credentials } = useAuth();
 
     React.useEffect(() => {

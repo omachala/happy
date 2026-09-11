@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useEffect, ReactNode } from 'react';
+import React, { createContext, useContext, useState, ReactNode } from 'react';
 import { TokenStorage, AuthCredentials } from '@/auth/tokenStorage';
 import { syncCreate } from '@/sync/sync';
 import * as Updates from 'expo-updates';
@@ -19,11 +19,6 @@ const AuthContext = createContext<AuthContextType | undefined>(undefined);
 export function AuthProvider({ children, initialCredentials }: { children: ReactNode; initialCredentials: AuthCredentials | null }) {
     const [isAuthenticated, setIsAuthenticated] = useState(!!initialCredentials);
     const [credentials, setCredentials] = useState<AuthCredentials | null>(initialCredentials);
-
-    // Update global auth state when local state changes
-    useEffect(() => {
-        setCurrentAuth(credentials ? { isAuthenticated, credentials, login, logout } : null);
-    }, [isAuthenticated, credentials]);
 
     const login = async (token: string, secret: string) => {
         const newCredentials: AuthCredentials = { token, secret };
@@ -86,15 +81,4 @@ export function useAuth() {
         throw new Error('useAuth must be used within an AuthProvider');
     }
     return context;
-}
-
-// Helper to get current auth state for non-React contexts
-let currentAuthState: AuthContextType | null = null;
-
-export function setCurrentAuth(auth: AuthContextType | null) {
-    currentAuthState = auth;
-}
-
-export function getCurrentAuth(): AuthContextType | null {
-    return currentAuthState;
 }
