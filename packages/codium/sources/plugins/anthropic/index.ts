@@ -11,7 +11,7 @@ const STORAGE_KEY = 'codium.plugin.anthropic.apiKey'
 
 const MODELS: ModelDescriptor[] = [
     { id: 'claude-fable-5-1',  label: 'Fable 5.1',  group: 'Anthropic', description: 'Demanding reasoning & long-horizon agentic work.' },
-    { id: 'claude-opus-5',     label: 'Opus 5',     group: 'Anthropic', description: 'Complex agentic coding.' },
+    { id: 'claude-opus-5-5',   label: 'Opus 5.5',   group: 'Anthropic', description: 'Complex agentic coding.' },
     { id: 'claude-sonnet-5',   label: 'Sonnet 5',   group: 'Anthropic', description: 'Balanced reasoning + speed.' },
     { id: 'claude-haiku-4-5',  label: 'Haiku 4.5',  group: 'Anthropic', description: 'Fastest, near-frontier.' },
 ]

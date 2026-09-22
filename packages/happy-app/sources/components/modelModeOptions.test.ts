@@ -56,14 +56,14 @@ describe('modelModeOptions', () => {
         const models = getClaudeModelModes();
         expect(models.map((model) => model.key)).toEqual([
             'claude-fable-5-1',
-            'claude-opus-5',
+            'claude-opus-5-5',
             'claude-sonnet-5',
             'claude-haiku-4-5',
         ]);
         // Display names carry the version so the picker label matches the id sent.
         expect(models.map((model) => model.name)).toEqual([
             'fable 5.1',
-            'opus 5',
+            'opus 5.5',
             'sonnet 5',
             'haiku 4.5',
         ]);
@@ -71,7 +71,7 @@ describe('modelModeOptions', () => {
 
     it('uses code defaults for agent defaults', () => {
         expect(getDefaultPermissionModeKey('claude')).toBe('bypassPermissions');
-        expect(getDefaultModelKey('claude')).toBe('claude-opus-5');
+        expect(getDefaultModelKey('claude')).toBe('claude-opus-5-5');
         expect(getDefaultEffortKey('claude')).toBe('medium');
         expect(getDefaultPermissionModeKey('codex')).toBe('yolo');
         expect(getDefaultModelKey('codex')).toBe('gpt-5.5');

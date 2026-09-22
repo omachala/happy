@@ -34,9 +34,9 @@ export const AGENT_MODELS: AgentModel[] = [
     {
         id: 'claude-opus',
         engine: 'claude',
-        label: 'Opus 5',
+        label: 'Opus 5.5',
         group: 'Anthropic',
-        model: 'claude-opus-5',
+        model: 'claude-opus-5-5',
     },
 ]
 
