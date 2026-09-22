@@ -1030,10 +1030,15 @@ class Sync {
             }
 
             // Put it all together
+            // `thinking` is ephemeral (keep-alive driven) and absent from the
+            // REST payload — keep whatever the live activity stream last told
+            // us instead of resetting every session to idle on each refetch
+            // (foreground / reconnect / new-session all land here).
+            const known = storage.getState().sessions[session.id];
             const processedSession = {
                 ...session,
-                thinking: false,
-                thinkingAt: 0,
+                thinking: known?.thinking ?? false,
+                thinkingAt: known?.thinkingAt ?? 0,
                 metadata,
                 agentState,
                 ...(lastMessageText ? { lastMessageText } : {})
@@ -2773,6 +2778,10 @@ class Sync {
         // unread counter on these only, ignore the noisy per-message stream.
         if (updateData.type === 'session-event') {
             notifyUnreadMessage();
+            // Highlight exactly the one session that wants attention. This is
+            // per-session by construction, unlike guessing from activity state
+            // (which arrives batched for every alive session at once).
+            storage.getState().markSessionUnread(updateData.sessionId);
         }
 
         // daemon-status ephemeral updates are deprecated, machine status is handled via machine-activity

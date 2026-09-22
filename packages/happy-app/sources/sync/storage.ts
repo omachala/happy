@@ -580,32 +580,19 @@ export const storage = create<StorageState>()((set, get) => {
                 }
             });
 
-            // Track unread: detect when agent finishes all work for a request.
-            // "Was active" = thinking or had pending permission requests.
-            // "Now idle" = online, not thinking, no pending permissions.
-            let unreadSessionIds = state.unreadSessionIds;
-            sessions.forEach(session => {
-                const oldSession = state.sessions[session.id];
-                if (!oldSession) return;
-                const wasActive = oldSession.thinking === true
-                    || (oldSession.agentState?.requests && Object.keys(oldSession.agentState.requests).length > 0);
-                const newSession = mergedSessions[session.id];
-                if (!newSession || !wasActive) return;
-                const isNowIdle = newSession.thinking !== true
-                    && newSession.presence === 'online'
-                    && (!newSession.agentState?.requests || Object.keys(newSession.agentState.requests).length === 0);
-                if (isNowIdle && state.currentViewingSessionId !== session.id) {
-                    if (!unreadSessionIds.has(session.id)) {
-                        unreadSessionIds = new Set(unreadSessionIds);
-                        unreadSessionIds.add(session.id);
-                    }
-                }
-            });
+            // Unread is NOT inferred here. applySessions runs for EVERY alive
+            // session on each batched activity flush (keep-alives land every 2s)
+            // and again for the whole list on foreground/reconnect refetches, so
+            // any "was busy -> now idle" guess made here fires for every online
+            // session at once and lights up the entire list. The agent-needs-you
+            // moment arrives as its own per-session `session-event` ephemeral
+            // (done / permission / question) — the same signal behind the push
+            // notification — and sync marks the session unread from there.
 
             // Build new unified list view data
             const sessionListViewData = buildSessionListViewData(
                 mergedSessions,
-                unreadSessionIds,
+                state.unreadSessionIds,
             );
 
             return {
@@ -614,7 +601,6 @@ export const storage = create<StorageState>()((set, get) => {
                 sessionsData: listData,  // Legacy - to be removed
                 sessionListViewData,
                 sessionMessages: updatedSessionMessages,
-                unreadSessionIds,
             };
         }),
         applyLoaded: () => set((state) => {
@@ -1327,6 +1313,8 @@ export const storage = create<StorageState>()((set, get) => {
             };
         }),
         markSessionUnread: (sessionId: string) => set((state) => {
+            // The chat on screen is already read — never highlight it
+            if (state.currentViewingSessionId === sessionId) return state;
             if (state.unreadSessionIds.has(sessionId)) return state;
             const next = new Set(state.unreadSessionIds);
             next.add(sessionId);
