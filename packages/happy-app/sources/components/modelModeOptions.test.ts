@@ -4,6 +4,7 @@ import {
     getAvailableModels,
     getAvailablePermissionModes,
     getCodexModelModes,
+    getClaudeFamilyKeyFromModelId,
     getClaudeModelModes,
     getClaudePermissionModes,
     getDefaultEffortKey,
@@ -218,5 +219,41 @@ describe('modelModeOptions', () => {
         expect(getAvailablePermissionModes('codex', metadata, translate).map((mode) => mode.key)).toEqual([
             'default', 'read-only', 'safe-yolo', 'yolo',
         ]);
+    });
+});
+
+describe('getClaudeFamilyKeyFromModelId', () => {
+    it('resolves exact picker models, including dated and vendor-prefixed ids', () => {
+        expect(getClaudeFamilyKeyFromModelId('claude-opus-5-5')).toBe('claude-opus-5-5');
+        expect(getClaudeFamilyKeyFromModelId('claude-opus-5-5-20260901')).toBe('claude-opus-5-5');
+        expect(getClaudeFamilyKeyFromModelId('claude-fable-5-1[1m]')).toBe('claude-fable-5-1');
+        expect(getClaudeFamilyKeyFromModelId('us.anthropic.claude-sonnet-5-v1:0')).toBe('claude-sonnet-5');
+        expect(getClaudeFamilyKeyFromModelId('claude-haiku-4-5')).toBe('claude-haiku-4-5');
+    });
+
+    it('never claims a version the agent is not running', () => {
+        // The whole point: an agent on opus 5 must not confirm an opus 5.5 pick.
+        expect(getClaudeFamilyKeyFromModelId('claude-opus-5')).toBeNull();
+        expect(getClaudeFamilyKeyFromModelId('claude-opus-4-6')).toBeNull();
+        expect(getClaudeFamilyKeyFromModelId('claude-sonnet-4-6')).toBeNull();
+        expect(getClaudeFamilyKeyFromModelId(null)).toBeNull();
+        expect(getClaudeFamilyKeyFromModelId('')).toBeNull();
+    });
+});
+
+describe('getAvailableModels pinned claude model', () => {
+    const t = ((key: string) => key) as unknown as Parameters<typeof getAvailableModels>[2];
+
+    it('surfaces a pinned model the picker no longer lists', () => {
+        const models = getAvailableModels('claude', null, t, 'claude-opus-5');
+        expect(models[0]).toMatchObject({ key: 'claude-opus-5', name: 'opus 5' });
+        // The current picker entries are still there, after the pinned one.
+        expect(models.map((m) => m.key)).toContain('claude-opus-5-5');
+    });
+
+    it('does not duplicate a pinned model that is already listed', () => {
+        const models = getAvailableModels('claude', null, t, 'claude-opus-5-5');
+        expect(models.filter((m) => m.key === 'claude-opus-5-5')).toHaveLength(1);
+        expect(models.map((m) => m.key)).toEqual(getClaudeModelModes().map((m) => m.key));
     });
 });

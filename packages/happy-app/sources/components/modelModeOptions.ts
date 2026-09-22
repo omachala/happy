@@ -107,19 +107,27 @@ export function getClaudeModelModes(): ModelMode[] {
 }
 
 /**
- * Collapse a raw Anthropic model id (e.g. "claude-opus-4-5-20260614",
- * "claude-fable-5-1-20260901") to the picker key of its family so the
- * model chip can show the live CLI-reported model even when it differs
- * from the user's picked `modelMode`.
+ * Resolve a raw Anthropic model id (e.g. "claude-opus-5-5-20260901",
+ * "claude-fable-5-1[1m]", "us.anthropic.claude-sonnet-5-v1:0") to the picker
+ * key naming that exact model, or null when no picker entry matches.
+ *
+ * Version-exact on purpose. Matching on family alone ("any opus" -> the opus
+ * picker key) makes the chip assert a version the agent is not running, and
+ * useModelConfirmed turns that into a green "server confirmed your pick" —
+ * a lie the user cannot see through. An unrecognised or older id returns null
+ * so the chip stays unconfirmed instead.
  */
 export function getClaudeFamilyKeyFromModelId(rawModel: string | null | undefined): string | null {
     if (!rawModel) return null;
-    const id = rawModel.toLowerCase();
-    if (id.includes('fable')) return 'claude-fable-5-1';
-    if (id.includes('opus')) return 'claude-opus-5-5';
-    if (id.includes('sonnet')) return 'claude-sonnet-5';
-    if (id.includes('haiku')) return 'claude-haiku-4-5';
-    return null;
+    let id = rawModel.toLowerCase();
+    const claudeAt = id.indexOf('claude-');
+    if (claudeAt > 0) id = id.slice(claudeAt);   // strip vendor prefixes (bedrock/vertex)
+    id = id
+        .replace(/\[1m\]$/, '')                  // 1M-context variant marker
+        .replace(/:\d+$/, '')                     // bedrock ":0" suffix
+        .replace(/-v\d+$/, '')                    // bedrock "-v1" suffix
+        .replace(/-\d{8}$/, '');                  // dated snapshot
+    return getClaudeModelModes().some((mode) => mode.key === id) ? id : null;
 }
 
 export function getCodexModelModes(): ModelMode[] {
@@ -315,7 +323,23 @@ export function getAvailableModels(
         }
         return metadataModels;
     }
-    return getHardcodedModelModes(flavor, translate);
+    const hardcoded = getHardcodedModelModes(flavor, translate);
+    // A session pinned to a model the picker no longer lists (an older pick
+    // that survived a picker bump, synced from another device, or set by hand)
+    // gets its own entry. Dropping it would make the chip fall through to the
+    // agent default and show a model the agent is not running.
+    const pinnedKey = selectedKey ?? null;
+    if (flavor === 'claude' && pinnedKey && pinnedKey !== 'default'
+        && !hardcoded.some((model) => model.key === pinnedKey)) {
+        return [{ key: pinnedKey, name: humanizeClaudeModelKey(pinnedKey), description: null }, ...hardcoded];
+    }
+    return hardcoded;
+}
+
+/** "claude-opus-5" -> "opus 5", "claude-fable-5-1" -> "fable 5.1". */
+function humanizeClaudeModelKey(key: string): string {
+    const match = /^claude-([a-z]+)-(\d+(?:-\d+)?)$/.exec(key);
+    return match ? `${match[1]} ${match[2].replace('-', '.')}` : key;
 }
 
 export function getAvailablePermissionModes(
