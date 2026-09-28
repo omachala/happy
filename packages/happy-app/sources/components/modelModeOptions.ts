@@ -101,14 +101,14 @@ export function getClaudeModelModes(): ModelMode[] {
     return [
         { key: 'claude-fable-5-1', name: 'fable 5.1', description: 'latest & most capable' },
         { key: 'claude-opus-5-5', name: 'opus 5.5', description: null },
-        { key: 'claude-sonnet-5', name: 'sonnet 5', description: null },
+        { key: 'claude-sonnet-5-5', name: 'sonnet 5.5', description: null },
         { key: 'claude-haiku-4-5', name: 'haiku 4.5', description: null },
     ];
 }
 
 /**
  * Resolve a raw Anthropic model id (e.g. "claude-opus-5-5-20260901",
- * "claude-fable-5-1[1m]", "us.anthropic.claude-sonnet-5-v1:0") to the picker
+ * "claude-fable-5-1[1m]", "us.anthropic.claude-sonnet-5-5-v1:0") to the picker
  * key naming that exact model, or null when no picker entry matches.
  *
  * Version-exact on purpose. Matching on family alone ("any opus" -> the opus
