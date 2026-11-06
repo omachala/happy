@@ -288,6 +288,9 @@ and fixtures remain. Preserve credential and push compatibility on upgrades.
     - the APNs environment from `embedded.mobileprovision`
       (`ProvisioningProfile`);
     - the bundle id.
+
+    The omachala fork has no EAS project, so `happyProjectId` is nil and
+    the source gives no token: push is off, as in the fork's RN build.
   - **When it syncs.** `PushTokenSync` ports `pushTokenSync`. It runs when
     the active account's session starts (sign-in, restore, switch, or the
     next account taking over after a sign-out) and on every

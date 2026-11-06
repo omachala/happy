@@ -4,8 +4,12 @@ import HappyWire
 /// Expo's APNs registration exchange, after expo-notifications/getExpoPushTokenAsync.
 /// Receives device identity and APNs environment from UIKit/Keychain composition.
 public struct ExpoPushTokenExchange: PushTokenSource, Sendable {
-    /// happy-app app.config.js extra.eas.projectId.
-    public static let happyProjectId = "4558dd3d-cd5a-47cd-bad9-e591a241cc06"
+    /// happy-app app.config.js extra.eas.projectId. The omachala fork has no
+    /// EAS project (its app.config.js has no extra.eas), so this is nil and
+    /// push is off, as in the fork's RN build: `ExpoDevicePushTokenSource`
+    /// gives no token, so nothing goes to APNs, Expo or the server. Set the
+    /// fork's own project id here to turn push on.
+    public static let happyProjectId: String? = nil
     /// Expo notifications persists a UUID under this Keychain account key.
     public static let installationIdKey = "EXDeviceInstallationUUIDKey"
 
@@ -20,7 +24,7 @@ public struct ExpoPushTokenExchange: PushTokenSource, Sendable {
         /// Expo EAS project id (`projectId`).
         public var projectId: String
 
-        public init(deviceId: String, development: Bool, appId: String, projectId: String = ExpoPushTokenExchange.happyProjectId) {
+        public init(deviceId: String, development: Bool, appId: String, projectId: String) {
             self.deviceId = deviceId
             self.development = development
             self.appId = appId

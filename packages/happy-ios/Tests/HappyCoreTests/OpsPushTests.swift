@@ -5,7 +5,7 @@ import HappyWire
 
 final class OpsPushTests: XCTestCase {
     func exchange(_ http: FakeHTTP, deviceToken: Data? = Data([0, 15, 255])) -> ExpoPushTokenExchange {
-        ExpoPushTokenExchange(transport: http, configuration: .init(deviceId: "UUID-UPPER", development: true, appId: "com.slopus.happy.dev"), deviceToken: { deviceToken })
+        ExpoPushTokenExchange(transport: http, configuration: .init(deviceId: "UUID-UPPER", development: true, appId: "com.slopus.happy.dev", projectId: "4558dd3d-cd5a-47cd-bad9-e591a241cc06"), deviceToken: { deviceToken })
     }
 
     func testAPNsExchangeExactBodyHasNoAccountCredentials() async throws {

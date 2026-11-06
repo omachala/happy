@@ -10,22 +10,28 @@ public struct ExpoDevicePushTokenSource: PushTokenSource {
     private let installationID: ExpoInstallationID
     private let development: Bool
     private let appId: String
+    private let projectId: String?
     private let deviceToken: @Sendable () async throws -> Data?
 
     /// `development` is `ProvisioningProfile.usesDevelopmentAPNs`, `appId`
     /// the running bundle id, `deviceToken` `APNsTokenSource.token`.
     public init(transport: any HTTPTransport, installationID: ExpoInstallationID, development: Bool, appId: String,
+                projectId: String? = ExpoPushTokenExchange.happyProjectId,
                 deviceToken: @escaping @Sendable () async throws -> Data?) {
         self.transport = transport
         self.installationID = installationID
         self.development = development
         self.appId = appId
+        self.projectId = projectId
         self.deviceToken = deviceToken
     }
 
+    /// Nil without a project id, as pushRegistration.ts is without one:
+    /// no APNs registration, Keychain read or request.
     public func token() async throws -> String? {
+        guard let projectId else { return nil }
         let configuration = ExpoPushTokenExchange.Configuration(
-            deviceId: try installationID.read(), development: development, appId: appId)
+            deviceId: try installationID.read(), development: development, appId: appId, projectId: projectId)
         return try await ExpoPushTokenExchange(transport: transport, configuration: configuration, deviceToken: deviceToken).token()
     }
 }

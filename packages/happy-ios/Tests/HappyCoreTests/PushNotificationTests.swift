@@ -424,6 +424,13 @@ final class PushTokenSyncTests: XCTestCase {
         XCTAssertEqual(registered, ["https://a.example", "https://b.example"])
     }
 
+    final class LockedFlag: @unchecked Sendable {
+        private let lock = NSLock()
+        private var _value = false
+        func set() { lock.withLock { _value = true } }
+        var value: Bool { lock.withLock { _value } }
+    }
+
     final class TargetBox: @unchecked Sendable {
         private let lock = NSLock()
         private var _value: PushTokenSync.Target?
@@ -443,7 +450,7 @@ final class PushTokenSyncTests: XCTestCase {
         let ids = ExpoInstallationID(backend: keychain, legacyDefaults: InMemoryKeyValueStore(), bundleIdentifier: "com.ex3ndr.happy")
         keychain.seed(ids.query, Data("ABC-DEF".utf8), accessibility: .afterFirstUnlockThisDeviceOnly)
         let source = ExpoDevicePushTokenSource(transport: http, installationID: ids, development: false, appId: "com.ex3ndr.happy",
-                                               deviceToken: { Data([0xAB, 0x01]) })
+                                               projectId: "test-project", deviceToken: { Data([0xAB, 0x01]) })
         let token = try await source.token()
         XCTAssertEqual(token, "ExponentPushToken[x]")
         let body = try XCTUnwrap(http.requests.first).jsonBody([String: JSONValueProbe].self)
@@ -453,13 +460,29 @@ final class PushTokenSyncTests: XCTestCase {
         XCTAssertEqual(body["deviceToken"], .string("ab01"))
     }
 
+    /// The fork has no EAS project: no token, and nothing is read or asked.
+    func testExpoDeviceSourceWithoutAProjectIsOff() async throws {
+        XCTAssertNil(ExpoPushTokenExchange.happyProjectId)
+        let http = FakeHTTP()
+        let keychain = FakeKeychain()
+        keychain.copyFailures["com.omachala.happy"] = -25308
+        let ids = ExpoInstallationID(backend: keychain, legacyDefaults: InMemoryKeyValueStore(), bundleIdentifier: "com.omachala.happy")
+        let asked = LockedFlag()
+        let source = ExpoDevicePushTokenSource(transport: http, installationID: ids, development: false, appId: "com.omachala.happy",
+                                               deviceToken: { asked.set(); return Data([1]) })
+        let token = try await source.token()
+        XCTAssertNil(token)
+        XCTAssertFalse(asked.value)
+        XCTAssertTrue(http.requests.isEmpty)
+    }
+
     func testExpoDeviceSourceFailsOnAKeychainError() async {
         let http = FakeHTTP()
         let keychain = FakeKeychain()
         keychain.copyFailures["com.ex3ndr.happy"] = -25308
         let ids = ExpoInstallationID(backend: keychain, legacyDefaults: InMemoryKeyValueStore(), bundleIdentifier: "com.ex3ndr.happy")
         let source = ExpoDevicePushTokenSource(transport: http, installationID: ids, development: false, appId: "com.ex3ndr.happy",
-                                               deviceToken: { Data([1]) })
+                                               projectId: "test-project", deviceToken: { Data([1]) })
         do {
             _ = try await source.token()
             XCTFail("expected the Keychain error")
