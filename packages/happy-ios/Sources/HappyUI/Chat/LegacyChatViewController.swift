@@ -503,6 +503,7 @@ final class LegacyChatViewController: UIViewController, ChatListViewDelegate, Ch
             navigationController?.setNavigationBarHidden(hidesHeader, animated: animated)
         }
         historyPager?.isActive = true
+        updateViewing()
     }
 
     /// In the window, the push still to run: a compose chat's composer
@@ -534,6 +535,7 @@ final class LegacyChatViewController: UIViewController, ChatListViewDelegate, Ch
         // ChatList's `active`: a chat not shown asks for no older page.
         historyPager?.isActive = false
         appeared = false
+        updateViewing()
         if let keyboard = ultraKeyboard, keyboard.isActive {
             keyboard.deactivate()
             landDockRiders(on: keyboard.list)
@@ -546,6 +548,8 @@ final class LegacyChatViewController: UIViewController, ChatListViewDelegate, Ch
     override func didMove(toParent parent: UIViewController?) {
         super.didMove(toParent: parent)
         if parent == nil {
+            appeared = false
+            updateViewing()
             if let keyboard = ultraKeyboard {
                 keyboard.invalidate()
                 landDockRiders(on: keyboard.list)
@@ -1546,6 +1550,60 @@ final class LegacyChatViewController: UIViewController, ChatListViewDelegate, Ch
             Task.detached(priority: .userInitiated) { actions.markRead(sessionId: real) }
             account.spawnRequests.release(sessionId: real)
         }
+        updateViewing()
+    }
+
+    /// The session the sync engine knows is on screen, whose messages a
+    /// socket reconnect fetches again (the fork's reconnect refetch).
+    private var viewedSessionId: String?
+
+    private func updateViewing() {
+        let shown = appeared && !isComposing && !PendingChats.isPendingChatId(chatId) && !isFixture ? chatId : nil
+        guard shown != viewedSessionId else { return }
+        let sync = account.sync
+        let previous = viewedSessionId
+        viewedSessionId = shown
+        Task.detached(priority: .utility) {
+            if let previous { await sync.setViewing(previous, false) }
+            if let shown { await sync.setViewing(shown, true) }
+        }
+    }
+
+    // MARK: Respawn
+
+    /// A respawn is on its way: the trash does nothing meanwhile.
+    private var respawning = false
+
+    /// The fork's trash: this session stops (archived if its CLI can't be
+    /// reached), a fresh one starts where it ran, with its harness and its
+    /// permission and model picks, and takes this chat's place, so Back
+    /// leads where this one's did. No confirmation; a failure says why.
+    func composer(_ composer: any ChatComposerView, didAskToRespawn plan: LegacySessionRespawn.Plan) {
+        guard !respawning else { return }
+        respawning = true
+        let sessionId = chatId
+        let steps = LegacySessionRespawn.steps(account)
+        Task { [weak self] in
+            // Its RPCs and store writes run off the main thread.
+            let result = await Task.detached(priority: .userInitiated) {
+                do { return Result<String, Error>.success(try await LegacySessionRespawn.run(sessionId: sessionId, plan: plan, steps: steps)) }
+                catch { return .failure(error) }
+            }.value
+            guard let self else { return }
+            self.respawning = false
+            switch result {
+            case .success(let newId):
+                guard self.context.account.session === self.account, self.chatId == sessionId else { return }
+                let next = LegacyChatViewController(context: self.context, session: self.account, sessionId: newId)
+                TabletRoutes.record(.session(id: newId), for: next)
+                ComposeNavigation.replace(self, with: next)
+            case .failure(let error):
+                let message = (error as? LocalizedError)?.errorDescription ?? String(describing: error)
+                let alert = UIAlertController(title: Strings.Common.error, message: message, preferredStyle: .alert)
+                alert.addAction(UIAlertAction(title: Strings.Common.ok, style: .default))
+                self.present(alert, animated: true)
+            }
+        }
     }
 
     /// The strip's `+`: a sibling chat, started where the open one runs and
@@ -1953,6 +2011,8 @@ final class LegacyChatViewController: UIViewController, ChatListViewDelegate, Ch
         case .option(let title):
             let sender = services.sender
             let sessionId = self.chatId
+            // The fork's useChatScrollToBottom: the pick shows at the newest.
+            list.revealNextSend()
             Task { _ = try? await sender.send(OutgoingMessage(text: title), sessionId: sessionId) }
         case .retry(let localId):
             let sender = services.sender
