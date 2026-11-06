@@ -41,8 +41,11 @@ public struct LegacyMachineHome: Equatable, Sendable {
     /// `fallbackTitles` are the chats' first prompts, already made titles
     /// (`LegacyFirstPrompts`), for chats the agent hasn't named.
     public init(_ snapshot: LegacyHomeSnapshot, fallbackTitles: [String: String] = [:], words: Words = Words()) {
-        let settings = AccountSettings(snapshot.settings)
-        let byActivity = settings.values["sortSessionsByActivity"]?.boolValue ?? false
+        // Only an explicit synced value counts: the fork's default is
+        // creation order, while AccountSettings defaults this key to true.
+        var stored = snapshot.settings.synced?.settings?.objectValue ?? [:]
+        stored.merge(snapshot.settings.pending) { _, pending in pending }
+        let byActivity = stored["sortSessionsByActivity"]?.boolValue ?? false
         let machines = Dictionary(snapshot.machines.machines.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
 
         var live = snapshot.sessions.filter(Self.isListed)
