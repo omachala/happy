@@ -345,12 +345,10 @@ final class SessionComposerView: UIView, ChatComposerView, AgentInputCardDelegat
         } else {
             status = nil
         }
-        usage = ComposerUsage(
-            usage: state.usage,
-            usageLimits: record?.agentState?["usageLimits"],
-            alwaysShowContextSize: state.session.settings.bool("alwaysShowContextSize"),
-            showRemaining: state.session.settings.bool("usageLimitShowRemaining")
-        )
+        // This fork shows no usage row (week % and context gauge) under the
+        // card: the context figure isn't reliable, and the row leaves a gap
+        // under the composer. Usage lives in the home header's pill.
+        usage = nil
         if !SessionComposerRules.showsAbortButton(record) {
             stopRequested = false
         }
