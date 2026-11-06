@@ -299,7 +299,8 @@ final class HostedChatProfileTests: XCTestCase {
 
     /// The legacy profile is the agent's: the same head (the avatar, the
     /// name, what it is and its status), its tiles, and every row it had,
-    /// on Settings' cards; the permission mode from the chat under it.
+    /// on Settings' cards. No permission mode: a Happy CLI chat has no
+    /// permission UI in this fork (every message runs never-ask).
     func testTheLegacyProfileHasTheSharedHeadAndEveryRow() async throws {
         let controller = controller()
         let account = try await legacyAccount(controller)
@@ -331,10 +332,9 @@ final class HostedChatProfileTests: XCTestCase {
 
         typealias S = Strings.SessionDetail
         let cards = info.sections.sections
-        XCTAssertEqual(cards.map(\.id), ["controls", "quick-actions", "details", "metadata", "agent-state", "activity", "raw-0", "raw-1", "raw-2"])
+        XCTAssertEqual(cards.map(\.id), ["quick-actions", "details", "metadata", "agent-state", "activity", "raw-0", "raw-1", "raw-2"])
         let titles = cards.flatMap { $0.rows.map(\.title) }
         for title in [
-            Strings.ChatActions.permissionMode,
             Strings.FilesDetail.changes, S.viewMachine, S.archiveSession, S.deleteSession,
             S.happySessionId, S.claudeCodeSessionId, S.connectionStatus, S.created, S.lastUpdated, S.sequence,
             S.host, S.path, Strings.ChatActions.branch, S.cliVersion, S.operatingSystem, S.aiProvider, S.copyMetadata, S.copyMetadataAndLogs,
@@ -342,19 +342,18 @@ final class HostedChatProfileTests: XCTestCase {
         ] {
             XCTAssertTrue(titles.contains(title), "no \(title) row")
         }
+        XCTAssertFalse(titles.contains(Strings.ChatActions.permissionMode), "a Happy CLI chat has no permission UI")
         // Branch right after Path, as before.
         let metadata = try XCTUnwrap(cards.first { $0.id == "metadata" }).rows.map(\.title)
         XCTAssertEqual(metadata.firstIndex(of: Strings.ChatActions.branch), metadata.firstIndex(of: S.path).map { $0 + 1 })
         XCTAssertEqual(cards.first { $0.id == "metadata" }?.rows.first { $0.title == Strings.ChatActions.branch }?.subtitle, "main")
-        XCTAssertEqual(cards.map(\.heading), [nil, S.quickActions, nil, S.metadata, S.agentState, S.activity, S.rawJSON, nil, nil])
+        XCTAssertEqual(cards.map(\.heading), [S.quickActions, nil, S.metadata, S.agentState, S.activity, S.rawJSON, nil, nil])
         // Each on Settings' card, the rows Settings' rows, in the scroll.
         for section in cards {
             let card = try XCTUnwrap(info.sections.card(section.id))
             XCTAssertEqual(subviews(SettingsCardView.RowView.self, in: card).count, section.rows.count, section.id)
         }
-        // The permission mode is the chat's pull-down.
-        let permission = try XCTUnwrap(subviews(MenuRowButton.self, in: info.view).first { $0.accessibilityIdentifier == "profile-permission-mode" })
-        XCTAssertTrue(permission.showsMenuAsPrimaryAction)
+        XCTAssertNil(subviews(MenuRowButton.self, in: info.view).first { $0.accessibilityIdentifier == "profile-permission-mode" })
         // Retry and Copy diagnostics stay in the bar, for a body that never shows.
         XCTAssertNotNil(info.navigationItem.rightBarButtonItem?.menu)
         await controller.signOut()

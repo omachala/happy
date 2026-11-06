@@ -230,7 +230,12 @@ final class HostedHeaderBarTests: XCTestCase {
         XCTAssertTrue(condition())
     }
 
-    func testLegacyHomeHasTheSwitcherAndTheClearBar() async throws {
+    /// This fork's Happy CLI home header (MainView.tsx): the logo to
+    /// Settings on the left, the socket's status as the title, the usage
+    /// pill and `+` on the right; a clear bar. The pill and the status are
+    /// plain controls, so they must listen for `.touchUpInside`: on
+    /// `.primaryActionTriggered` a tap did nothing.
+    func testLegacyHomeHasTheForksHeaderAndTheClearBar() async throws {
         let controller = AccountController(
             serverConfig: ServerConfig(storage: InMemoryKeyValueStore()), clientID: "ios/test",
             credentialStore: InMemoryCredentialStore(), storeDirectory: nil,
@@ -248,12 +253,20 @@ final class HostedHeaderBarTests: XCTestCase {
         defer { window.isHidden = true }
         window.layoutIfNeeded()
         try await Task.sleep(for: .milliseconds(500))
-        XCTAssertEqual(home.navigationItem.leftBarButtonItem?.customView?.accessibilityIdentifier, "account-switcher")
-        // Read on screen from the left: filter, compose (when this home
-        // composes), settings outermost. Named, so a test needs no label.
-        let trailing = (home.navigationItem.rightBarButtonItems ?? []).reversed().compactMap(\.accessibilityIdentifier)
-        XCTAssertEqual(trailing.first, "filter")
-        XCTAssertEqual(trailing.last, "settings")
+        XCTAssertEqual(home.navigationItem.leftBarButtonItem?.accessibilityIdentifier, "settings")
+        let status = try XCTUnwrap(home.navigationItem.titleView as? LegacyConnectionStatusView)
+        // Outermost first: `+` at the edge, the pill inside it.
+        let items = home.navigationItem.rightBarButtonItems ?? []
+        XCTAssertEqual(items.first?.accessibilityIdentifier, "compose")
+        let pill = try XCTUnwrap(items.last?.customView as? UsagePillView)
+        for control in [pill, status] as [UIControl] {
+            var onTap = false
+            control.enumerateEventHandlers { action, _, event, _ in
+                if action != nil, event.contains(.touchUpInside) { onTap = true }
+            }
+            XCTAssertTrue(onTap, "\(control): a tap does nothing")
+        }
+        XCTAssertTrue(home.toolbarItems?.isEmpty ?? true, "no compose toolbar")
         XCTAssertNil(home.navigationItem.standardAppearance)
         Self.assertClear(navigation.navigationBar)
         keep(window, "legacy-home-light")

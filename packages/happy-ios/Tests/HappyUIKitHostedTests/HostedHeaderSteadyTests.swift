@@ -82,6 +82,7 @@ final class HostedHeaderSteadyTests: XCTestCase {
     }
 
     func testTheAccountsNameHoldsStillAsTheConnectionComesAndGoes() async throws {
+        throw XCTSkip("This fork's Happy CLI home has no account switcher: its title is the socket's status (LegacyHomeHeader), pinned by HostedHeaderBarTests.testLegacyHomeHasTheForksHeaderAndTheClearBar")
         let controller = AccountController(
             serverConfig: ServerConfig(storage: InMemoryKeyValueStore()), clientID: "ios/test",
             credentialStore: InMemoryCredentialStore(), storeDirectory: nil,

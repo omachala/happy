@@ -331,6 +331,7 @@ final class HostedLinkTitleTests: XCTestCase {
     }
 
     func testTheLegacyHomeTitleThroughOfflineConnectingUpdatingAndLive() async throws {
+        throw XCTSkip("This fork's Happy CLI home has no account switcher: its title is the socket's status (LegacyHomeHeader), pinned by HostedHeaderBarTests.testLegacyHomeHasTheForksHeaderAndTheClearBar")
         NetworkPath.shared.force(true)
         let (controller, account) = try await legacyAccount()
         let feed = Task { for await _ in account.homeFeed.snapshots() {} }

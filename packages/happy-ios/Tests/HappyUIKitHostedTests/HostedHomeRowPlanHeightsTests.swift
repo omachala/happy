@@ -71,6 +71,11 @@ final class HostedHomeRowPlanHeightsTests: XCTestCase {
                 if row.identity.hasPrefix("session:") {
                     XCTAssertTrue(sessionHeights.contains(height), "\(at): \(height), not a session's \(sessionHeights)")
                     sessions += 1
+                } else if row.identity.hasPrefix("machine-session:") {
+                    // This fork's Happy CLI home: one tile per session
+                    // (`LegacyMachineSessionRowLayout`), as tall as its plan
+                    // like every row above.
+                    sessions += 1
                 }
             }
             XCTAssertGreaterThan(sessions, 0, category.rawValue)

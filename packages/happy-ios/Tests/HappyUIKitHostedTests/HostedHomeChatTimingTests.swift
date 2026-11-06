@@ -72,7 +72,7 @@ final class HostedHomeChatTimingTests: XCTestCase {
         let rows = try XCTUnwrap((sessions.view as? HomeUltraListView)?.list)
         var index: Int?
         try await wait {
-            index = rows.items.firstIndex { ($0 as? HomeUltraRow)?.identity == HomeListRow.ID.session(id).ultraIdentity }
+            index = rows.items.firstIndex { ($0 as? HomeUltraRow)?.identity == HomeListRow.ID.machineSession(id).ultraIdentity }
             return index != nil
         }
         let row = try XCTUnwrap(index)

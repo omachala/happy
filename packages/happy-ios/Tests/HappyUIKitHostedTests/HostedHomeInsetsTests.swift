@@ -143,8 +143,10 @@ final class HostedHomeInsetsTests: XCTestCase {
         defer { withExtendedLifetime(app.coordinator) {} }
         let list = try XCTUnwrap(app.legacyList)
         let loaded = list.viewportInsets
-        XCTAssertFalse(app.navigation.isToolbarHidden, "the legacy home shows compose in its toolbar")
-        XCTAssertGreaterThan(loaded.bottom, app.window.safeAreaInsets.bottom, "the list ends above the toolbar")
+        // This fork's home has `+` in its bar and no compose toolbar: the
+        // list runs to the safe area.
+        XCTAssertTrue(app.navigation.isToolbarHidden, "this fork's home has no compose toolbar")
+        XCTAssertGreaterThanOrEqual(loaded.bottom, app.window.safeAreaInsets.bottom, "the list ends above the home indicator")
         let first = try XCTUnwrap(list.settledFrame(at: 0))
         capture(app.window, "legacy-1-loaded")
 

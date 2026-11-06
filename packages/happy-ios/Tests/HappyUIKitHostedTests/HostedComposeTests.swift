@@ -339,7 +339,7 @@ final class HostedComposeTests: XCTestCase {
         keep(window, "legacy-new-work-one-machine")
 
         XCTAssertNotNil(card.configuration.model?.menu, "the model must be pickable before a session exists")
-        XCTAssertNotNil(card.configuration.permission?.menu)
+        XCTAssertNil(card.configuration.permission, "this fork: no permission UI in a Happy CLI chat")
         let harnesses = Self.actions(start.harnessMenuElements())
         try XCTUnwrap(harnesses.first { $0.title == "Codex" }).performWithSender(nil, target: nil)
         try await until { panel.harness.title == "Codex" }

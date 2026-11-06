@@ -33,18 +33,18 @@ final class HostedHomeUltraParityTests: XCTestCase {
         ((view as? UIScrollView).map { [$0] } ?? []) + view.subviews.flatMap(scrollViews(in:))
     }
 
-    /// A live session swipes to "Archive Session", one action that a full
-    /// swipe doesn't take, as the table's did.
+    /// A live session swipes to "Archive": a short swipe shows it, a full
+    /// swipe takes it (this fork's home).
     func testALiveSessionSwipesToArchive() async throws {
         let app = try await HomeApp.legacy(self)
         let list = try XCTUnwrap(app.legacyList)
-        let session = try XCTUnwrap(row(list, "session:long-0"))
-        XCTAssertEqual(session.trailingSwipeActions.map(\.title), [Strings.SessionInfo.archiveSession])
+        let session = try XCTUnwrap(row(list, "machine-session:long-0"))
+        XCTAssertEqual(session.trailingSwipeActions.map(\.title), [Strings.Session.archiveAction])
         XCTAssertTrue(session.trailingSwipeActions.allSatisfy(\.isDestructive))
         let red = UITraitCollection(userInterfaceStyle: .light)
         XCTAssertEqual(session.trailingSwipeActions.first?.color.resolvedColor(with: red), UIColor(Palette.statusError).resolvedColor(with: red), "the table's red")
-        XCTAssertFalse(list.swipeActions.allowsFullSwipe)
-        let others = list.items.compactMap { $0 as? HomeUltraRow }.filter { !$0.identity.hasPrefix("session:") }
+        XCTAssertTrue(list.swipeActions.allowsFullSwipe)
+        let others = list.items.compactMap { $0 as? HomeUltraRow }.filter { !$0.identity.hasPrefix("machine-session:") }
         XCTAssertTrue(others.allSatisfy(\.trailingSwipeActions.isEmpty), "only sessions swipe: \(others.map(\.identity))")
     }
 
@@ -52,11 +52,11 @@ final class HostedHomeUltraParityTests: XCTestCase {
     func testALongPressOpensTheSessionAlert() async throws {
         let app = try await HomeApp.legacy(self)
         let list = try XCTUnwrap(app.legacyList)
-        let hold = try XCTUnwrap(row(list, "session:long-0")?.longPress, "a session has no long press")
+        let hold = try XCTUnwrap(row(list, "machine-session:long-0")?.longPress, "a session has no long press")
         hold()
         let shown = try await until { app.navigation.presentedViewController is UIAlertController }
         XCTAssertTrue(shown, "no alert: \(String(describing: app.navigation.presentedViewController))")
-        let others = list.items.compactMap { $0 as? HomeUltraRow }.filter { !$0.identity.hasPrefix("session:") }
+        let others = list.items.compactMap { $0 as? HomeUltraRow }.filter { !$0.identity.hasPrefix("machine-session:") }
         XCTAssertTrue(others.allSatisfy { $0.longPress == nil }, "only sessions have a long press: \(others.map(\.identity))")
         app.navigation.dismiss(animated: false)
     }
@@ -66,9 +66,9 @@ final class HostedHomeUltraParityTests: XCTestCase {
     func testVoiceOverReadsASessionAsAButtonWithItsActions() async throws {
         let app = try await HomeApp.legacy(self)
         let list = try XCTUnwrap(app.legacyList)
-        let loaded = try await until { self.view(list, "session:long-0") != nil }
+        let loaded = try await until { self.view(list, "machine-session:long-0") != nil }
         XCTAssertTrue(loaded)
-        let cell = try XCTUnwrap(view(list, "session:long-0"))
+        let cell = try XCTUnwrap(view(list, "machine-session:long-0"))
         XCTAssertTrue(cell.isAccessibilityElement)
         XCTAssertTrue(cell.accessibilityLabel?.contains("Older conversation 0") == true, cell.accessibilityLabel ?? "")
         XCTAssertTrue(cell.accessibilityTraits.contains(.button))
@@ -103,12 +103,12 @@ final class HostedHomeUltraParityTests: XCTestCase {
         let list = try XCTUnwrap(app.legacyList)
         let sessions = try XCTUnwrap(app.root.children.compactMap { $0 as? SessionListViewController }.first)
         sessions.selectedSessionId = "long-1"
-        let selected = try await until { self.row(list, "session:long-1")?.selected == true && self.view(list, "session:long-1")?.accessibilityTraits.contains(.selected) == true }
+        let selected = try await until { self.row(list, "machine-session:long-1")?.selected == true && self.view(list, "machine-session:long-1")?.accessibilityTraits.contains(.selected) == true }
         XCTAssertTrue(selected)
-        XCTAssertEqual(list.items.compactMap { $0 as? HomeUltraRow }.filter(\.selected).map(\.identity), ["session:long-1"])
+        XCTAssertEqual(list.items.compactMap { $0 as? HomeUltraRow }.filter(\.selected).map(\.identity), ["machine-session:long-1"])
 
         sessions.selectedSessionId = "long-2"
-        let moved = try await until { self.row(list, "session:long-2")?.selected == true && self.row(list, "session:long-1")?.selected == false }
+        let moved = try await until { self.row(list, "machine-session:long-2")?.selected == true && self.row(list, "machine-session:long-1")?.selected == false }
         XCTAssertTrue(moved)
         sessions.selectedSessionId = nil
         let none = try await until { list.items.compactMap { $0 as? HomeUltraRow }.allSatisfy { !$0.selected } }
