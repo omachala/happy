@@ -7,7 +7,29 @@ import UIKit
 import UltraView
 
 private struct HomeHarnessOffline: HTTPTransport {
-    func send(_ request: HTTPRequest) async throws -> HTTPResponse { throw URLError(.notConnectedToInternet) }
+    func send(_ request: HTTPRequest) async throws -> HTTPResponse {
+        // `-usage ok|high|404|500`: the fork's usage endpoint answers so;
+        // without it, nothing answers ("Unreachable").
+        if request.url.path.hasSuffix(ClaudeUsageClient.path), let response = Self.usage { return response }
+        throw URLError(.notConnectedToInternet)
+    }
+
+    static let usage: HTTPResponse? = {
+        let arguments = ProcessInfo.processInfo.arguments
+        guard let index = arguments.firstIndex(of: "-usage"), arguments.indices.contains(index + 1) else { return nil }
+        let reset = ISO8601DateFormatter().string(from: Date().addingTimeInterval(2 * 3600 + 14 * 60))
+        let weekly = ISO8601DateFormatter().string(from: Date().addingTimeInterval(3 * 86400 + 5 * 3600))
+        func body(_ five: Int, _ seven: Int, extra: Bool) -> Data {
+            Data(#"{"five_hour":{"utilization":\#(five),"resets_at":"\#(reset)"},"seven_day":{"utilization":\#(seven),"resets_at":"\#(weekly)"},"extra_usage":{"is_enabled":\#(extra),"utilization":12,"used_credits":1234,"monthly_limit":10000}}"#.utf8)
+        }
+        switch arguments[index + 1] {
+        case "ok": return HTTPResponse(status: 200, body: body(42, 63, extra: true))
+        case "high": return HTTPResponse(status: 200, body: body(85, 91, extra: false))
+        case "404": return HTTPResponse(status: 404, body: Data(#"{"error":"not connected"}"#.utf8))
+        case "500": return HTTPResponse(status: 500, body: Data())
+        default: return nil
+        }
+    }()
 }
 private struct HomeHarnessNoSocket: WebSocketConnector {
     func connect(to url: URL) async throws -> WebSocketConnection { throw URLError(.notConnectedToInternet) }
@@ -28,6 +50,10 @@ final class HomeRendererHarness {
         let sessionCount = Int(option("-sessionCount") ?? "0") ?? 0
         let archiveCount = Int(option("-archiveCount") ?? "0") ?? 0
         let secondMachine = arguments.contains("-secondMachine")
+        // `-forkStates`: the fork home's row states (unread, thinking, a
+        // permission, an untitled chat, a chat in the home directory) and a
+        // third computer that sorts first.
+        let forkStates = arguments.contains("-forkStates")
         // `-freshSettings`: this launch starts from no stored settings or
         // drafts, whatever an earlier one left.
         let fresh = arguments.contains("-freshSettings")
@@ -125,6 +151,7 @@ final class HomeRendererHarness {
                             return row
                         })
                     }
+                    if forkStates { try Self.seedForkStates(store) }
                     try store.addPendingSettings(["sessionListGrouping": .string(grouping), "hideInactiveSessions": .bool(archiveCount > 0 && !arguments.contains("-showArchive"))])
                 }.value
                 let context = AppContext(account: controller, variant: .development, version: "home-harness")
@@ -143,6 +170,58 @@ final class HomeRendererHarness {
                 }
             } catch { fatalError("Home harness: \(error)") }
         }
+    }
+}
+
+extension HomeRendererHarness {
+    /// `-forkStates`, on the seeded account.
+    nonisolated static func seedForkStates(_ store: LocalStore) throws {
+        guard let template = try store.sessions().first(where: { $0.id == "seeded-main" }),
+              var machine = try store.machines().first else { return }
+        let now = Int64(Date().timeIntervalSince1970 * 1000)
+        func edit(_ id: String, _ change: (inout SessionRecord, inout [String: JSONValue]) -> Void) throws {
+            guard var row = try store.sessions().first(where: { $0.id == id }) else { return }
+            var metadata = row.metadata?.objectValue ?? [:]
+            change(&row, &metadata)
+            row.metadata = .object(metadata)
+            try store.upsertSessions([row])
+        }
+        // A permission asked.
+        try edit("seeded-tab-3") { row, _ in
+            row.agentStateVersion += 1
+            row.agentState = .object(["controlledByUser": .bool(false), "requests": .object([
+                "req-1": .object(["tool": .string("Bash"), "arguments": .object(["command": .string("rm -rf build")]), "createdAt": .number(Double(now))]),
+            ])])
+        }
+        // No name from the agent: its first prompt names it.
+        try edit("seeded-tab-4") { row, metadata in
+            row.metadataVersion += 1
+            metadata["summary"] = nil
+        }
+        // A chat in the home directory, the newest.
+        var home = template
+        home.id = "seeded-home"; home.createdAt = SeededAccount.base + 400_000
+        var fields = home.metadata?.objectValue ?? [:]
+        fields["path"] = .string(SeededAccount.home)
+        fields["summary"] = .object(["text": .string("Dotfiles cleanup")])
+        home.metadata = .object(fields)
+        // A third computer, first A–Z.
+        machine.id = "build-box"
+        var machineFields = machine.metadata?.objectValue ?? [:]
+        machineFields["displayName"] = .string("Build Box")
+        machine.metadata = .object(machineFields)
+        try store.upsertMachine(machine)
+        var build = template
+        build.id = "build-api"; build.createdAt = SeededAccount.base + 500_000
+        var buildFields = build.metadata?.objectValue ?? [:]
+        buildFields["machineId"] = .string("build-box")
+        buildFields["path"] = .string("/Users/harness/Developer/api")
+        buildFields["summary"] = .object(["text": .string("Rate limiter")])
+        build.metadata = .object(buildFields)
+        try store.upsertSessions([home, build])
+        // Live state after the rows exist.
+        try store.applySessionActivity(id: "seeded-tab-2", active: true, activeAt: now, thinking: true)
+        try store.markSessionUnread(id: "seeded-tab-1")
     }
 }
 
