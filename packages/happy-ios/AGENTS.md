@@ -633,11 +633,12 @@ Linux test targets also run from Xcode: open `Package.swift` and use the
 
 | Variant | Configuration | Bundle id | Name |
 | --- | --- | --- | --- |
-| development | Debug | `com.slopus.happy.dev` | Happy (dev) |
-| preview | Preview | `com.slopus.happy.preview` | Happy (preview) |
-| production | Release | `com.ex3ndr.happy` | Happy |
+| development | Debug | `com.omachala.happy.dev` | Happy (dev) |
+| preview | Preview | `com.omachala.happy.preview` | Happy (preview) |
+| production | Release | `com.omachala.happy` | Happy |
 
-The bundle ids are the RN app's. Each variant has its own
+The bundle ids are the omachala fork's RN app's (team `924FH7MYCN`,
+set on the `Happy` target). Each variant has its own
 `App/Info-*.plist`. Those files are plain plists, because xtool doesn't
 expand `$(VARIABLES)`. `AppConfigurationTests` keeps their shared keys
 identical and checks the variant keys:
@@ -652,7 +653,7 @@ Only production has entitlements (associated domains).
 
 All three variants (development, preview, production) carry the same semver
 version, `2.0.0`, continuing the RN app's `1.x` releases. Production
-continues the existing `com.ex3ndr.happy` listing; dev and preview ship the
+continues the fork's existing `com.omachala.happy` listing; dev and preview ship the
 same number on their own listings.
 
 - Bump `MARKETING_VERSION` in `project.yml`'s base settings, the only one

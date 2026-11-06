@@ -55,9 +55,9 @@ final class ServerConfigTests: XCTestCase {
     }
 
     func testAppVariantsUseTheRNBundleIds() {
-        XCTAssertEqual(AppVariant.development.bundleIdentifier, "com.slopus.happy.dev")
-        XCTAssertEqual(AppVariant.preview.bundleIdentifier, "com.slopus.happy.preview")
-        XCTAssertEqual(AppVariant.production.bundleIdentifier, "com.ex3ndr.happy")
+        XCTAssertEqual(AppVariant.development.bundleIdentifier, "com.omachala.happy.dev")
+        XCTAssertEqual(AppVariant.preview.bundleIdentifier, "com.omachala.happy.preview")
+        XCTAssertEqual(AppVariant.production.bundleIdentifier, "com.omachala.happy")
         XCTAssertEqual(HappyClientID.make(version: "1.8.0"), "ios/1.8.0")
     }
 }

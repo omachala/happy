@@ -1,7 +1,7 @@
 import Foundation
 
 /// The three builds the RN app ships, with the same bundle ids
-/// (packages/happy-app/app.config.js), so the native app replaces the RN
+/// (packages/happy-app/app.config.js; the omachala fork's ids), so the native app replaces the RN
 /// app in place and keeps its Keychain items, push tokens and links.
 public enum AppVariant: String, Sendable, CaseIterable {
     case development
@@ -13,9 +13,9 @@ public enum AppVariant: String, Sendable, CaseIterable {
 
     public var bundleIdentifier: String {
         switch self {
-        case .development: return "com.slopus.happy.dev"
-        case .preview: return "com.slopus.happy.preview"
-        case .production: return "com.ex3ndr.happy"
+        case .development: return "com.omachala.happy.dev"
+        case .preview: return "com.omachala.happy.preview"
+        case .production: return "com.omachala.happy"
         }
     }
 

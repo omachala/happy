@@ -2,14 +2,15 @@
 # directory; the .xcodeproj is not committed.
 #
 # Independent UIKit iOS and AppKit macOS targets, three configurations:
-#   Debug   -> com.slopus.happy.dev      "Happy (dev)"
-#   Preview -> com.slopus.happy.preview  "Happy (preview)"
-#   Release -> com.ex3ndr.happy          "Happy"
+#   Debug   -> com.omachala.happy.dev      "Happy (dev)"
+#   Preview -> com.omachala.happy.preview  "Happy (preview)"
+#   Release -> com.omachala.happy          "Happy"
+# (the omachala fork's ids and team, as its RN app shipped them)
 # The app target compiles Sources/HappyApp itself and links the package's
 # HappyKit product, which holds everything else.
 name: Happy
 options:
-  bundleIdPrefix: com.slopus
+  bundleIdPrefix: com.omachala
   deploymentTarget:
     iOS: "26.0"
     macOS: "14.0"
@@ -57,21 +58,22 @@ targets:
         TARGETED_DEVICE_FAMILY: "1,2"
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         CODE_SIGN_STYLE: Automatic
+        DEVELOPMENT_TEAM: 924FH7MYCN
         # Every variant has aps-environment "development", as the RN app's
         # expo-notifications plugin writes it; signing for distribution
         # replaces it with the profile's "production". Production also has
         # its associated domain.
       configs:
         Debug:
-          PRODUCT_BUNDLE_IDENTIFIER: com.slopus.happy.dev
+          PRODUCT_BUNDLE_IDENTIFIER: com.omachala.happy.dev
           INFOPLIST_FILE: App/Info-Development.plist
           CODE_SIGN_ENTITLEMENTS: App/Happy.entitlements
         Preview:
-          PRODUCT_BUNDLE_IDENTIFIER: com.slopus.happy.preview
+          PRODUCT_BUNDLE_IDENTIFIER: com.omachala.happy.preview
           INFOPLIST_FILE: App/Info-Preview.plist
           CODE_SIGN_ENTITLEMENTS: App/Happy.entitlements
         Release:
-          PRODUCT_BUNDLE_IDENTIFIER: com.ex3ndr.happy
+          PRODUCT_BUNDLE_IDENTIFIER: com.omachala.happy
           INFOPLIST_FILE: App/Info-Production.plist
           CODE_SIGN_ENTITLEMENTS: App/Happy-Production.entitlements
           CURRENT_PROJECT_VERSION: "156"
@@ -99,15 +101,15 @@ targets:
         INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.developer-tools
       configs:
         Debug:
-          PRODUCT_BUNDLE_IDENTIFIER: com.slopus.happy.native.mac.dev
+          PRODUCT_BUNDLE_IDENTIFIER: com.omachala.happy.native.mac.dev
           INFOPLIST_KEY_CFBundleDisplayName: Happy Native (dev)
           HAPPY_APP_VARIANT: development
         Preview:
-          PRODUCT_BUNDLE_IDENTIFIER: com.slopus.happy.native.mac.preview
+          PRODUCT_BUNDLE_IDENTIFIER: com.omachala.happy.native.mac.preview
           INFOPLIST_KEY_CFBundleDisplayName: Happy Native (preview)
           HAPPY_APP_VARIANT: preview
         Release:
-          PRODUCT_BUNDLE_IDENTIFIER: com.slopus.happy.native.mac
+          PRODUCT_BUNDLE_IDENTIFIER: com.omachala.happy.native.mac
           INFOPLIST_KEY_CFBundleDisplayName: Happy Native
           HAPPY_APP_VARIANT: production
   HappyMacTests:

@@ -41,7 +41,7 @@ final class PreferenceTests: XCTestCase {
     }
 
     func testTheShippedBundleIdentifierIsProduction() {
-        XCTAssertEqual(AppVariant.production.bundleIdentifier, "com.ex3ndr.happy")
+        XCTAssertEqual(AppVariant.production.bundleIdentifier, "com.omachala.happy")
         XCTAssertFalse(Preference(variant: .production).isAvailable)
     }
 }
