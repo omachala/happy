@@ -49,11 +49,14 @@ final class LegacyHomeHeader {
 
     init(session: AccountSession) {
         diagnostics = session.realtime.diagnostics
-        pill.addAction(UIAction { [weak self] _ in self?.usageTapped() }, for: .primaryActionTriggered)
+        // Plain UIControls: UIKit sends them `.touchUpInside`, never
+        // `.primaryActionTriggered` (only UIButton and friends do), so a tap
+        // on either did nothing.
+        pill.addAction(UIAction { [weak self] _ in self?.usageTapped() }, for: .touchUpInside)
         status.addAction(UIAction { [weak self] _ in
             guard let self, status.isTappable else { return }
             onConnectionError?()
-        }, for: .primaryActionTriggered)
+        }, for: .touchUpInside)
         statusWatch = LegacyLink.link(for: session).watchStatus { [weak self] status in self?.show(status) }
     }
 
