@@ -61,8 +61,8 @@ targets:
         DEVELOPMENT_TEAM: 924FH7MYCN
         # Every variant has aps-environment "development", as the RN app's
         # expo-notifications plugin writes it; signing for distribution
-        # replaces it with the profile's "production". Production also has
-        # its associated domain.
+        # replaces it with the profile's "production". The fork has no
+        # universal links, so production has no associated domain.
       configs:
         Debug:
           PRODUCT_BUNDLE_IDENTIFIER: com.omachala.happy.dev

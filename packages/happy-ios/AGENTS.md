@@ -647,7 +647,7 @@ identical and checks the variant keys:
 - `HappyAppVariant`;
 - ATS: local networking everywhere, arbitrary loads outside production.
 
-Only production has entitlements (associated domains).
+No variant has associated domains in the fork (no universal links).
 
 ### Versioning
 

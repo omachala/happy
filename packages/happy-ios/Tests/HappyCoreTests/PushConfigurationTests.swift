@@ -27,7 +27,8 @@ final class PushConfigurationTests: XCTestCase {
         XCTAssertEqual(try plist("App/Happy.entitlements") as NSDictionary, ["aps-environment": "development"] as NSDictionary)
         let production = try plist("App/Happy-Production.entitlements")
         XCTAssertEqual(production["aps-environment"] as? String, "development")
-        XCTAssertEqual(production["com.apple.developer.associated-domains"] as? [String], ["applinks:app.happy.engineering"])
+        // The fork has no universal links (no app.happy.engineering).
+        XCTAssertNil(production["com.apple.developer.associated-domains"])
     }
 
     func testBuildFilesSignWithTheEntitlements() throws {
