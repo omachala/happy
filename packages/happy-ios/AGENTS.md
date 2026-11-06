@@ -240,8 +240,22 @@ and fixtures remain. Preserve credential and push compatibility on upgrades.
   - A failed text/POST blocks later sends in that session; those remain queued.
     A failed attachment upload stays visible but is skipped so its text sends.
     Retry is idempotent by localId, including after a lost acknowledgement.
-  - Unsupported permission modes are refused before acceptance: `send` throws
-    `UnsupportedPermissionModeError`, and nothing is enqueued or copied.
+  - Happy CLI messages never carry a picked permission (this fork): every
+    one is forced to the agent's never-ask mode
+    (`AgentDefaults.forcedPermissionMode`), so nothing is refused. Happy
+    Agent's unsupported modes are still refused before acceptance: `send`
+    throws `UnsupportedPermissionModeError`, and nothing is enqueued or
+    copied.
+- **A Happy CLI chat follows this fork (omachala/happy)**: no permission
+  UI (Model and Effort chips only; Claude's list is the fork's versioned
+  four, Opus 5.5 at high by default whatever the CLI's version), the model
+  chip turns green once the CLI reports the picked model
+  (`ModelConfirmation`), a trash that kills the session and starts a fresh
+  one in its place (`LegacySessionRespawn`), a local wipe of everything
+  before "Context was reset" (`ChatReducer.resetAt`), leaked skill bodies
+  dropped (`ChatNormalizer.isLeakedSkillBody`), the open chat's messages
+  fetched again on reconnect (`LegacySyncEngine.setViewing`), and opencode
+  as an agent of its own.
 - **Tool outputs are hidden by default** in the chat. This deliberately
   differs from happy-app: tool output is collapsed by default, tap to expand,
   and pending decisions stay open. Every tool row shows its header only
