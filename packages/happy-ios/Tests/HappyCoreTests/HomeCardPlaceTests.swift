@@ -103,6 +103,8 @@ private extension HomeListRow {
         case .project(.worktree): "worktree"
         case .project(.worktreeToggle): "toggle"
         case .project(.archived): "archived"
+        case .machines(.machine): "machine"
+        case .machines(.session): "session"
         }
     }
 }

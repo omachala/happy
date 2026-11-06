@@ -159,6 +159,9 @@ public struct SessionList: Equatable, Sendable {
     /// The list grouped by project, built only while that layout is chosen
     /// (SessionsListWrapper.tsx hands it to ProjectHomeList).
     public var projects: ProjectHomeData?
+    /// The fork's home (`LegacyMachineHome`): live sessions by computer,
+    /// in place of either layout and the archive.
+    public var machines: LegacyMachineHome?
 
     /// `unknownMachine` names the project list's section of chats that name
     /// no computer (`ProjectHomeData`).
@@ -231,6 +234,22 @@ public struct SessionList: Equatable, Sendable {
         self.hasServerAgent = snapshot.machines.machines.contains { MachineChoice.isRigMachine($0.metadata) }
         self.analyticsOptOut = settings.analyticsOptOut
         self.projects = settings.sessionListGrouping == .project ? ProjectHomeData(snapshot, clock: clock, unknownMachine: unknownMachine) : nil
+    }
+
+    /// The fork's home: only live sessions, by computer, with no archive.
+    public init(machineSections snapshot: LegacyHomeSnapshot, fallbackTitles: [String: String] = [:], words: LegacyMachineHome.Words = .init()) {
+        let settings = AccountSettings(snapshot.settings)
+        let machines = LegacyMachineHome(snapshot, fallbackTitles: fallbackTitles, words: words)
+        self.items = []
+        self.visibleCount = machines.sessionCount
+        self.hasArchived = false
+        self.avatarStyle = settings.avatarStyle
+        self.avatarMonochrome = settings.avatarMonochrome
+        self.grouping = settings.sessionListGrouping
+        self.hasServerAgent = snapshot.machines.machines.contains { MachineChoice.isRigMachine($0.metadata) }
+        self.analyticsOptOut = settings.analyticsOptOut
+        self.projects = nil
+        self.machines = machines
     }
 
     /// Newest activity first; ties in id order so the list never shuffles.

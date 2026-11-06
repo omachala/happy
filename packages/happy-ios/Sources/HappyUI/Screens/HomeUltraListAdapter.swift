@@ -267,10 +267,12 @@ final class HomeUltraListAdapter {
             }
             // As the table's long press: a flat session, or a project card
             // that can make a workspace.
-            let canHold = { if case .flat(.session)? = entry.row { return true }; if case .project(.task)? = entry.row { return true }; if case .project(.project(let project))? = entry.row { return project.origin != nil }; return false }()
+            let canHold = { if case .flat(.session)? = entry.row { return true }; if case .project(.task)? = entry.row { return true }; if case .machines(.session)? = entry.row { return true }; if case .project(.project(let project))? = entry.row { return project.origin != nil }; return false }()
             let canSelect = entry.row?.sessionId != nil || {
                 switch entry.row {
                 case .flat(.archiveToggle)?, .project(.archiveToggle)?, .project(.worktreeToggle)?: return true
+                // A computer's heading opens the computer; no computer, nothing.
+                case .machines(.machine(let header))?: return header.machineId != nil
                 default: return false
                 }
             }()
@@ -279,6 +281,7 @@ final class HomeUltraListAdapter {
             var leaves = false
             if case .flat(.session(let row))? = entry.row { leaves = row.avatar.isTask; archives = !row.archived && (!leaves || row.leaves) }
             else if case .project(.task(let row))? = entry.row { archives = row.leaves; leaves = true }
+            else if case .machines(.session)? = entry.row { archives = true }
             else { archives = false }
             var select: (@MainActor () -> Void)?
             var hold: (@MainActor () -> Void)?
@@ -341,6 +344,8 @@ extension HomeListRow.ID {
         case .project(let id): "project:\(id)"
         case .projectArchiveToggle: "project:archive"
         case .projectDay(let day): "project:day:\(day)"
+        case .machineHeader(let id): "machine:\(id)"
+        case .machineSession(let id): "machine-session:\(id)"
         }
     }
 }
@@ -375,8 +380,12 @@ final class HomeUltraOverlay: UIView {
             addSubview(dot)
         }
         if let frame = plan.addFrame {
-            let button = HeaderIconButton(.ionicons("add"), size: 18, label: Strings.Home.createWorkspaceIn(plan.accessibilityLabel))
-            button.iconView.tintColor = UIColor(Palette.textSecondary)
+            let session = plan.add == .session
+            let button = HeaderIconButton(
+                .ionicons("add"), size: session ? LegacyMachineHeaderLayout.Metrics.addIconSize : 18,
+                label: session ? Strings.LegacyHome.newSessionOn(plan.accessibilityLabel) : Strings.Home.createWorkspaceIn(plan.accessibilityLabel)
+            )
+            button.iconView.tintColor = UIColor(session ? Palette.text : Palette.textSecondary)
             button.frame = frame
             button.addAction(UIAction { [weak self] _ in self?.onCreateWorkspace?() }, for: .primaryActionTriggered)
             addSubview(button)

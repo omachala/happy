@@ -61,6 +61,10 @@ public final class LegacyHomeViewController: UIViewController, ComposeHosting {
     )
     /// The list whose foot the bottom bar shades.
     private weak var barFollows: UIScrollView?
+    /// The fork's header (`LegacyHomeHeader`): logo, status, usage, `+`.
+    private lazy var header = LegacyHomeHeader(session: session)
+    /// The usage pill's poll, while home stands.
+    private var usageMonitor: ClaudeUsageMonitor?
 
     public init(context: AppContext, session: AccountSession) {
         self.context = context
@@ -84,13 +88,16 @@ public final class LegacyHomeViewController: UIViewController, ComposeHosting {
         bottomBar.isHidden = true
         view.addSubview(bottomBar)
         minimalBackButton()
-        switcher = AccountSwitcher(context: context, controller: self)
+        installHeader()
+        var input = HomeDerivation.Input(
+            expandedProjects: context.account.localSettings.expandedProjects,
+            // In the screens' language; a new one builds home again.
+            unknownMachine: Strings.Home.unknownMachine
+        )
+        // The fork's home: live sessions by computer (`LegacyMachineHome`).
+        input.machineSections = HomeState.MachineSections(home: Strings.LegacyHome.home)
         let pipeline = ApplyPipeline<HomeDerivation.Input, HomeDerivation.Applied, HomeUpdate>(
-            input: HomeDerivation.Input(
-                expandedProjects: context.account.localSettings.expandedProjects,
-                // In the screens' language; a new one builds home again.
-                unknownMachine: Strings.Home.unknownMachine
-            ),
+            input: input,
             state: HomeDerivation.Applied(),
             derive: { [clockWake] in HomeDerivation.derive($0, applied: $1, wake: clockWake) },
             apply: { [weak self] update in
@@ -105,6 +112,12 @@ public final class LegacyHomeViewController: UIViewController, ComposeHosting {
         // FlatSessionRow's draft glyph: one draft appearing or going
         // reconfigures that row alone.
         pipeline.followDrafts(session.homeFeed, into: \.draftSessionIds)
+        // An untitled chat's first prompt, as its name (`LegacyFirstPrompts`).
+        pipeline.follow(ifChanged: LegacyFirstPrompts.snapshots(session.store)) { input, titles in
+            guard input.machineSections?.fallbackTitles != titles else { return false }
+            input.machineSections?.fallbackTitles = titles
+            return true
+        }
         self.pipeline = pipeline
         observation = pipeline.observation
         // The link as home's title says it, and as this account's chats do.
@@ -154,6 +167,33 @@ public final class LegacyHomeViewController: UIViewController, ComposeHosting {
 
     deinit {
         clockWake.cancel()
+        if let usageMonitor { Task { await usageMonitor.stop() } }
+    }
+
+    /// MainView.tsx's phone header, in the bar from the first frame.
+    private func installHeader() {
+        header.onSettings = { [weak self] in self?.openSettings() }
+        header.onNewSession = { [weak self] in
+            guard let self else { return }
+            // The draft as it was left (`router.navigate('/new')`).
+            push(.newSession(machineId: nil, path: nil, prompt: nil), context: context)
+        }
+        header.onConnectionError = { [weak self] in
+            guard let self else { return }
+            push(.connectionError, context: context)
+        }
+        header.onUsage = { [weak self] usage in
+            guard let self else { return }
+            ClaudeUsageSheetViewController.present(usage, from: self)
+        }
+        let monitor = ClaudeUsageMonitor(client: ClaudeUsageClient(api: session.api)) { [weak header] state in
+            Task { @MainActor in header?.usage = state }
+        }
+        header.onUsageRefresh = { Task { await monitor.refresh() } }
+        usageMonitor = monitor
+        Task { await monitor.start() }
+        header.install(on: navigationItem)
+        bottomBar.isHidden = true
     }
 
     @objc private func appBecameActive() {
@@ -338,8 +378,20 @@ public final class LegacyHomeViewController: UIViewController, ComposeHosting {
         view.setNeedsLayout()
     }
 
-    /// Home's own title and buttons in the bar, whatever it shows.
+    /// Home's own title and buttons in the bar, whatever it shows. The
+    /// fork's header (`installHeader`) stands in every state: no compose
+    /// toolbar, filter, settings button or bottom bar.
     private func updateNavigation(animated: Bool) {
+        guard state != nil else { return }
+        if toolbarItems != nil { toolbarItems = nil }
+        bottomBar.isHidden = true
+        if navigationController?.topViewController === self { HomeToolbar.show(for: self, animated: animated) }
+        view.setNeedsLayout()
+    }
+
+    /// Upstream's bar: the account switcher, the filter menu and settings,
+    /// compose in the toolbar. Not shown in the fork.
+    private func updateUpstreamNavigation(animated: Bool) {
         guard let state else { return }
         let floating = true
         if floating {

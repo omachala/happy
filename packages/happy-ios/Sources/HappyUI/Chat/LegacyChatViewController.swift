@@ -487,6 +487,8 @@ final class LegacyChatViewController: UIViewController, ChatListViewDelegate, Ch
         let actions = account.actions
         let chatId = self.chatId
         if !isComposing {
+            // On screen: the server's `session-event` leaves it read.
+            account.sync.viewing.show(chatId)
             Task.detached(priority: .userInitiated) { actions.markRead(sessionId: chatId) }
             // sync.ts `onSessionVisible`: a session someone has opened is no
             // longer an abandoned start, in this account.
@@ -546,6 +548,8 @@ final class LegacyChatViewController: UIViewController, ChatListViewDelegate, Ch
     override func didMove(toParent parent: UIViewController?) {
         super.didMove(toParent: parent)
         if parent == nil {
+            // SessionView's unmount: no longer the chat being viewed.
+            account.sync.viewing.hide(chatId)
             if let keyboard = ultraKeyboard {
                 keyboard.invalidate()
                 landDockRiders(on: keyboard.list)
@@ -1543,6 +1547,7 @@ final class LegacyChatViewController: UIViewController, ChatListViewDelegate, Ch
         if view.window != nil {
             // A store write: never on the main thread.
             let actions = account.actions
+            account.sync.viewing.show(real)
             Task.detached(priority: .userInitiated) { actions.markRead(sessionId: real) }
             account.spawnRequests.release(sessionId: real)
         }

@@ -52,8 +52,12 @@ final class SyncPerfPresenceTests: XCTestCase {
         await presence.activity(id: "s", active: true, activeAt: clock.now, thinking: false)
         let idle = try await syncPerfNext(home)
         XCTAssertEqual(idle?.sessions.first?.thinking, false)
-        XCTAssertEqual(idle?.sessions.first?.unread, true)
+        XCTAssertEqual(idle?.sessions.first?.unread, false, "the fork infers no unread from activity")
         XCTAssertEqual(commits.value, 2)
+        // The server's `session-event` marks it instead.
+        try store.markSessionUnread(id: "s")
+        let unread = try await syncPerfNext(home)
+        XCTAssertEqual(unread?.sessions.first?.unread, true)
         try store.markSessionRead(id: "s")
         let read = try await syncPerfNext(home)
         XCTAssertEqual(read?.sessions.first?.unread, false)
@@ -340,7 +344,7 @@ final class SyncPerfPresenceTests: XCTestCase {
         try store.upsertSessions([row])
         let clock = AdvancingPresenceClock()
         let presence = SessionPresence(store: store, now: { clock.now })
-        let expected = (0..<4).map { expectation(description: "coherent value \($0)") }
+        let expected = (0..<5).map { expectation(description: "coherent value \($0)") }
         let extra = expectation(description: "no intermediate raw-row value")
         extra.isInverted = true
         let values = PageCounter()
@@ -350,7 +354,8 @@ final class SyncPerfPresenceTests: XCTestCase {
                 values.count += 1
                 let session = home.sessions.first
                 XCTAssertEqual(session?.thinking, index == 1)
-                XCTAssertEqual(session?.unread, index == 2)
+                // The fork: unread comes from `session-event`, not idling.
+                XCTAssertEqual(session?.unread, index == 3)
                 if index < expected.count { expected[index].fulfill() } else { extra.fulfill() }
             }
         }
@@ -362,13 +367,15 @@ final class SyncPerfPresenceTests: XCTestCase {
         await fulfillment(of: [expected[1]], timeout: 5)
         await presence.activity(id: "s", active: true, activeAt: 1_000_002, thinking: false)
         await fulfillment(of: [expected[2]], timeout: 5)
-        try store.markSessionRead(id: "s")
+        try store.markSessionUnread(id: "s")
         await fulfillment(of: [expected[3]], timeout: 5)
+        try store.markSessionRead(id: "s")
+        await fulfillment(of: [expected[4]], timeout: 5)
         await fulfillment(of: [extra], timeout: 0.05)
-        XCTAssertEqual(values.count, 4)
-        XCTAssertEqual(reads.value, 4, "initial plus one SQL producer fetch per modifying commit")
-        XCTAssertEqual(commits.value, 3)
-        print("SYNC_PERF busy-idle-read: modifying_commits=3 home_fetches=4 home_values=3")
+        XCTAssertEqual(values.count, 5)
+        XCTAssertEqual(reads.value, 5, "initial plus one SQL producer fetch per modifying commit")
+        XCTAssertEqual(commits.value, 4)
+        print("SYNC_PERF busy-idle-read: modifying_commits=4 home_fetches=5 home_values=4")
         try await presence.stop()
     }
 }

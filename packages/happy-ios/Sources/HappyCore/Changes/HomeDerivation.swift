@@ -5,6 +5,9 @@ import HappyStore
 public enum HomeListRow: Equatable, Sendable {
     case flat(SessionList.Item)
     case project(ProjectHomeRow)
+    /// The fork's home (`LegacyMachineHome`): a computer's heading or one
+    /// of its sessions.
+    case machines(LegacyMachineHomeRow)
 
     /// Who the row is across updates. Day headings are counted, so the
     /// third heading stays the third heading when its title changes.
@@ -20,6 +23,9 @@ public enum HomeListRow: Equatable, Sendable {
         case project(String)
         case projectArchiveToggle
         case projectDay(Int)
+        /// A computer's heading in the fork's home; "" for no computer.
+        case machineHeader(String)
+        case machineSession(String)
     }
 
     /// The chat a tap on the row opens, if any.
@@ -28,6 +34,7 @@ public enum HomeListRow: Equatable, Sendable {
         case .flat(.session(let row)), .project(.bot(let row)), .project(.task(let row)), .project(.archived(let row)): row.id
         case .project(.project(let entry)): entry.sessionId
         case .project(.worktree(let worktree, _)): worktree.sessionId
+        case .machines(.session(let row)): row.id
         default: nil
         }
     }
@@ -37,10 +44,10 @@ public enum HomeListRow: Equatable, Sendable {
     public var isCardRow: Bool {
         switch self {
         case .flat(.session), .project(.bot), .project(.task), .project(.project), .project(.worktree),
-             .project(.worktreeToggle), .project(.archived):
+             .project(.worktreeToggle), .project(.archived), .machines(.session):
             true
         case .flat(.dayHeader), .flat(.archiveToggle), .project(.machine), .project(.section), .project(.archiveToggle),
-             .project(.archiveHeader):
+             .project(.archiveHeader), .machines(.machine):
             false
         }
     }
@@ -104,6 +111,8 @@ public struct HomeListModel: Equatable, Sendable {
     public var grouped: Bool
     /// Every computer, when all are offline, for the plaque above the rows.
     public var offline: [MachineChoice]?
+    /// The fork's home (`LegacyMachineHome`): a full swipe archives.
+    public var machineSections = false
     /// `SessionList.hasServerAgent`, for the migration card.
     public var hasServerAgent = false
     /// `SessionList.analyticsOptOut`, for the migration card's flag.
@@ -126,7 +135,15 @@ public struct HomeListModel: Equatable, Sendable {
     public init(_ list: SessionList, offline: [MachineChoice]?, expandedProjects: Set<String>, draftSessionIds: Set<String> = []) {
         var ids: [HomeListRow.ID] = []
         var rows: [HomeListRow] = []
-        if let projects = list.projects {
+        if let machines = list.machines {
+            for row in machines.rows {
+                switch row {
+                case .machine(let header): ids.append(.machineHeader(header.machineId ?? ""))
+                case .session(let session): ids.append(.machineSession(session.id))
+                }
+                rows.append(.machines(row))
+            }
+        } else if let projects = list.projects {
             for row in projects.rows(expanded: expandedProjects) {
                 switch row {
                 // The archive is one card.
@@ -166,6 +183,7 @@ public struct HomeListModel: Equatable, Sendable {
         )
         hasServerAgent = list.hasServerAgent
         analyticsOptOut = list.analyticsOptOut
+        machineSections = list.machines != nil
     }
 
     /// A bot's, a task's or an archived chat's row (ProjectHomeList.tsx
@@ -278,6 +296,9 @@ public enum HomeDerivation {
         /// Opt-in after the initial visible Home. Table and tablet consumers
         /// retain their existing derivation and update path.
         public var preparesArchives = false
+        /// The fork's home (`LegacyMachineHome`) in place of the flat or
+        /// project list; it has no archive to prepare.
+        public var machineSections: HomeState.MachineSections?
 
         public init(
             snapshot: LegacyHomeSnapshot? = nil,
@@ -315,13 +336,14 @@ public enum HomeDerivation {
     public static func derive(_ input: Input, applied: Applied) -> (output: HomeUpdate, state: Applied)? {
         guard let snapshot = input.snapshot else { return nil }
         let clock = input.clock ?? SessionList.Clock()
-        let state = HomeState(snapshot, clock: clock, unknownMachine: input.unknownMachine)
+        let state = HomeState(snapshot, clock: clock, unknownMachine: input.unknownMachine, machineSections: input.machineSections)
         let content = HomeContent(state, expandedProjects: input.expandedProjects, draftSessionIds: input.draftSessionIds)
         let dock = input.includesDock ? NewSessionSnapshot.rendered(snapshot) : nil
         let dockChanged = dock != nil && dock != applied.dock
         let grouping = AccountSettings(snapshot.settings).sessionListGrouping
-        let archiveModels = input.preparesArchives ? HomeArchiveModels.make(snapshot: snapshot, expandedProjects: input.expandedProjects, draftSessionIds: input.draftSessionIds, clock: clock, unknownMachine: input.unknownMachine, offline: content.list?.offline) : nil
-        let archiveSettings = input.preparesArchives ? HomeArchiveSettings(snapshot.settings) : nil
+        let preparesArchives = input.preparesArchives && input.machineSections == nil
+        let archiveModels = preparesArchives ? HomeArchiveModels.make(snapshot: snapshot, expandedProjects: input.expandedProjects, draftSessionIds: input.draftSessionIds, clock: clock, unknownMachine: input.unknownMachine, offline: content.list?.offline) : nil
+        let archiveSettings = preparesArchives ? HomeArchiveSettings(snapshot.settings) : nil
         guard content != applied.content || dockChanged || grouping != applied.grouping || archiveModels != applied.archiveModels || archiveSettings != applied.archiveSettings else { return nil }
         let before = applied.content?.list
         let after = content.list ?? .empty

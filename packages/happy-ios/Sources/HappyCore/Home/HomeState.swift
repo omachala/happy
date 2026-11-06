@@ -26,7 +26,9 @@ public enum HomeState: Equatable, Sendable {
     /// for the plaque above the list.
     case list(SessionList, offline: [MachineChoice]?)
 
-    public init(_ snapshot: LegacyHomeSnapshot, clock: SessionList.Clock = SessionList.Clock(), unknownMachine: String = ProjectHomeData.unknownMachineText) {
+    /// `machineSections` builds the fork's home (`LegacyMachineHome`) in
+    /// place of the flat or project list.
+    public init(_ snapshot: LegacyHomeSnapshot, clock: SessionList.Clock = SessionList.Clock(), unknownMachine: String = ProjectHomeData.unknownMachineText, machineSections: MachineSections? = nil) {
         let machines = snapshot.machines
         // Stored machines are worth showing even before the first full
         // fetch (a live `new-machine` can land first); none are not.
@@ -35,7 +37,9 @@ public enum HomeState: Equatable, Sendable {
             return
         }
         let choices = MachineChoice.collect(machines.machines)
-        let list = SessionList(snapshot, clock: clock, unknownMachine: unknownMachine)
+        let list = machineSections.map {
+            SessionList(machineSections: snapshot, fallbackTitles: $0.fallbackTitles, words: .init(unknownMachine: unknownMachine, home: $0.home))
+        } ?? SessionList(snapshot, clock: clock, unknownMachine: unknownMachine)
         let offline = !choices.isEmpty && !choices.contains(where: \.online) ? choices : nil
         if list.visibleCount > 0 {
             self = .list(list, offline: offline)
@@ -47,6 +51,19 @@ public enum HomeState: Equatable, Sendable {
             self = .list(list, offline: nil)
         } else {
             self = .noSessions
+        }
+    }
+
+    /// What the fork's home needs beside the snapshot.
+    public struct MachineSections: Equatable, Sendable {
+        /// First prompts, as titles, for chats the agent hasn't named.
+        public var fallbackTitles: [String: String]
+        /// `common.home` in the screens' language.
+        public var home: String
+
+        public init(fallbackTitles: [String: String] = [:], home: String = "Home") {
+            self.fallbackTitles = fallbackTitles
+            self.home = home
         }
     }
 

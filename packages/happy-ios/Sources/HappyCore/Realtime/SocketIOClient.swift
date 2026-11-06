@@ -32,6 +32,11 @@ public enum SocketIOError: Error, Equatable, Sendable {
 public actor SocketIOClient {
     public nonisolated let events: AsyncStream<RealtimeEvent>
     public private(set) var status: RealtimeStatus = .disconnected
+    /// What went wrong last, and when it last connected or dropped
+    /// (apiSocket.ts's error capture), for the connection error screen.
+    public nonisolated let diagnostics = SocketDiagnostics()
+    /// The watchdog closed a silent socket: the next failure is its.
+    private var pingTimedOut = false
 
     private let url: URL
     private let connector: WebSocketConnector
@@ -131,10 +136,13 @@ public actor SocketIOClient {
         while wantsConnection && !Task.isCancelled {
             setStatus(.connecting)
             var failed = false
+            var connected = false
+            pingTimedOut = false
             do {
-                try await runConnection { attempt = 0 }
+                try await runConnection { attempt = 0; connected = true }
             } catch {
                 failed = true
+                if !Task.isCancelled { record(error, afterConnecting: connected) }
             }
             connection = nil
             failPendingAcks(SocketIOError.closed)
@@ -172,6 +180,7 @@ public actor SocketIOClient {
                 guard let message = SocketIOPacket(text: payload) else { continue }
                 switch message {
                 case .connect:
+                    diagnostics.connected(at: Int64(Date().timeIntervalSince1970 * 1000))
                     setStatus(.connected)
                     onConnected()
                     continuation.yield(.connected)
@@ -198,6 +207,7 @@ public actor SocketIOClient {
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(5))
                 if ContinuousClock.now - self.lastPacketAt > limit {
+                    self.pingTimedOut = true
                     await connection.close()
                     return
                 }
@@ -206,6 +216,30 @@ public actor SocketIOClient {
     }
 
     // MARK: Helpers
+
+    /// apiSocket.ts: a failure before the handshake is a `connect_error`,
+    /// one after it a `disconnect` with its reason.
+    private func record(_ error: Error, afterConnecting connected: Bool) {
+        let at = Int64(Date().timeIntervalSince1970 * 1000)
+        let endpoint = url.absoluteString
+        let details: SocketErrorDetails
+        if connected {
+            let reason: String
+            if pingTimedOut {
+                reason = "ping timeout"
+            } else if let socket = error as? SocketIOError, socket == .closed {
+                reason = "transport close"
+            } else {
+                reason = "transport error"
+            }
+            details = SocketErrorDetails(error, kind: .disconnect, at: at, endpoint: endpoint, reason: reason)
+        } else if let socket = error as? SocketIOError, case .protocolViolation = socket {
+            details = SocketErrorDetails(error, kind: .error, at: at, endpoint: endpoint)
+        } else {
+            details = SocketErrorDetails(error, kind: .connectError, at: at, endpoint: endpoint)
+        }
+        diagnostics.failed(details, disconnected: connected)
+    }
 
     private func setStatus(_ newStatus: RealtimeStatus) {
         guard status != newStatus else { return }
