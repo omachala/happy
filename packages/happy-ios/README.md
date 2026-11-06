@@ -17,8 +17,9 @@ xcodegen && open Happy.xcodeproj   # macOS
 
 ## Production continuation
 
-The native iOS app continues the existing `com.ex3ndr.happy` App Store Connect
-listing with **2.0.0 (156)**, following the React Native app's 1.8.0 (154).
+The native iOS app continues the omachala fork's `com.omachala.happy` App Store
+Connect listing ("Happy Localhost", team 924FH7MYCN) with **2.0.0 (39)**,
+following the fork's React Native app's 1.7.0 (38).
 Development and preview keep their separate bundle identities and share the
 same version. The version is set once in `project.yml` (see
 [Versioning](AGENTS.md#versioning)); production's build number is set in
