@@ -216,10 +216,10 @@ final class AgentsPageTests: XCTestCase {
         XCTAssertEqual(fields.map(\.field), [.permissionMode, .modelMode, .effortLevel])
         XCTAssertEqual(fields.map(\.title), ["Permission", "Model", "Effort"])
         XCTAssertEqual(fields.map(\.icon), ["shield-checkmark-outline", "hardware-chip-outline", "speedometer-outline"])
-        XCTAssertEqual(fields.map(\.detail), ["Default (Auto)", "Default (Opus 5.5)", "Default (Medium)"])
-        XCTAssertEqual(fields.map(\.codeDefaultName), ["Auto", "Opus 5.5", "Medium"])
+        XCTAssertEqual(fields.map(\.detail), ["Default (Yolo)", "Default (opus 5.5)", "Default (High)"])
+        XCTAssertEqual(fields.map(\.codeDefaultName), ["Yolo", "opus 5.5", "High"])
         XCTAssertEqual(fields.map(\.hasOverride), [false, false, false])
-        XCTAssertEqual(fields[1].options.count, 6)
+        XCTAssertEqual(fields[1].options.count, 4)
         XCTAssertFalse(fields[1].offersCustomModel)
     }
 
@@ -249,16 +249,16 @@ final class AgentsPageTests: XCTestCase {
         XCTAssertEqual(AgentsPage.fields(.agy, overrides: [:], cliVersion: nil)[2].options.count, 3)
     }
 
-    func testUnknownCLIDescribesTheOlderDefaults() {
+    func testAnUnknownCLIStillDefaultsToOpus55() {
         let model = AgentsPage.fields(.claude, overrides: [:], cliVersion: nil)[1]
-        XCTAssertEqual(model.detail, "Default (Opus 5)")
+        XCTAssertEqual(model.detail, "Default (opus 5.5)")
     }
 }
 
 /// Settings › Agents worked out off the main thread: the groups a change
 /// rebuilds, and the ones it leaves on screen.
 final class AgentsPageDerivationTests: XCTestCase {
-    private let allGroups: Set<AgentsPage.Group> = [.machines, .defaults, .agent(.claude), .agent(.codex), .agent(.agy)]
+    private let allGroups: Set<AgentsPage.Group> = [.machines, .defaults, .agent(.claude), .agent(.codex), .agent(.agy), .agent(.opencode)]
 
     override func setUp() async throws {
         // Catalogs are decoded off the main thread; these tests derive on it.
@@ -296,7 +296,7 @@ final class AgentsPageDerivationTests: XCTestCase {
         let first = AgentsPage.derive(input, applied: nil)
         XCTAssertEqual(first?.output.rebuilt, allGroups)
         XCTAssertEqual(first?.state.machines, [])
-        XCTAssertEqual(first?.state.groups, [.machines, .defaults, .agent(.claude), .agent(.codex), .agent(.agy)])
+        XCTAssertEqual(first?.state.groups, [.machines, .defaults, .agent(.claude), .agent(.codex), .agent(.agy), .agent(.opencode)])
     }
 
     func testTheContentIsThePageFunctions() throws {
@@ -312,7 +312,7 @@ final class AgentsPageDerivationTests: XCTestCase {
         XCTAssertTrue(content.hasOverrides)
         XCTAssertEqual(content.agents.map(\.agent), AgentDefaults.Agent.configurable)
         XCTAssertEqual(content.agents[0].fields, AgentsPage.fields(.claude, overrides: overrides, cliVersion: "1.3.0"))
-        XCTAssertEqual(content.agents.map(\.open), [nil, .modelMode, nil])
+        XCTAssertEqual(content.agents.map(\.open), [nil, .modelMode, nil, nil])
     }
 
     /// A heartbeat moves `activeAt` and nothing the page draws: the main
@@ -389,18 +389,16 @@ final class AgentsPageDerivationTests: XCTestCase {
         XCTAssertNil(gone.output.machineRows)
     }
 
-    /// The code defaults follow the first computer's CLI; the computers'
-    /// own rows don't show it.
-    func testANewCLIRebuildsTheAgentsItChangesAndNotTheComputers() throws {
+    /// The fork's code defaults don't follow the computer's CLI (its CLI
+    /// runs Opus 5.5 but reports 1.2.0): a new one rebuilds nothing.
+    func testANewCLIRebuildsNoAgent() throws {
         let old = [machine("m1", active: true, activeAt: 5, ["host": .string("box")])]
         let before = try shown(input(old))
+        XCTAssertEqual(before.agents[0].fields[1].detail, "Default (opus 5.5)")
         let new = [machine("m1", active: true, activeAt: 5, ["host": .string("box"), "happyCliVersion": .string("1.3.0")])]
-        let update = try XCTUnwrap(AgentsPage.derive(input(new), applied: before))
-        XCTAssertFalse(update.output.rebuilt.contains(.machines))
-        XCTAssertNil(update.output.machineRows)
-        XCTAssertFalse(update.output.rebuilt.contains(.defaults))
-        XCTAssertTrue(update.output.rebuilt.contains(.agent(.claude)))
-        XCTAssertEqual(update.state.agents[0].fields[1].detail, "Default (Opus 5.5)")
+        let update = AgentsPage.derive(input(new), applied: before)
+        XCTAssertFalse(update?.output.rebuilt.contains(.machines) ?? false)
+        XCTAssertFalse(update?.output.rebuilt.contains(.agent(.claude)) ?? false)
     }
 
     func testOpeningAFieldRebuildsItsAgentAndTheOneItClosed() throws {
@@ -532,7 +530,7 @@ final class AgentsPageDerivationTests: XCTestCase {
         }
         XCTAssertEqual(pipeline.counts.applies, 1)
         XCTAssertEqual(recorder.outputs.count, 1)
-        XCTAssertEqual(recorder.outputs.first?.rebuilt.count, 5)
+        XCTAssertEqual(recorder.outputs.first?.rebuilt.count, 6)
         XCTAssertEqual(pipeline.applied?.machines.count, 1000)
         pipeline.cancel()
     }

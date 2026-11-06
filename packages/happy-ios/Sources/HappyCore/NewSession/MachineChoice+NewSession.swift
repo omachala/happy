@@ -4,8 +4,9 @@ import HappyWire
 
 extension MachineChoice {
     /// Ports harnessCatalog.HARNESS_ORDER; retired Gemini/OpenClaw are omitted.
+    /// The fork's opencode comes after agy.
     public static var agentOrder: [String] {
-        ["claude", "codex", "agy", "rig"]
+        ["claude", "codex", "agy", "opencode", "rig"]
     }
 
     /// Ports machineChoices.findMachineChoice, including a stored sibling id.
@@ -20,6 +21,9 @@ extension MachineChoice {
         guard let happyMachine else { return false }
         let availability = happyMachine.metadata?["cliAvailability"]
         if agent == "agy" { return availability?["agy"]?.boolValue == true }
+        // The fork's daemon doesn't probe opencode: only an explicit false
+        // hides it.
+        if agent == "opencode" { return availability?["opencode"]?.boolValue != false }
         return availability == nil || availability == .null || availability?[agent]?.boolValue == true
     }
 

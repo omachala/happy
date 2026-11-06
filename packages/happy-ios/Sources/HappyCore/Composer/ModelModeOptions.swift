@@ -164,7 +164,10 @@ public enum ModelModeOptions {
 
     /// `includeConfiguredModel`: a saved model the list no longer offers
     /// stays as its own row, so the picker shows it rather than the head of
-    /// the list. Claude, Codex and agy only.
+    /// the list. Claude, Codex and agy only. A Claude pick the list left
+    /// (`claude-opus-5`) heads it, named for its version ("opus 5"), as the
+    /// fork's pinned legacy pick: the chip never falls back to the default
+    /// and shows a model the agent isn't running.
     public static func includeConfiguredModel(flavor: String?, models: [ModeOption], configured: String?) -> [ModeOption] {
         let isClaude = flavor != "rig" && AgentDefaults.Agent(flavor: flavor) == .claude
         guard
@@ -173,9 +176,12 @@ public enum ModelModeOptions {
             !key.isEmpty, key != "default",
             !models.contains(where: { $0.key == key })
         else { return models }
+        if isClaude {
+            return [ModeOption(key: key, name: AgentDefaults.humanizeClaudeModelKey(key))] + models
+        }
         return models + [ModeOption(
             key: key,
-            name: (isClaude ? unlistedClaudeModelNames[key] : nil) ?? key,
+            name: key,
             description: flavor == "codex" ? "custom model" : "saved model"
         )]
     }
@@ -262,6 +268,15 @@ public enum ModelModeOptions {
         }
         let metadataModels = mapMetadataOptions(metadata?["models"])
         if !metadataModels.isEmpty {
+            if flavor == "opencode" {
+                // `cara/qwen3.8-27b` is long enough to push Stop and the
+                // trash off the row.
+                return metadataModels.map { model in
+                    var model = model
+                    model.name = AgentDefaults.OpenCode.shortName(key: model.key, name: model.name)
+                    return model
+                }
+            }
             if flavor == "codex", !metadataModels.contains(where: { $0.key == "default" }) {
                 return [ModeOption(key: "default", name: "default model")] + metadataModels
             }
@@ -402,6 +417,14 @@ public enum ModelModeOptions {
         return defaultEffortKey(flavor: flavor) ?? last.key
     }
 
+    /// The picker key of the model the fork's CLI says the agent runs
+    /// (`metadata.currentAgentModel`, a raw Anthropic id), version-exact;
+    /// nil for Happy Agent and for anything the list doesn't name.
+    public static func observedModelKey(metadata: JSONValue?) -> String? {
+        guard !RigCatalog.isRig(metadata) else { return nil }
+        return AgentDefaults.claudeModelKey(fromModelId: metadata?["currentAgentModel"]?.stringValue)
+    }
+
     /// `getRigCurrentModelOptionKey`.
     public static func rigCurrentModelOptionKey(metadata: JSONValue?) -> String? {
         RigCatalog.selectedModelKey(metadata)
@@ -454,9 +477,6 @@ public enum ModelModeOptions {
     /// The mode keys a CLI version gates (`PERMISSION_MODE_SINCE_CLI_VERSION`).
     static let permissionModeSinceCliVersion = ["auto": AgentDefaults.cliVersionWithAuto]
 
-    /// Names for Claude models that left the list but can still be saved.
-    static let unlistedClaudeModelNames = ["claude-sonnet-5": "Sonnet 5"]
-
     /// The hardcoded catalogs fall back to Claude's for any other flavor.
     static func hardcodedAgent(_ flavor: String?) -> AgentDefaults.Agent {
         switch flavor {
@@ -464,6 +484,7 @@ public enum ModelModeOptions {
         case "gemini": .gemini
         case "openclaw": .openclaw
         case "agy": .agy
+        case "opencode": .opencode
         default: .claude
         }
     }
@@ -480,7 +501,7 @@ public enum ModelModeOptions {
             } else {
                 ("openai", "OpenAI")
             }
-        case .gemini, .openclaw: nil
+        case .gemini, .openclaw, .opencode: nil
         }
     }
 

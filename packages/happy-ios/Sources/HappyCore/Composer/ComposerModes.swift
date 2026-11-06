@@ -88,10 +88,18 @@ public struct ComposerModes: Equatable, Sendable {
                 ]
                 : [defaults.permissionMode, metadata?["currentOperatingModeCode"]?.stringValue])
         )
-        let modelMode = Options.resolveCurrentOption(availableModels, preferredKeys: [
+        // The fork's order (SessionView.tsx): the session's pick, the model
+        // the CLI says it runs (`currentAgentModel`, so a `/model` typed in
+        // the terminal shows when nothing was picked here), the default,
+        // then `currentModelCode`.
+        let modelMode = Options.resolveCurrentOption(availableModels, preferredKeys: isRig ? [
             sessionModelMode,
-            isRig ? Options.rigCurrentModelOptionKey(metadata: metadata) : defaults.modelMode,
-            isRig ? nil : metadata?["currentModelCode"]?.stringValue,
+            Options.rigCurrentModelOptionKey(metadata: metadata),
+        ] : [
+            sessionModelMode,
+            Options.observedModelKey(metadata: metadata),
+            defaults.modelMode,
+            metadata?["currentModelCode"]?.stringValue,
         ])
 
         let modelKey = modelMode?.key ?? "default"

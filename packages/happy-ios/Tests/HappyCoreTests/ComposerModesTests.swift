@@ -147,7 +147,7 @@ final class ModelModeOptionsTests: XCTestCase {
 
     func testAgyLeadsWithDefault() {
         XCTAssertEqual(keys(Options.hardcodedPermissionModes(flavor: "agy")), ["default", "bypassPermissions"])
-        XCTAssertEqual(Options.defaultPermissionModeKey(flavor: "agy"), "default")
+        XCTAssertEqual(Options.defaultPermissionModeKey(flavor: "agy"), "bypassPermissions", "the fork's never-ask default")
     }
 
     func testGeminiOffersOnlyModesRunGeminiHonours() {
@@ -179,24 +179,25 @@ final class ModelModeOptionsTests: XCTestCase {
         XCTAssertEqual(Options.includeConfiguredModel(flavor: "openclaw", models: models, configured: "my-workspace-model"), models)
     }
 
-    func testOnlyCurrentGenerationClaudeModels() {
+    func testTheForksClaudeModelsExactly() {
         let models = Options.hardcodedModelModes(flavor: "claude")
-        XCTAssertEqual(keys(models), [
-            "claude-fable-5-1", "claude-fable-5", "claude-opus-5-5", "claude-opus-5", "claude-sonnet-5-5", "claude-haiku-5-5",
-        ])
-        XCTAssertEqual(models.map(\.name), ["Fable 5.1", "Fable 5", "Opus 5.5", "Opus 5", "Sonnet 5.5", "Haiku 5.5"])
+        XCTAssertEqual(keys(models), ["claude-fable-5-1", "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-4-5"])
+        XCTAssertEqual(models.map(\.name), ["fable 5.1", "opus 5.5", "sonnet 5.5", "haiku 4.5"])
+        XCTAssertEqual(models.map(\.description), ["latest & most capable", nil, nil, nil])
         XCTAssertFalse(models.contains { $0.key == "default" })
         XCTAssertFalse(models.contains { ["opus", "sonnet", "fable", "haiku"].contains($0.key) })
         XCTAssertFalse(models.contains { $0.key.hasSuffix("[1m]") })
-        XCTAssertEqual(models[0].description, "1M context")
         XCTAssertEqual(models[0].providerId, "anthropic")
     }
 
-    func testASavedClaudeModelThatLeftTheListKeepsItsRow() {
+    func testASavedClaudeModelThatLeftTheListHeadsItNamedForItsVersion() {
         let models = Options.hardcodedModelModes(flavor: "claude")
         let withSaved = Options.includeConfiguredModel(flavor: "claude", models: models, configured: "claude-sonnet-5")
         XCTAssertEqual(withSaved.count, models.count + 1)
-        XCTAssertEqual(withSaved.last, ModeOption(key: "claude-sonnet-5", name: "Sonnet 5", description: "saved model"))
+        XCTAssertEqual(withSaved.first, ModeOption(key: "claude-sonnet-5", name: "sonnet 5"))
+        let opus5 = Options.includeConfiguredModel(flavor: "claude", models: models, configured: "claude-opus-5")
+        XCTAssertEqual(opus5.first, ModeOption(key: "claude-opus-5", name: "opus 5"))
+        XCTAssertEqual(Array(opus5.dropFirst()), models)
         XCTAssertTrue(keys(Options.availableModels(flavor: "claude", metadata: nil, selectedKey: "claude-sonnet-5")).contains("claude-sonnet-5"))
         // A flavorless session is a Claude session.
         XCTAssertEqual(Options.includeConfiguredModel(flavor: nil, models: models, configured: "claude-sonnet-5"), withSaved)
@@ -207,7 +208,6 @@ final class ModelModeOptionsTests: XCTestCase {
     func testARetiredClaudeKeyResolvesOntoItsRow() {
         for (saved, row) in [
             ("claude-opus-5-5[1m]", "claude-opus-5-5"),
-            ("claude-opus-5[1m]", "claude-opus-5"),
             ("claude-sonnet-5-5[1m]", "claude-sonnet-5-5"),
         ] {
             let models = Options.availableModels(flavor: "claude", metadata: nil, selectedKey: saved)
@@ -216,6 +216,9 @@ final class ModelModeOptionsTests: XCTestCase {
             XCTAssertTrue(keys(models).contains(row))
             XCTAssertEqual(AgentDefaults.retireModelMode(saved, flavor: "claude"), row)
         }
+        // A retired key whose row left the list too heads it.
+        XCTAssertEqual(keys(Options.availableModels(flavor: "claude", metadata: nil, selectedKey: "claude-opus-5[1m]")).first, "claude-opus-5")
+        XCTAssertEqual(AgentDefaults.retireModelMode("claude-opus-5[1m]", flavor: "claude"), "claude-opus-5")
         XCTAssertEqual(AgentDefaults.retireModelMode("claude-opus-5[1m]", flavor: "rig"), "claude-opus-5[1m]")
         XCTAssertEqual(AgentDefaults.retireModelMode("claude-opus-5[1m]", flavor: "codex"), "claude-opus-5[1m]")
         XCTAssertEqual(AgentDefaults.retireModelMode("claude-opus-5[1m]", flavor: nil), "claude-opus-5")
@@ -238,7 +241,7 @@ final class ModelModeOptionsTests: XCTestCase {
     }
 
     func testClaudeGetsTheSDKScaleForEveryModel() {
-        for model in ["claude-fable-5-1", "claude-fable-5", "claude-opus-5-5", "claude-opus-5", "claude-sonnet-5-5", "claude-haiku-5-5"] {
+        for model in ["claude-fable-5-1", "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-4-5", "claude-opus-5"] {
             let levels = Options.effortLevelsForModel(flavor: "claude", modelKey: model)
             XCTAssertEqual(keys(levels), ["low", "medium", "high", "xhigh", "max"])
             XCTAssertEqual(levels.map(\.name), ["Low", "Medium", "High", "xHigh", "Max"])
@@ -248,14 +251,16 @@ final class ModelModeOptionsTests: XCTestCase {
     }
 
     func testCodeDefaults() {
-        XCTAssertEqual(Options.defaultPermissionModeKey(flavor: "claude"), "auto")
-        XCTAssertEqual(Options.defaultModelKey(flavor: "claude"), "claude-opus-5")
+        // The fork: never-ask modes, Opus 5.5 at high whatever the CLI says.
+        XCTAssertEqual(Options.defaultPermissionModeKey(flavor: "claude"), "bypassPermissions")
+        XCTAssertEqual(Options.defaultModelKey(flavor: "claude"), "claude-opus-5-5")
+        XCTAssertEqual(Options.defaultModelKey(flavor: "claude", cliVersion: "1.2.0"), "claude-opus-5-5")
         XCTAssertEqual(Options.defaultModelKey(flavor: "claude", cliVersion: "1.2.6-beta.0"), "claude-opus-5-5")
-        XCTAssertEqual(Options.defaultEffortKey(flavor: "claude"), "medium")
-        XCTAssertEqual(Options.defaultPermissionModeKey(flavor: "codex"), "auto")
+        XCTAssertEqual(Options.defaultEffortKey(flavor: "claude"), "high")
+        XCTAssertEqual(Options.defaultPermissionModeKey(flavor: "codex"), "yolo")
         XCTAssertEqual(Options.defaultModelKey(flavor: "codex"), "gpt-6.1-sol")
         XCTAssertEqual(Options.defaultEffortKey(flavor: "codex"), "medium")
-        XCTAssertEqual(Options.defaultPermissionModeKey(flavor: "agy"), "default")
+        XCTAssertEqual(Options.defaultPermissionModeKey(flavor: "agy"), "bypassPermissions")
         XCTAssertEqual(Options.defaultModelKey(flavor: "agy"), "Gemini 3.8 Flash")
         XCTAssertEqual(Options.defaultEffortKey(flavor: "agy"), "medium")
         XCTAssertEqual(Options.defaultEffortKeyForModel(flavor: "gemini", modelKey: "gemini-2.5-pro"), nil)
@@ -669,22 +674,22 @@ final class ComposerModesTests: XCTestCase {
 
     func testAFreshClaudeSessionShowsTheAgentDefaults() {
         let modes = ComposerModes(metadata: claudeSession, picks: ComposerPicks(), agentDefaultOverrides: [:])
-        XCTAssertEqual(modes.permissionMode?.key, "auto")
+        XCTAssertEqual(modes.permissionMode?.key, "bypassPermissions")
         XCTAssertEqual(modes.modelMode?.key, "claude-opus-5-5")
-        XCTAssertEqual(modes.effortLevel?.key, "medium")
+        XCTAssertEqual(modes.effortLevel?.key, "high")
         XCTAssertEqual(modes.availableModes.count, 5)
-        XCTAssertEqual(modes.availableModels.count, 6)
+        XCTAssertEqual(modes.availableModels.count, 4)
         XCTAssertEqual(modes.availableEffortLevels.map(\.key), ["low", "medium", "high", "xhigh", "max"])
     }
 
     func testTheSessionsPicksWin() {
         let modes = ComposerModes(
             metadata: claudeSession,
-            picks: ComposerPicks(values: json(#"{ "permissionMode": "plan", "modelMode": "claude-fable-5", "effortLevel": "max" }"#)),
+            picks: ComposerPicks(values: json(#"{ "permissionMode": "plan", "modelMode": "claude-fable-5-1", "effortLevel": "max" }"#)),
             agentDefaultOverrides: [:]
         )
         XCTAssertEqual(modes.permissionMode?.key, "plan")
-        XCTAssertEqual(modes.modelMode?.key, "claude-fable-5")
+        XCTAssertEqual(modes.modelMode?.key, "claude-fable-5-1")
         XCTAssertEqual(modes.effortLevel?.key, "max")
     }
 
@@ -705,10 +710,10 @@ final class ComposerModesTests: XCTestCase {
         XCTAssertEqual(modes.modelMode?.key, "claude-opus-5-5")
     }
 
-    func testAnOldCLIFallsBackPastAuto() {
+    func testTheForksOldCLIStillGetsOpus55() {
         let modes = ComposerModes(metadata: json(#"{ "flavor": "claude", "version": "1.2.0" }"#), picks: ComposerPicks(), agentDefaultOverrides: [:])
-        XCTAssertEqual(modes.permissionMode?.key, "default")
-        XCTAssertEqual(modes.modelMode?.key, "claude-opus-5")
+        XCTAssertEqual(modes.permissionMode?.key, "bypassPermissions")
+        XCTAssertEqual(modes.modelMode?.key, "claude-opus-5-5")
         XCTAssertFalse(modes.availableModes.contains { $0.key == "auto" })
     }
 
@@ -718,7 +723,7 @@ final class ComposerModesTests: XCTestCase {
             picks: ComposerPicks(permissionMode: "acceptEdits", effortLevel: "ultra"),
             agentDefaultOverrides: [:]
         )
-        XCTAssertEqual(modes.permissionMode?.key, "auto")
+        XCTAssertEqual(modes.permissionMode?.key, "yolo")
         XCTAssertEqual(modes.modelMode?.key, "gpt-6.1-sol")
         XCTAssertEqual(modes.effortLevel?.key, "ultra")
         let luna = ComposerModes(
@@ -749,8 +754,8 @@ final class ComposerModesTests: XCTestCase {
 
     func testNoSessionYetFallsBackToClaudeDefaults() {
         let modes = ComposerModes(metadata: nil, picks: ComposerPicks(), agentDefaultOverrides: [:])
-        XCTAssertEqual(modes.permissionMode?.key, "auto")
-        XCTAssertEqual(modes.modelMode?.key, "claude-opus-5")
+        XCTAssertEqual(modes.permissionMode?.key, "bypassPermissions")
+        XCTAssertEqual(modes.modelMode?.key, "claude-opus-5-5")
         XCTAssertEqual(modes.availableEffortLevels, [])
         XCTAssertNil(modes.effortLevel)
     }
@@ -762,9 +767,9 @@ final class ComposerModesTests: XCTestCase {
             agentDefaultOverrides: ["claude": json(#"{ "permissionMode": "auto" }"#)],
             cliVersion: "1.2.0"
         )
-        XCTAssertEqual(modes.permissionMode?.key, "default")
-        XCTAssertEqual(modes.modelMode?.key, "claude-opus-5")
-        XCTAssertEqual(modes.effortLevel?.key, "medium")
+        XCTAssertEqual(modes.permissionMode?.key, "bypassPermissions")
+        XCTAssertEqual(modes.modelMode?.key, "claude-opus-5-5")
+        XCTAssertEqual(modes.effortLevel?.key, "high")
         XCTAssertEqual(modes.availableModes.map(\.key), ["acceptEdits", "plan", "bypassPermissions", "default"])
     }
 
@@ -779,7 +784,7 @@ final class ComposerModesTests: XCTestCase {
         XCTAssertEqual(modes.availableModels.last?.description, "custom model")
         XCTAssertEqual(modes.availableEffortLevels.map(\.key), ["low", "medium", "high", "xhigh"])
         XCTAssertEqual(modes.effortLevel?.key, "high")
-        XCTAssertEqual(modes.permissionMode?.key, "auto")
+        XCTAssertEqual(modes.permissionMode?.key, "yolo")
     }
 
     func testPickingAModelClearsAnEffortItDoesNotOffer() {

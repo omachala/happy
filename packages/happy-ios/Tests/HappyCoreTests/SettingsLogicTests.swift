@@ -6,15 +6,19 @@ import HappyWire
 /// Cases from happy-app's sync/agentDefaults.test.ts and
 /// utils/versionUtils.test.ts.
 final class AgentDefaultsTests: XCTestCase {
-    func testCodeDefaultsFollowTheCLIVersion() {
-        XCTAssertEqual(AgentDefaults.codeDefaults(.claude, cliVersion: "1.2.6").modelMode, "claude-opus-5-5")
-        XCTAssertEqual(AgentDefaults.codeDefaults(.claude, cliVersion: "1.2.6-beta.0").modelMode, "claude-opus-5-5")
-        XCTAssertEqual(AgentDefaults.codeDefaults(.claude, cliVersion: "1.2.5").modelMode, "claude-opus-5")
-        XCTAssertEqual(AgentDefaults.codeDefaults(.claude, cliVersion: nil).modelMode, "claude-opus-5", "unknown CLI keeps the old Opus")
-        XCTAssertEqual(AgentDefaults.codeDefaults(.claude, cliVersion: nil).permissionMode, "auto", "unknown CLI keeps auto")
-        XCTAssertEqual(AgentDefaults.codeDefaults(.codex, cliVersion: "1.2.0").permissionMode, "default")
-        XCTAssertEqual(AgentDefaults.codeDefaults(.codex, cliVersion: "garbage").permissionMode, "default")
-        XCTAssertEqual(AgentDefaults.codeDefaults(.codex, cliVersion: "1.2.1-beta.2").permissionMode, "auto")
+    func testCodeDefaultsAreTheForksWhateverTheCLIVersion() {
+        // The fork's CLI runs Opus 5.5 but reports 1.2.0: no version gate.
+        for version in ["1.2.6", "1.2.6-beta.0", "1.2.5", "1.2.0", "garbage", nil] as [String?] {
+            let claude = AgentDefaults.codeDefaults(.claude, cliVersion: version)
+            XCTAssertEqual(claude.modelMode, "claude-opus-5-5", version ?? "nil")
+            XCTAssertEqual(claude.permissionMode, "bypassPermissions", version ?? "nil")
+            XCTAssertEqual(claude.effortLevel, "high", version ?? "nil")
+            let codex = AgentDefaults.codeDefaults(.codex, cliVersion: version)
+            XCTAssertEqual(codex.permissionMode, "yolo", version ?? "nil")
+            XCTAssertEqual(codex.effortLevel, "medium", version ?? "nil")
+        }
+        let opencode = AgentDefaults.codeDefaults(.opencode, cliVersion: "1.2.0")
+        XCTAssertEqual(opencode, AgentDefaults.Config(permissionMode: "bypassPermissions", modelMode: "cara/qwen3.8-27b", effortLevel: nil))
     }
 
     func testOverridesWinAndRetiredKeysMapForward() {
@@ -24,7 +28,7 @@ final class AgentDefaultsTests: XCTestCase {
         let config = AgentDefaults.resolve(overrides, .claude, cliVersion: "1.3.0")
         XCTAssertEqual(config.permissionMode, "acceptEdits")
         XCTAssertEqual(config.modelMode, "claude-opus-5-5")
-        XCTAssertEqual(config.effortLevel, "medium")
+        XCTAssertEqual(config.effortLevel, "high")
     }
 
     func testSettingAndClearingAnOverride() {
@@ -41,8 +45,8 @@ final class AgentDefaultsTests: XCTestCase {
         let codex = AgentDefaults.modelModes(.codex, configured: "my-model")
         XCTAssertEqual(codex.last, AgentDefaults.Option("my-model", "my-model", "custom model"))
         let claude = AgentDefaults.modelModes(.claude, configured: "claude-sonnet-5")
-        XCTAssertEqual(claude.last?.name, "Sonnet 5")
-        XCTAssertEqual(AgentDefaults.modelModes(.claude, configured: "claude-opus-5-5[1m]").count, 6, "maps onto an existing row")
+        XCTAssertEqual(claude.last?.name, "sonnet 5")
+        XCTAssertEqual(AgentDefaults.modelModes(.claude, configured: "claude-opus-5-5[1m]").count, 4, "maps onto an existing row")
     }
 
     func testEffortLevelsPerModel() {
@@ -60,7 +64,7 @@ final class AgentDefaultsTests: XCTestCase {
     }
 
     func testRetiredAgentsAreNotConfigurable() {
-        XCTAssertEqual(AgentDefaults.Agent.configurable, [.claude, .codex, .agy])
+        XCTAssertEqual(AgentDefaults.Agent.configurable, [.claude, .codex, .agy, .opencode])
     }
 }
 

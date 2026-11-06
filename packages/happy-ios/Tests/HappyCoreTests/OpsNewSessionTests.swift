@@ -37,7 +37,7 @@ final class OpsNewSessionTests: XCTestCase {
         let config = NewSessionDefaults.resolve(agent: .claude, settings: settings, cliVersion: "1.2.0")
         XCTAssertEqual(config.permissionMode, "acceptEdits")
         XCTAssertEqual(config.effortLevel, "high")
-        XCTAssertEqual(config.modelMode, "claude-opus-5")
+        XCTAssertEqual(config.modelMode, "claude-opus-5-5", "the fork's CLI reports 1.2.0 and runs Opus 5.5")
         let preserved: JSONValue = .array([.object(["machineId": .string("m"), "path": .string("/old")])])
         XCTAssertEqual(AccountSettings(["recentMachinePaths": preserved]).syncPayload["recentMachinePaths"], preserved)
     }
@@ -145,7 +145,8 @@ final class OpsNewSessionTests: XCTestCase {
         try store.upsertMachine(machine("rig", .object(["host": .string("host"), "machineKind": .string("rig"), "siblingMachineId": .string("cli")])) )
         let choices = MachineChoice.collect(try store.machines())
         let choice = try XCTUnwrap(MachineChoice.find(in: choices, machineId: "rig"))
-        XCTAssertEqual(choice.availableAgents, ["codex", "rig"])
+        // opencode isn't probed by the fork's daemon: shown unless false.
+        XCTAssertEqual(choice.availableAgents, ["codex", "opencode", "rig"])
         XCTAssertEqual(choice.resolveNewSessionAgent(stored: "claude", picked: nil), "rig")
         XCTAssertEqual(choice.resolveNewSessionAgent(stored: "claude", picked: "codex"), "codex")
         XCTAssertEqual(choice.resolveAgent("gemini"), "codex")
