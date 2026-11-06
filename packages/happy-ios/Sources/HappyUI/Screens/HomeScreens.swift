@@ -174,9 +174,8 @@ public final class LegacyHomeViewController: UIViewController, ComposeHosting {
     private func installHeader() {
         header.onSettings = { [weak self] in self?.openSettings() }
         header.onNewSession = { [weak self] in
-            guard let self else { return }
             // The draft as it was left (`router.navigate('/new')`).
-            push(.newSession(machineId: nil, path: nil, prompt: nil), context: context)
+            self?.startSession(machineId: nil, path: nil)
         }
         header.onConnectionError = { [weak self] in
             guard let self else { return }
@@ -339,8 +338,28 @@ public final class LegacyHomeViewController: UIViewController, ComposeHosting {
         }
     }
 
+    /// The fork's `+`s (the header's, a computer's): an empty chat, the
+    /// way this app starts a Happy CLI session (`compose`), on the draft,
+    /// moved to `machineId` and `path` when given. The new-session screen
+    /// only where home can't compose.
+    func startSession(machineId: String?, path: String?) {
+        let drafts = NewSessionDraftStore.shared(for: context.account.localSettings)
+        if let machineId {
+            drafts.setMachineId(machineId)
+            if let path { drafts.setPath(path) }
+        }
+        let composes = canCompose && navigationController?.topViewController === self
+            && navigationController?.transitionCoordinator == nil
+        if composes {
+            compose()
+        } else {
+            push(.newSession(machineId: nil, path: nil, prompt: nil), context: context)
+        }
+    }
+
     private func makeList(_ model: HomeListModel, changeset: RowChangeset) -> SessionListViewController {
         let controller = SessionListViewController(context: context, session: session)
+        controller.onStartSession = { [weak self] machineId, path in self?.startSession(machineId: machineId, path: path) }
         controller.selectedSessionId = shownSessionId
         // ProjectRow's `+` (ProjectHomeList.tsx `createWorkspace`): the
         // draft moves to the project, asking for a new workspace, and an

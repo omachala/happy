@@ -35,6 +35,9 @@ final class SessionListViewController: UIViewController {
     /// A project's worktrees were shown or hidden (`expandedProjects`
     /// changed): the owner derives the rows again.
     var onExpandedProjectsChange: (() -> Void)?
+    /// A computer's `+` in the fork's home: a new session there, in the
+    /// given folder (`LegacyHomeViewController.startSession`).
+    var onStartSession: ((_ machineId: String?, _ path: String?) -> Void)?
     private let rendered = HomeUltraListView()
     private lazy var ultraList = HomeUltraListAdapter(view: rendered, pictures: session.avatarPictures)
     private var archiveModels: HomeArchiveModels?
@@ -122,7 +125,11 @@ final class SessionListViewController: UIViewController {
             // new/index.tsx fills a cleared path), else home; no computer,
             // the draft as it was.
             case .machines(.machine(let header))?:
-                self.push(.newSession(machineId: header.machineId, path: header.firstPath, prompt: nil), context: self.context)
+                if let start = self.onStartSession {
+                    start(header.machineId, header.firstPath)
+                } else {
+                    self.push(.newSession(machineId: header.machineId, path: header.firstPath, prompt: nil), context: self.context)
+                }
             default: break
             }
         }
