@@ -10,6 +10,11 @@ import CoreGraphics
 ///     │ 18 [photos 64, 8 apart, 8 below] 18                    │ 18 top
 ///     │    8 text (30…120 with its 4 + 4, then scrolls)  8     │ input 44+
 ///     │    [+42] 2 [ permission ··· model · effort ] 2 8 [42]  │ row 42
+///
+/// A Happy CLI chat's trash (`showsTrash`, the fork's kill-and-respawn)
+/// stands after add, add's size, before the chips:
+///
+///     │    [+42] 2 [trash 42] 2 [ ··· model · effort ] 2 8 [42]  │
 ///     └────────────────────────────────────────────────────────┘ 8 bottom
 ///
 /// The photos start where the text does, and are as far down from the
@@ -56,6 +61,9 @@ public struct AgentInputCardLayout: Equatable, Sendable {
         /// the lines the card shows (Telegram's expand). The button is
         /// send's size, in send's column.
         public static let expandIconSize: CGFloat = 18
+        /// The trash's glyph (the fork's 16pt Octicons trash, here
+        /// Ionicons' outline at the row's other glyphs' 18).
+        public static let trashIconSize: CGFloat = 18
     }
 
     /// Where the thumbnails sit in the strip's scrolling content: the first
@@ -119,6 +127,9 @@ public struct AgentInputCardLayout: Equatable, Sendable {
         /// One row: the text between add and the options button
         /// (`compactTextCap`), the chips behind that button.
         public var compact: Bool
+        /// The trash after add, on the full card; not in zen mode and not
+        /// on the compact card, which has no room for it.
+        public var showsTrash: Bool
 
         /// The compact card's options button: there whenever a chip is.
         public var showsOptions: Bool {
@@ -142,7 +153,8 @@ public struct AgentInputCardLayout: Equatable, Sendable {
             separator: CGSize = .zero,
             zenMode: Bool = false,
             offersExpand: Bool = false,
-            compact: Bool = false
+            compact: Bool = false,
+            showsTrash: Bool = false
         ) {
             self.width = width
             self.metrics = metrics
@@ -161,6 +173,7 @@ public struct AgentInputCardLayout: Equatable, Sendable {
             self.zenMode = zenMode
             self.offersExpand = offersExpand
             self.compact = compact
+            self.showsTrash = showsTrash
         }
     }
 
@@ -207,6 +220,8 @@ public struct AgentInputCardLayout: Equatable, Sendable {
     public var textTrailingInset: CGFloat
     public var actionRow: CGRect
     public var add: CGRect?
+    /// The trash, add's size, after it; nil when it isn't shown.
+    public var trash: CGRect?
     /// The box between add and send. It clips what it holds.
     public var middle: CGRect
     public var middleContent: MiddleContent
@@ -294,6 +309,7 @@ public struct AgentInputCardLayout: Equatable, Sendable {
             }
             actionRow = CGRect(x: contentX, y: y, width: contentWidth, height: containerHeight)
             add = columns.add.map { button($0, metrics.actionSize) }
+            trash = nil
             options = columns.options.map { button($0, metrics.actionSize) }
             primary = button(columns.primary, metrics.primaryActionSize)
             middle = CGRect(x: inputContainer.maxX, y: y, width: 0, height: containerHeight)
@@ -357,6 +373,17 @@ public struct AgentInputCardLayout: Equatable, Sendable {
             middleX += metrics.actionSize + gap
         } else {
             add = nil
+        }
+        if input.showsTrash, !input.zenMode {
+            trash = CGRect(
+                x: middleX,
+                y: actionRow.minY + (metrics.actionRowHeight - metrics.actionSize) / 2,
+                width: metrics.actionSize,
+                height: metrics.actionSize
+            )
+            middleX += metrics.actionSize + gap
+        } else {
+            trash = nil
         }
         primary = CGRect(
             x: actionRow.maxX - metrics.primaryActionSize,

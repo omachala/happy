@@ -321,34 +321,33 @@ final class ComposerChipSetTests: XCTestCase {
     )
 
     func testAClaudeSessionsChips() {
-        let session = sessionRecord(metadata: #"{ "flavor": "claude", "version": "1.2.6" }"#)
+        let session = sessionRecord(metadata: #"{ "flavor": "claude", "version": "1.2.0" }"#)
         let modes = ComposerModes(metadata: session.metadata, picks: ComposerPicks(), agentDefaultOverrides: [:])
         let chips = ComposerChipSet(modes: modes, record: session, titles: titles)
 
-        XCTAssertEqual(chips.permission?.label, "Auto")
-        XCTAssertEqual(chips.permission?.accessibilityLabel, "PERMISSION MODE")
-        XCTAssertEqual(chips.permission?.selectedKey, "auto")
-        XCTAssertEqual(chips.permission?.sections?.count, 1)
-        XCTAssertNil(chips.permission?.sections?.first?.title)
-        XCTAssertEqual(chips.permission?.sections?.first?.options.map(\.label), ["Auto", "Edits", "Plan", "Yolo", "Default"])
+        // No permission UI in a Happy CLI chat (the fork).
+        XCTAssertNil(chips.permission)
 
-        XCTAssertEqual(chips.model.label, "Opus 5.5")
-        XCTAssertEqual(chips.model.sections?.map(\.title), ["Anthropic"])
+        // Opus 5.5 even on the fork's CLI, which reports 1.2.0.
+        XCTAssertEqual(chips.model.label, "opus 5.5")
+        XCTAssertEqual(chips.model.sections?.count, 1)
+        XCTAssertNil(chips.model.sections?.first?.title)
+        XCTAssertEqual(chips.model.sections?.first?.options.map(\.key), [
+            "claude-fable-5-1", "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-4-5",
+        ])
+        XCTAssertEqual(chips.model.sections?.first?.options.map(\.subtitle), ["latest & most capable", nil, nil, nil])
         XCTAssertEqual(chips.model.selectedKey, "claude-opus-5-5")
 
-        XCTAssertEqual(chips.effort?.label, "Medium")
+        XCTAssertEqual(chips.effort?.label, "High")
         XCTAssertEqual(chips.effort?.sections?.first?.options.map(\.key), ["low", "medium", "high", "xhigh", "max"])
     }
 
-    func testASandboxedYoloSaysSoInTheMenu() {
+    func testACodexSessionHasNoPermissionChip() {
         let session = sessionRecord(metadata: #"{ "flavor": "codex", "sandbox": { "enabled": true } }"#)
         let modes = ComposerModes(metadata: session.metadata, picks: ComposerPicks(permissionMode: "yolo"), agentDefaultOverrides: [:])
         let chips = ComposerChipSet(modes: modes, record: session, titles: titles)
-        XCTAssertEqual(chips.permission?.label, "Yolo")
-        XCTAssertEqual(chips.permission?.accessibilityLabel, "CODEX PERMISSION MODE")
-        XCTAssertEqual(chips.permission?.sections?.first?.options.map(\.label), [
-            "Auto", "Workspace", "Read", "Yolo (sandboxed)", "Default",
-        ])
+        XCTAssertNil(chips.permission)
+        XCTAssertEqual(chips.effort?.label, "Medium", "Codex stays on medium")
     }
 
     func testAModeThisBuildCannotNameShowsTheShield() {
@@ -364,7 +363,7 @@ final class ComposerChipSetTests: XCTestCase {
             permissionMode: ModeOption(key: "x", name: "  "),
             availableModels: [], modelMode: nil, availableEffortLevels: [], effortLevel: nil
         )
-        let chips = ComposerChipSet(modes: unnamed, record: sessionRecord(), titles: titles)
+        let chips = ComposerChipSet(modes: unnamed, record: rig(), titles: titles)
         XCTAssertNotNil(chips.permission)
         XCTAssertNil(chips.permission?.label)
         XCTAssertEqual(chips.model.label, "MODEL")

@@ -78,36 +78,39 @@ final class ComposerSettingsMenuTests: XCTestCase {
         geminiPermission: "GEMINI PERMISSION MODE", model: "MODEL", effort: "EFFORT"
     )
 
-    func testAClaudeSessionsGearHoldsEveryChoiceUnderItsHeading() {
+    func testAClaudeSessionsGearHoldsTheModelAndEffortOnly() {
+        // A Happy CLI session has no permission UI: every message runs in
+        // the agent's never-ask mode.
         let session = sessionRecord(metadata: #"{ "flavor": "claude", "version": "1.2.6" }"#)
         let modes = ComposerModes(metadata: session.metadata, picks: ComposerPicks(), agentDefaultOverrides: [:])
         let chips = ComposerChipSet(modes: modes, record: session, titles: titles)
         XCTAssertTrue(chips.showsSettings)
-        XCTAssertEqual(chips.settings.map(\.kind), [.permission, .model, .effort])
-        XCTAssertEqual(chips.settings.map(\.title), ["PERMISSION MODE", "Anthropic", "EFFORT"])
-        XCTAssertEqual(chips.settings.map(\.systemImage), ["shield", "cube", "bolt"])
-        XCTAssertEqual(chips.settings.map(\.selectedKey), ["auto", "claude-opus-5-5", "medium"])
+        XCTAssertNil(chips.permission)
+        XCTAssertEqual(chips.settings.map(\.kind), [.model, .effort])
+        XCTAssertEqual(chips.settings.map(\.title), ["MODEL", "EFFORT"])
+        XCTAssertEqual(chips.settings.map(\.systemImage), ["cube", "bolt"])
+        XCTAssertEqual(chips.settings.map(\.selectedKey), ["claude-opus-5-5", "high"])
         // The chips' own rows.
-        XCTAssertEqual(chips.settings[0].options, chips.permission?.sections?.first?.options)
-        XCTAssertEqual(chips.settings[1].options, chips.model.sections?.first?.options)
-        XCTAssertEqual(chips.settings[2].options.map(\.key), ["low", "medium", "high", "xhigh", "max"])
+        XCTAssertEqual(chips.settings[0].options.map(\.key), chips.model.sections?.first?.options.map(\.key))
+        XCTAssertEqual(chips.settings[1].options.map(\.key), ["low", "medium", "high", "xhigh", "max"])
     }
 
-    func testACodexSessionsPermissionIsHeadedForCodex() {
+    func testACodexSessionsGearHasNoPermission() {
         let session = sessionRecord(metadata: #"{ "flavor": "codex" }"#)
         let modes = ComposerModes(metadata: session.metadata, picks: ComposerPicks(), agentDefaultOverrides: [:])
         let chips = ComposerChipSet(modes: modes, record: session, titles: titles)
-        XCTAssertEqual(chips.settings.first?.title, "CODEX PERMISSION MODE")
+        XCTAssertEqual(chips.settings.first?.kind, .model)
+        XCTAssertFalse(chips.settings.contains { $0.kind == .permission })
     }
 
-    func testTheGearShowsWhereverThePermissionCanBePicked() {
-        // Nothing listed at all: the gear is there, its menu empty.
+    func testTheGearShowsWhereverSomethingCanBePicked() {
+        // Nothing listed at all: no gear.
         let session = sessionRecord(metadata: #"{ "flavor": "claude" }"#)
         let empty = ComposerModes(
             availableModes: [], permissionMode: nil, availableModels: [], modelMode: nil, availableEffortLevels: [], effortLevel: nil
         )
         let chips = ComposerChipSet(modes: empty, record: session, titles: titles)
-        XCTAssertTrue(chips.showsSettings)
+        XCTAssertFalse(chips.showsSettings)
         XCTAssertEqual(chips.settings, [])
 
         // A Happy Agent that locks the permission has no gear, even with

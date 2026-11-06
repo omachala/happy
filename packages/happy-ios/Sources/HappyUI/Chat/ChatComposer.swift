@@ -204,9 +204,15 @@ public protocol ChatComposerDelegate: AnyObject {
 
     /// `headerStatus` changed.
     func composerDidChangeHeaderStatus(_ composer: any ChatComposerView)
+
+    /// The trash of a Happy CLI chat was pressed (the fork's
+    /// kill-and-respawn): the screen stops this session, starts a fresh
+    /// one by `plan`, and shows it in this chat's place.
+    func composer(_ composer: any ChatComposerView, didAskToRespawn plan: LegacySessionRespawn.Plan)
 }
 
 extension ChatComposerDelegate {
+    public func composer(_ composer: any ChatComposerView, didAskToRespawn plan: LegacySessionRespawn.Plan) {}
     public func composerDidRestore(_ composer: any ChatComposerView, generation: Int) {}
     public func composerDidChangeHeaderStatus(_ composer: any ChatComposerView) {}
     public func composerWillSend(_ composer: any ChatComposerView, from card: AgentInputCardView) {}
