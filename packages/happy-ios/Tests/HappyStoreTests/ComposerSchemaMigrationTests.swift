@@ -125,9 +125,10 @@ final class ComposerSchemaMigrationTests: XCTestCase {
         }
     }
 
+    /// `unread` is 0: the fork clears it on every open (one run's state).
     private static let cachedData = """
         INSERT INTO session (id, seq, createdAt, updatedAt, activeAt, metadataVersion, metadataCipher, metadata, decryptable, syncedMessageSeq, unread)
-            VALUES ('session', 7, 1, 2, 1, 3, 'session-cipher', '{"machineId":"machine"}', 1, 6, 1);
+            VALUES ('session', 7, 1, 2, 1, 3, 'session-cipher', '{"machineId":"machine"}', 1, 6, 0);
         INSERT INTO machine (id, createdAt, updatedAt, activeAt, metadataVersion, metadataCipher, metadata, decryptable)
             VALUES ('machine', 1, 2, 1, 4, 'machine-cipher', '{"host":"cached-host"}', 1);
         INSERT INTO message (id, sessionId, seq, localId, createdAt, updatedAt, contentCipher, content)

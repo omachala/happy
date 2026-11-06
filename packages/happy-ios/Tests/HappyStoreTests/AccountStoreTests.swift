@@ -19,26 +19,32 @@ final class SessionLocalStateTests: XCTestCase {
         try XCTUnwrap(try store.session(id: id))
     }
 
-    func testAFinishedTurnIsUnreadUntilRead() throws {
+    /// The fork: activity never marks a session unread (every live
+    /// session's flush lit up the whole list); only `session-event` does.
+    func testAFinishedTurnIsNotInferredUnread() throws {
         try store.upsertSessions([makeSession("s")])
         try store.applySessionActivity(id: "s", active: true, activeAt: 200, thinking: true)
         XCTAssertTrue(try session().thinking)
-        XCTAssertFalse(try session().unread)
-
         try store.applySessionActivity(id: "s", active: true, activeAt: 210, thinking: false)
         XCTAssertFalse(try session().thinking)
-        XCTAssertTrue(try session().unread)
+        XCTAssertFalse(try session().unread)
+    }
 
+    func testMarkedUnreadUntilRead() throws {
+        try store.upsertSessions([makeSession("s")])
+        try store.markSessionUnread(id: "s")
+        XCTAssertTrue(try session().unread)
+        try store.applySessionActivity(id: "s", active: true, activeAt: 210, thinking: true)
+        XCTAssertTrue(try session().unread, "activity leaves it")
         try store.markSessionRead(id: "s")
         XCTAssertFalse(try session().unread)
     }
 
-    func testAnAnsweredPermissionIsUnread() throws {
+    func testAnAnsweredPermissionIsNotInferredUnread() throws {
         try store.upsertSessions([makeSession("s")])
         _ = try store.applySessionUpdate(id: "s", metadata: nil, agentState: VersionedPayload(version: 1, cipher: "a", value: permission), projectId: nil)
-        XCTAssertFalse(try session().unread, "waiting on the person is not a finished turn")
         _ = try store.applySessionUpdate(id: "s", metadata: nil, agentState: VersionedPayload(version: 2, cipher: "b", value: .object([:])), projectId: nil)
-        XCTAssertTrue(try session().unread)
+        XCTAssertFalse(try session().unread)
     }
 
     func testGoingOfflineStopsThinkingWithoutMarkingUnread() throws {
@@ -87,11 +93,12 @@ final class SessionLocalStateTests: XCTestCase {
         try first.applySessionActivity(id: "s", active: true, activeAt: 200, thinking: true)
         try first.setSessionArchiving(id: "s", true)
         try first.applySessionActivity(id: "s", active: true, activeAt: 210, thinking: false)
+        try first.markSessionUnread(id: "s")
 
         let reopened = try XCTUnwrap(try LocalStore(writer: queue).session(id: "s"))
         XCTAssertFalse(reopened.thinking)
         XCTAssertFalse(reopened.archiving)
-        XCTAssertTrue(reopened.unread, "unread survives a relaunch")
+        XCTAssertFalse(reopened.unread, "unread lasts one run, as the fork's in-memory set")
     }
 
     func testRigSessionsStayLiveWhileDisconnected() {

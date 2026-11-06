@@ -191,12 +191,40 @@ final class AccountSyncTests: XCTestCase {
 
     // MARK: Activity
 
-    func testActivityEphemeralsDriveThinkingAndUnread() async throws {
+    func testActivityEphemeralsDriveThinkingButNotUnread() async throws {
         try store.upsertSessions([RecordDecoder(keyRing: KeyRing(keys: fixture.keys)).session(fixture.session("s", updatedAt: 1))])
         await engine.handle(.activity(sessionId: "s", active: true, activeAt: 10, thinking: true))
         XCTAssertEqual(try store.session(id: "s")?.thinking, true)
         await engine.handle(.activity(sessionId: "s", active: true, activeAt: 20, thinking: false))
+        XCTAssertEqual(try store.session(id: "s")?.unread, false, "the fork infers nothing from activity")
+    }
+
+    /// sync.ts `session-event` → `markSessionUnread`: the one session the
+    /// server names, unless it is the chat on screen.
+    func testASessionEventMarksItsSessionUnread() async throws {
+        let decoder = RecordDecoder(keyRing: KeyRing(keys: fixture.keys))
+        try store.upsertSessions([decoder.session(fixture.session("s", updatedAt: 1)), decoder.session(fixture.session("t", updatedAt: 1))])
+        await engine.handle(.sessionEvent(sessionId: "s", kind: "done", title: "Done", body: "", timestamp: 5))
         XCTAssertEqual(try store.session(id: "s")?.unread, true)
+        XCTAssertEqual(try store.session(id: "t")?.unread, false, "only the session it names")
+
+        engine.viewing.show("t")
+        await engine.handle(.sessionEvent(sessionId: "t", kind: "permission", title: "", body: "", timestamp: 6))
+        XCTAssertEqual(try store.session(id: "t")?.unread, false, "the chat on screen is already read")
+
+        engine.viewing.hide("t")
+        await engine.handle(.sessionEvent(sessionId: "t", kind: "question", title: "", body: "", timestamp: 7))
+        XCTAssertEqual(try store.session(id: "t")?.unread, true)
+    }
+
+    func testOnlyTheShownChatHidesItself() {
+        let viewing = LegacyViewedSession()
+        viewing.show("a")
+        viewing.show("b")
+        viewing.hide("a")
+        XCTAssertEqual(viewing.current, "b", "a chat leaving after the next one appeared changes nothing")
+        viewing.hide("b")
+        XCTAssertNil(viewing.current)
     }
 }
 
@@ -345,8 +373,7 @@ final class SessionActionsTests: XCTestCase {
 
     func testMarkRead() throws {
         try storeSession()
-        try store.applySessionActivity(id: "s", active: true, activeAt: 2, thinking: true)
-        try store.applySessionActivity(id: "s", active: true, activeAt: 3)
+        try store.markSessionUnread(id: "s")
         XCTAssertEqual(try store.session(id: "s")?.unread, true)
         actions.markRead(sessionId: "s")
         XCTAssertEqual(try store.session(id: "s")?.unread, false)

@@ -100,9 +100,11 @@ public final class LocalStore: Sendable {
         // Live state from a previous run is stale: the server re-sends
         // `thinking` every few seconds while it holds. An archive or leave
         // still waiting in `intent` keeps its session out of the list; any
-        // other was answered.
+        // other was answered. Unread lasts one run, as the fork's in-memory
+        // set does (`markSessionUnread`).
         try performWrite { db in
             try db.execute(sql: "UPDATE session SET thinking = 0, thinkingAt = 0 WHERE thinking = 1")
+            try db.execute(sql: "UPDATE session SET unread = 0 WHERE unread = 1")
             try db.execute(sql: "UPDATE session SET archiving = \(Self.removalPending) WHERE archiving != \(Self.removalPending)")
             try db.execute(sql: "UPDATE outbox SET state = 'queued' WHERE state = 'sending'")
         }
@@ -978,18 +980,14 @@ public final class LocalStore: Sendable {
     /// The local fields that follow from a change to a session, after
     /// storage.ts `applySessions`:
     ///   - an inactive session is not thinking;
-    ///   - a session that was busy (thinking, or waiting on a permission)
-    ///     and is now idle and online has a turn nobody has seen;
     ///   - an archive in flight is done once the server shows the session
     ///     archived too.
+    /// Unread is never inferred from activity here, as the fork removed it:
+    /// activity flushes for every live session at once lit up the whole
+    /// list. Only the server's `session-event` sets it (`markSessionUnread`).
     static func settle(old: SessionRecord, _ record: inout SessionRecord) {
         if !record.active {
             record.thinking = false
-        }
-        let wasBusy = old.thinking || old.hasPendingPermissionRequests
-        let isIdle = !record.thinking && record.active && !record.hasPendingPermissionRequests
-        if wasBusy && isIdle {
-            record.unread = true
         }
         if record.archiving && record.isArchivedOnServer {
             record.archiving = false

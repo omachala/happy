@@ -87,6 +87,8 @@ public actor LegacySyncEngine {
     /// (docs/offline-first.md): shown at once, kept in `LocalStore.intent`,
     /// sent while the socket is up. `AccountSession` gives it its delivery.
     public nonisolated let intents: IntentOutbox
+    /// The chat on screen, which the server's `session-event` leaves read.
+    public nonisolated let viewing = LegacyViewedSession()
     /// Whether the socket is up, as last said: true until said otherwise,
     /// so an account never connected (tests) is taken at its word.
     public private(set) var reachable = true
@@ -1038,7 +1040,12 @@ public actor LegacySyncEngine {
             await presence.activity(id: sessionId, active: active, activeAt: activeAt, thinking: thinking)
         case .machineActivity(let machineId, let active, let activeAt):
             await presence.machineActivity(id: machineId, active: active, activeAt: activeAt)
-        case .machineStatus, .sessionEvent, .unsupported:
+        case .sessionEvent(let sessionId, _, _, _, _):
+            // sync.ts: the one session the server says wants attention (a
+            // turn done, a permission, a question), the push's own signal.
+            guard viewing.current != sessionId else { break }
+            try? store.markSessionUnread(id: sessionId)
+        case .machineStatus, .unsupported:
             break
         }
     }
