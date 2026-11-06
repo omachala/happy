@@ -56,9 +56,11 @@ public enum ServerURLError: Error, Equatable, Sendable {
 }
 
 /// Which Happy server the app talks to. Mirrors
-/// packages/happy-app/sources/sync/serverConfig.ts.
+/// packages/happy-app/sources/sync/serverConfig.ts. The default is the
+/// omachala fork's server, as in its RN app: an account imported from that
+/// app with no saved custom server is on this one.
 public struct ServerConfig: Sendable {
-    public static let defaultServerURL = URL(string: "https://api.cluster-fluster.com")!
+    public static let defaultServerURL = URL(string: "https://happy.macha.la")!
     public static let storageSuite = "server-config"
     static let customServerKey = "custom-server-url"
 

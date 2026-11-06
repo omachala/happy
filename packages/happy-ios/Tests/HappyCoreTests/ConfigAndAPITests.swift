@@ -6,9 +6,9 @@ import HappyWire
 final class ServerConfigTests: XCTestCase {
     func testDefaultsToTheHostedServer() {
         let config = ServerConfig(storage: InMemoryKeyValueStore())
-        XCTAssertEqual(config.serverURL.absoluteString, "https://api.cluster-fluster.com")
+        XCTAssertEqual(config.serverURL.absoluteString, "https://happy.macha.la")
         XCTAssertFalse(config.isCustomServer)
-        XCTAssertEqual(config.displayHost, "api.cluster-fluster.com")
+        XCTAssertEqual(config.displayHost, "happy.macha.la")
     }
 
     func testCustomServerIsValidatedNormalizedAndResettable() throws {

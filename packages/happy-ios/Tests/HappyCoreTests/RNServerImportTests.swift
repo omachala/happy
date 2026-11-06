@@ -181,6 +181,8 @@ final class RNAccountServerImportTests: XCTestCase {
             let account = try controller(keychain, directory: base, rn: rn, http: http, connector: connector)
             await account.restore()
             XCTAssertEqual(account.session?.api.serverURL, ServerConfig.defaultServerURL)
+            // The fork's RN app saves nothing for its default server: an upgrade stays on it.
+            XCTAssertEqual(account.session?.api.serverURL.absoluteString, "https://happy.macha.la")
             await account.session?.stop()
         }
     }
