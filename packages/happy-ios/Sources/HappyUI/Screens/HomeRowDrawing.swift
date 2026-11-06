@@ -14,6 +14,16 @@ struct HomeRowDrawing: Sendable {
         case icon(String, CGFloat, ColorToken, CGRect)
         case card(CGRect, radius: CGFloat, top: Bool, bottom: Bool, selection: CGRect?)
         case clip(CGRect)
+        /// A filled rounded rectangle: the worktree badge.
+        case roundedFill(ColorToken, CGRect, radius: CGFloat)
+    }
+
+    /// What the overlay's `+` at `addFrame` does.
+    enum Add: Sendable, Equatable {
+        /// A project card's: a new workspace in it.
+        case workspace
+        /// A computer's heading in the fork's home: a new session on it.
+        case session
     }
 
     /// How a row answers a finger, as the table's cells did.
@@ -49,6 +59,7 @@ struct HomeRowDrawing: Sendable {
     var avatarAlpha: CGFloat = 1
     var monochromeAvatar = false
     var addFrame: CGRect?
+    var add = Add.workspace
     /// A title whose work runs: drawn in the bitmap like any, with a
     /// sheen band over it in the overlay (`ShimmerBand`).
     var shimmer: ShimmerTitle?
@@ -101,6 +112,10 @@ struct HomeRowDrawing: Sendable {
             case .fill(let color, let frame, let round):
                 context.setFillColor(resolved(color).cgColor)
                 if round { context.fillEllipse(in: frame) } else { context.fill(frame) }
+            case .roundedFill(let color, let frame, let radius):
+                context.setFillColor(resolved(color).cgColor)
+                context.addPath(UIBezierPath(roundedRect: frame, cornerRadius: radius).cgPath)
+                context.fillPath()
             case .text(let value, let style, let color, let frame):
                 var attributes = style.scaled(environment.text.scale).attributes(color: resolved(color), lineBreakMode: .byTruncatingTail)
                 attributes[.font] = style.font(in: environment.text)
@@ -236,6 +251,54 @@ struct HomeRowDrawing: Sendable {
             }
         }
         switch row {
+        case .machines(.machine(let header)):
+            let iconBox = Icon.ionicons("desktop-outline").layout(size: LegacyMachineHeaderLayout.Metrics.iconSize, scale: environment.text.displayScale)?.size
+                ?? CGSize(width: LegacyMachineHeaderLayout.Metrics.iconSize, height: LegacyMachineHeaderLayout.Metrics.iconSize)
+            let layout = LegacyMachineHeaderLayout(width: width, first: header.first, icon: iconBox, name: measured(header.name, TextStyles.legacyMachineName))
+            plan.size = layout.size
+            plan.marks.append(.icon("desktop-outline", LegacyMachineHeaderLayout.Metrics.iconSize, Palette.text, layout.icon))
+            text(header.name, TextStyles.legacyMachineName, Palette.text, layout.name)
+            plan.addFrame = layout.add
+            plan.add = .session
+            plan.accessibilityLabel = header.name; plan.isHeading = true
+        case .machines(.session(let row)):
+            typealias M = LegacyMachineSessionRowLayout.Metrics
+            let titleStyle = row.unread ? TextStyles.legacyTileTitleUnread : TextStyles.legacyTileTitle
+            let subtitleStyle = row.unread ? TextStyles.legacyTileSubtitleUnread : TextStyles.legacyTileSubtitle
+            let chat = row.title ?? catalog("session.newChat")
+            let branchBox = Icon.ionicons("git-branch-outline").layout(size: M.badgeIconSize, scale: environment.text.displayScale)?.size
+                ?? CGSize(width: M.badgeIconSize, height: M.badgeIconSize)
+            let layout = LegacyMachineSessionRowLayout(
+                width: rowWidth,
+                title: measured(row.projectName, titleStyle),
+                badge: row.worktreeName.map { .init(icon: branchBox, name: measured($0, TextStyles.legacyWorktreeBadge)) },
+                subtitle: chat.isEmpty ? nil : measured(chat, subtitleStyle)
+            )
+            plan.size = layout.size
+            separatorX = M.paddingX
+            text(row.projectName, titleStyle, Palette.text, layout.title)
+            if let badge = layout.badge, let icon = layout.badgeIcon, let name = layout.badgeName, let worktree = row.worktreeName {
+                plan.marks.append(.roundedFill(Palette.groupedSeparator, badge, radius: M.badgeRadius))
+                plan.marks.append(.icon("git-branch-outline", M.badgeIconSize, Palette.textSecondary, icon))
+                text(worktree, TextStyles.legacyWorktreeBadge, Palette.textSecondary, name)
+            }
+            if let frame = layout.subtitle {
+                text(chat, subtitleStyle, row.unread ? Palette.text : Palette.textSecondary, frame)
+            }
+            let dot: ColorToken = switch row.status {
+            case .unread, .thinking: Palette.legacyHomeDotBlue
+            case .permissionRequired: Palette.legacyHomeDotOrange
+            case .waiting: Palette.legacyHomeDotGreen
+            case .disconnected: Palette.legacyHomeDotGrey
+            }
+            if row.status.pulses { plan.pulsingDots.append((dot, layout.dot)) } else { fill(dot, layout.dot, round: true) }
+            let state: String? = switch row.status {
+            case .unread: catalog("status.unread")
+            case .permissionRequired: catalog("status.permissionRequired")
+            case .disconnected: catalog("status.offline")
+            case .thinking, .waiting: nil
+            }
+            plan.accessibilityLabel = [row.projectName, row.worktreeName, chat.isEmpty ? nil : chat, state].compactMap { $0 }.joined(separator: ", ")
         case .flat(.session(let row)): session(row, archived: false)
         case .project(.bot(let row)), .project(.task(let row)): session(row, archived: false)
         case .project(.archived(let row)): session(row, archived: true)
@@ -287,6 +350,8 @@ struct HomeRowDrawing: Sendable {
             plan.press = .fill(carded ? Palette.groupedCellHighlight : Palette.surfacePressed)
         case .flat(.archiveToggle), .project(.archiveToggle): plan.press = .dim
         case .flat(.dayHeader), .project(.machine), .project(.section), .project(.archiveHeader): plan.press = .none
+        case .machines(.session): plan.press = .fill(carded ? Palette.groupedCellHighlight : Palette.surfacePressed)
+        case .machines(.machine(let header)): plan.press = header.machineId == nil ? .none : .dim
         }
         if carded {
             plan.background = Palette.groupedGround
@@ -332,6 +397,7 @@ struct HomeRowDrawing: Sendable {
             case .icon(let name, let size, let color, let frame): .icon(name, size, color, moved(frame))
             case .card(let frame, let radius, let top, let bottom, let selection): .card(moved(frame), radius: radius, top: top, bottom: bottom, selection: selection.map(moved))
             case .clip(let frame): .clip(moved(frame))
+            case .roundedFill(let color, let frame, let radius): .roundedFill(color, moved(frame), radius: radius)
             }
         }
         avatarFrame = moved(avatarFrame)

@@ -35,6 +35,9 @@ enum Route: Hashable {
     case developer
     case server
     case troubleshoot
+    /// The fork's home header: what the socket last said
+    /// (connection-error.tsx).
+    case connectionError
     /// From the Happy CLI home's card: how to move to Happy Desktop, or to
     /// a direct connection.
     case desktopMigration(MigrationPath)
@@ -53,6 +56,8 @@ enum Screens {
             return ServerConfigViewController(context: context)
         case .troubleshoot:
             return TroubleshootViewController(context: context, session: session)
+        case .connectionError:
+            return ConnectionErrorViewController(context: context, session: session)
         case .desktopMigration(let path):
             return DesktopMigrationViewController(context: context, path: path)
         case .session(let id):

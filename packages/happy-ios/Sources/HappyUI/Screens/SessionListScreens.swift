@@ -107,14 +107,23 @@ final class SessionListViewController: UIViewController {
                 if !row.avatar.isTask { self.actions.archive(row.id) } else if row.leaves { self.actions.leave(row.id) }
             case .project(.task(let row))? where row.leaves:
                 self.actions.leave(row.id)
+            case .machines(.session(let row))?:
+                self.actions.archive(row.id)
             default:
                 break
             }
         }
         adapter.onCreateWorkspace = { [weak self] id in
-            guard let self, self.context.account.session === self.session,
-                  case .project(.project(let entry))? = self.row(id) else { return }
-            self.createWorkspace(entry)
+            guard let self, self.context.account.session === self.session else { return }
+            switch self.row(id) {
+            case .project(.project(let entry))?: self.createWorkspace(entry)
+            // A computer's `+` (MachineHeader `onAddPress`): the draft on
+            // that computer with no place yet, which the new-session screen
+            // fills with its first place or home; no computer, as it was.
+            case .machines(.machine(let header))?:
+                self.push(.newSession(machineId: header.machineId, path: nil, prompt: nil), context: self.context)
+            default: break
+            }
         }
         let receipts = session.archiveVisibilityWriter.receipts()
         archiveReceiptTask = Task { [weak self] in
@@ -373,6 +382,9 @@ final class SessionListViewController: UIViewController {
 
     private func updateUltraList() {
         guard isViewLoaded, let environment = textEnvironment else { return }
+        // The fork's tiles (iOS Mail): a short swipe shows Archive, a long
+        // one archives at once.
+        rendered.list.swipeActions.allowsFullSwipe = model.machineSections
         ultraList.update(.init(model: model, width: rendered.contentWidth, environment: environment, dark: traitCollection.userInterfaceStyle == .dark, selected: selectedSessionId, archiveModels: archiveModels, viewportHeight: view.bounds.height))
     }
 
@@ -403,6 +415,9 @@ final class SessionListViewController: UIViewController {
             ultraList.showArchiveIntent(intent)
         case .project(.worktreeToggle(let toggle)):
             toggleExpanded(toggle.projectId)
+        case .machines(.machine(let header)):
+            guard let machineId = header.machineId else { return }
+            push(.machine(id: machineId), context: context)
         default:
             guard let sessionId = item.sessionId else { return }
             push(.session(id: sessionId), context: context)
@@ -417,6 +432,7 @@ final class SessionListViewController: UIViewController {
         guard context.account.session === session, let item = self.row(id) else { return }
         switch item {
         case .flat(.session(let row)), .project(.task(let row)): actions.present(sessionId: row.id)
+        case .machines(.session(let row)): actions.present(sessionId: row.id)
         case .project(.project(let entry)): showProjectActions(entry)
         default: break
         }

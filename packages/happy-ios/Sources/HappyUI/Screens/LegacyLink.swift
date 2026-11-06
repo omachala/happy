@@ -72,11 +72,23 @@ final class LegacyLink {
         indicator.watch(watch)
     }
 
+    private var statusWatchers: [UUID: (RealtimeStatus) -> Void] = [:]
+
+    /// The socket's own status, undebounced, now and on every change: the
+    /// fork's home header says it as it is (MainView.tsx `HeaderTitle`).
+    func watchStatus(_ watch: @escaping (RealtimeStatus) -> Void) -> Watch {
+        let id = UUID()
+        statusWatchers[id] = watch
+        watch(status)
+        return Watch { [weak self] in self?.statusWatchers.removeValue(forKey: id) }
+    }
+
     // The sources, and the doors tests come in by.
 
     func receive(status: RealtimeStatus) {
         self.status = status
         indicator.want(headerState)
+        for watch in statusWatchers.values { watch(status) }
     }
 
     func receive(catchingUp: Bool) {
