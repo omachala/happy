@@ -73,15 +73,12 @@ final class SyncPerfLocalActivityTests: XCTestCase {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
         _ = try store.applySessionUpdate(id: "s", metadata: .init(version: 2, cipher: "old-cli", value: .object(["version": .string("1.2.0")])), agentState: nil, projectId: nil)
+        // The fork forces every Happy CLI message to its never-ask mode, so
+        // a picked `auto` an old CLI can't parse is never sent or refused.
         try store.saveComposerState(.init(sessionId: "s", values: .object(["permissionMode": .string("auto")])))
-        do {
-            _ = try await engine.accept(.init(text: "refused"), sessionId: "s", filesDirectory: directory)
-            XCTFail("unsupported send must be refused before acceptance")
-        } catch is UnsupportedPermissionModeError { }
         XCTAssertNil(try store.session(id: "s")?.lastMessageSentAt)
-        XCTAssertTrue(try store.pendingOutbox().isEmpty)
-        try store.saveComposerState(.init(sessionId: "s"))
         let id = try await engine.accept(.init(text: "accepted offline"), sessionId: "s", filesDirectory: directory)
+        XCTAssertEqual(try store.outbox(localId: id)?.payload["meta"]?["permissionMode"], .string("bypassPermissions"))
         await engine.waitForIdle()
         XCTAssertEqual(try store.session(id: "s")?.lastMessageSentAt, 1000)
         XCTAssertTrue(http.requests.isEmpty)
