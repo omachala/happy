@@ -344,6 +344,51 @@ final class HostedChatFollowTests: XCTestCase {
         assertSame(before, chat.onScreen(), "it grew below the fold")
     }
 
+    // MARK: This fork: follow the newest message to its end
+
+    private func forkChat(_ heights: [CGFloat]) async throws -> Chat {
+        let chat = try await chat(heights)
+        chat.adapter.followBudget = .infinity
+        chat.adapter.followsToTheEnd = true
+        return chat
+    }
+
+    /// A reply growing at the foot is followed all the way, its end always
+    /// on the composer.
+    func testForkAGrowingReplyIsFollowedToItsEnd() async throws {
+        let chat = try await forkChat(forty)
+        var height: CGFloat = 100
+        for _ in 0..<40 {
+            height += 25
+            chat.setHeight("m0", height)
+            chat.apply()
+            try await settle(chat)
+        }
+        XCTAssertEqual(try XCTUnwrap(chat.frame("m0")).maxY, chat.restingFoot, accuracy: 0.5)
+        XCTAssertTrue(chat.adapter.isFollowingNewest)
+    }
+
+    /// A finished message taller than the screen shows its end, not its top.
+    func testForkAFinishedMessageTallerThanTheScreenShowsItsEnd() async throws {
+        let chat = try await forkChat(forty)
+        chat.plans.insert(chat.plan("long", height: 2000), at: 0)
+        chat.apply(animated: true)
+        try await settle(chat)
+        XCTAssertEqual(try XCTUnwrap(chat.frame("long")).maxY, chat.restingFoot, accuracy: 0.5)
+        XCTAssertTrue(chat.adapter.isFollowingNewest)
+    }
+
+    /// Up in history nothing moves, whatever arrives at the foot.
+    func testForkAReaderInHistoryIsNotPulledDown() async throws {
+        let chat = try await forkChat(forty)
+        try await scroll(chat, to: 400)
+        let before = chat.onScreen()
+        chat.plans.insert(chat.plan("long", height: 2000), at: 0)
+        chat.apply(animated: true)
+        try await settle(chat)
+        assertSame(before, chat.onScreen(), "a reader up in history stays put")
+    }
+
     /// A finished message arriving while the reader is up in history
     /// moves nothing.
     func testAFinishedMessageArrivingAwayFromTheFootMovesNothing() async throws {

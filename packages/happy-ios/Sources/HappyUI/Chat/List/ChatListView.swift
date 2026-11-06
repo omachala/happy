@@ -79,7 +79,10 @@ final class ChatListView: UIView {
 
     override func layoutSubviews() {
         super.layoutSubviews()
-        ultra.followBudget = ChatFollow.budget(body: ChatTextStyles.markdownText, scale: traitCollection.textEnvironment?.scale ?? .standard)
+        // This fork follows the newest message to its end, as the RN app
+        // did, instead of upstream's two lines (`ChatFollow.budget`).
+        ultra.followBudget = .infinity
+        ultra.followsToTheEnd = true
         ultra.setViewport(frame: sidesBand, insets: edgeInsets)
     }
 

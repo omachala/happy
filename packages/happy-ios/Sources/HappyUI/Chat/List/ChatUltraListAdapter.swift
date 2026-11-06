@@ -386,6 +386,11 @@ final class ChatUltraListAdapter {
             list.bottomGravity = ListBottomGravity(followBudget: Double(followBudget))
         }
     }
+    /// This fork's follow (the RN app's): resting at the newest message,
+    /// every row that arrives or grows there is followed to its end, a
+    /// finished message taller than the screen included, rather than shown
+    /// from its top. Pair it with an unlimited `followBudget`.
+    var followsToTheEnd = false
     /// A send flying in from the composer: the row it waits for is
     /// veiled from the pass that inserts it until the copy lands.
     var flight: ChatSendFlight? {
@@ -564,7 +569,7 @@ final class ChatUltraListAdapter {
             revision &+= 1
             let replan = replan ?? input.map { input -> @Sendable (CGFloat) -> ChatRowPlan in { ChatRowRenderer.plan(input, width: $0) } }
             let row = ChatUltraRow(identity: identity, revision: revision, plan: plan, contentY: y, adapter: self, reveals: reveals, height: height, plannedWidth: plannedWidth, replan: replan,
-                                   isStreaming: identity == streamingIdentity, pins: pins)
+                                   isStreaming: followsToTheEnd || identity == streamingIdentity, pins: pins)
             next[identity] = row
             return row
         }
