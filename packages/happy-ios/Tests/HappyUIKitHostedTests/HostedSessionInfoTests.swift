@@ -207,47 +207,14 @@ final class HostedSessionInfoTests: XCTestCase {
         XCTAssertGreaterThan(firstFrame.minY, name.maxY)
         XCTAssertEqual(info.header.name.text, "Session info screen")
 
-        // The chat's permission mode, once in its header's More menu, is a
-        // row here: the current mode as its value, a native menu of all of
-        // them, and a pick kept as the composer keeps one.
+        // A Happy CLI chat has no permission UI (this fork): every message
+        // runs in the agent's never-ask mode, so its info has no row for it.
         func permissionRow() -> MenuRowButton? {
             subviews(MenuRowButton.self, in: info.view).first { $0.accessibilityIdentifier == "profile-permission-mode" }
         }
-        let rowShown = try await until { permissionRow() != nil }
-        XCTAssertTrue(rowShown, "no permission mode on the session's info")
-        let row = try XCTUnwrap(permissionRow())
-        XCTAssertTrue(row.showsMenuAsPrimaryAction)
-        XCTAssertGreaterThan(row.bounds.height, 40)
-        XCTAssertGreaterThan(row.bounds.width, 300)
-        for (style, name) in [(UIUserInterfaceStyle.light, "light"), (.dark, "dark")] {
-            window.overrideUserInterfaceStyle = style
-            try await Task.sleep(for: .seconds(1))
-            keep(window, "legacy-info-permission-\(name)")
-        }
-        window.overrideUserInterfaceStyle = .unspecified
-        let menu = try XCTUnwrap(row.menuFor?())
-        XCTAssertEqual(menu.identifier.rawValue, "chat-permissions")
-        let actions = menu.children.compactMap { $0 as? UIAction }
-        // Every mode the chat's composer offers, none dropped.
-        let offered = try XCTUnwrap(chat.permissionChoice).menu.sections.flatMap(\.options).map(\.key)
-        XCTAssertEqual(actions.compactMap(\.accessibilityIdentifier), offered)
-        XCTAssertTrue(offered.contains("plan"))
-        let plan = try XCTUnwrap(actions.first { $0.accessibilityIdentifier == "plan" })
-        XCTAssertEqual(plan.state, .off)
-        let button = UIButton(type: .system)
-        button.addAction(plan, for: .touchUpInside)
-        button.sendActions(for: .touchUpInside)
-        let store = account.store
-        let sessionId = Self.sessionId
-        var stored: String?
-        for _ in 0..<300 where stored != "plan" {
-            stored = try await Task.detached { try store.composerState(sessionId: sessionId).values["permissionMode"]?.stringValue }.value
-            if stored != "plan" { try await Task.sleep(for: .milliseconds(10)) }
-        }
-        XCTAssertEqual(stored, "plan", "the pick isn't kept as the composer's")
-        let ticked = try XCTUnwrap(row.menuFor?()).children.compactMap { $0 as? UIAction }.filter { $0.state == .on }.compactMap(\.accessibilityIdentifier)
-        XCTAssertEqual(ticked, ["plan"])
-        XCTAssertEqual(row.accessibilityValue, plan.title, "the row shows the pick")
+        try await Task.sleep(for: .milliseconds(300))
+        XCTAssertNil(permissionRow())
+        XCTAssertNil(chat.permissionChoice)
         await controller.signOut()
     }
 

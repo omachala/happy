@@ -11,6 +11,8 @@ public enum AgentDefaults {
         case gemini
         case openclaw
         case agy
+        /// opencode against the local Qwen (the fork's `happy opencode`).
+        case opencode
 
         /// utils/harnessCatalog.ts `HARNESS_NAMES`.
         public var name: String {
@@ -20,6 +22,7 @@ public enum AgentDefaults {
             case .gemini: "Gemini"
             case .openclaw: "OpenClaw"
             case .agy: "Antigravity"
+            case .opencode: "opencode"
             }
         }
 
@@ -67,22 +70,23 @@ public enum AgentDefaults {
 
     /// `auto` first shipped in this happy-cli.
     public static let cliVersionWithAuto = "1.2.1-beta.2"
-    /// Opus 5.5 needs this happy-cli or newer.
-    public static let cliVersionWithOpus55 = "1.2.6-beta.0"
-    static let claudeModelBeforeOpus55 = "claude-opus-5"
 
+    /// The fork (sync/agentDefaults.ts): every agent starts in its own
+    /// never-ask mode, Claude on Opus 5.5 at high effort. Opus 5.5 is not
+    /// gated on the CLI's version: the fork's CLI runs it but reports 1.2.0.
     static func codeDefaults(_ agent: Agent) -> Config {
         switch agent {
-        case .claude: Config(permissionMode: "auto", modelMode: "claude-opus-5-5", effortLevel: "medium")
-        case .codex: Config(permissionMode: "auto", modelMode: "gpt-6.1-sol", effortLevel: "medium")
-        case .gemini: Config(permissionMode: "default", modelMode: "gemini-2.5-pro", effortLevel: nil)
-        case .openclaw: Config(permissionMode: "default", modelMode: "default", effortLevel: nil)
-        case .agy: Config(permissionMode: "default", modelMode: "Gemini 3.8 Flash", effortLevel: "medium")
+        case .claude: Config(permissionMode: "bypassPermissions", modelMode: "claude-opus-5-5", effortLevel: "high")
+        case .codex: Config(permissionMode: "yolo", modelMode: "gpt-6.1-sol", effortLevel: "medium")
+        case .gemini: Config(permissionMode: "yolo", modelMode: "gemini-2.5-pro", effortLevel: nil)
+        case .openclaw: Config(permissionMode: "bypassPermissions", modelMode: "default", effortLevel: nil)
+        case .agy: Config(permissionMode: "bypassPermissions", modelMode: "Gemini 3.8 Flash", effortLevel: "medium")
+        case .opencode: Config(permissionMode: "bypassPermissions", modelMode: OpenCode.modelKey, effortLevel: nil)
         }
     }
 
     /// The code defaults for the CLI that will run them: an older CLI gets
-    /// `default` instead of `auto`, and an unknown one keeps the old Opus.
+    /// `default` instead of `auto`.
     public static func codeDefaults(_ agent: Agent, cliVersion: String?) -> Config {
         var config = codeDefaults(agent)
         if config.permissionMode == "auto", let cliVersion {
@@ -90,14 +94,60 @@ public enum AgentDefaults {
                 config.permissionMode = "default"
             }
         }
-        if agent == .claude, config.modelMode == "claude-opus-5-5" {
-            if let cliVersion, SemanticVersion.isWellFormed(cliVersion), SemanticVersion.compare(cliVersion, cliVersionWithOpus55) >= 0 {
-                // Supported.
-            } else {
-                config.modelMode = claudeModelBeforeOpus55
-            }
-        }
         return config
+    }
+
+    /// The permission every Happy CLI message carries, whatever was picked
+    /// (the fork's `resolveMessageModeMeta`): the agent's never-ask mode.
+    /// Happy Agent sessions keep their own.
+    public static func forcedPermissionMode(_ agent: Agent) -> String {
+        switch agent {
+        case .claude, .openclaw, .opencode: "bypassPermissions"
+        case .codex, .gemini, .agy: "yolo"
+        }
+    }
+
+    /// opencode's one model: the local Qwen on Cara.
+    public enum OpenCode {
+        public static let modelKey = "cara/qwen3.8-27b"
+        public static let models = [Option(modelKey, "qwen", "Cara · 32K")]
+
+        /// `shortenOpenCodeModelName`: a known key's name, else the model
+        /// without its `provider/`, cut to its leading letters, lowercased
+        /// (`llama4-70b` → "llama").
+        public static func shortName(key: String, name: String) -> String {
+            if let known = models.first(where: { $0.key == key }) { return known.name }
+            let bare = name.split(separator: "/", omittingEmptySubsequences: false).last.map(String.init) ?? name
+            let letters = bare.prefix(while: { $0.isASCII && $0.isLetter })
+            return letters.isEmpty ? bare : letters.lowercased()
+        }
+    }
+
+    // MARK: Claude models
+
+    /// `humanizeClaudeModelKey`: "claude-opus-5" → "opus 5",
+    /// "claude-fable-5-1" → "fable 5.1"; anything else as it is.
+    public static func humanizeClaudeModelKey(_ key: String) -> String {
+        guard let match = key.wholeMatch(of: /claude-([a-z]+)-([0-9]+)(?:-([0-9]+))?/) else { return key }
+        let version = match.3.map { "\(match.2).\($0)" } ?? String(match.2)
+        return "\(match.1) \(version)"
+    }
+
+    /// `getClaudeFamilyKeyFromModelId`: the picker key naming exactly the
+    /// model a raw Anthropic id is (vendor prefix, `[1m]`, `:N`, `-vN` and a
+    /// dated snapshot stripped), or nil. Version-exact on purpose:
+    /// `claude-opus-5` is not Opus 5.5.
+    public static func claudeModelKey(fromModelId rawModel: String?) -> String? {
+        guard let rawModel, !rawModel.isEmpty else { return nil }
+        var id = rawModel.lowercased()
+        if let range = id.range(of: "claude-"), range.lowerBound > id.startIndex {
+            id = String(id[range.lowerBound...])
+        }
+        if id.hasSuffix("[1m]") { id.removeLast(4) }
+        if let match = id.firstMatch(of: /:[0-9]+$/) { id.removeSubrange(match.range) }
+        if let match = id.firstMatch(of: /-v[0-9]+$/) { id.removeSubrange(match.range) }
+        if let match = id.firstMatch(of: /-[0-9]{8}$/) { id.removeSubrange(match.range) }
+        return hardcodedModels(.claude).contains(where: { $0.key == id }) ? id : nil
     }
 
     // MARK: Overrides
@@ -202,19 +252,24 @@ public enum AgentDefaults {
                 Option("default", "Default", "agy sandbox"),
                 Option("bypassPermissions", "Yolo", "never asks"),
             ]
+        case .opencode:
+            [
+                Option("default", "Default", "harness setting"),
+                Option("bypassPermissions", "Yolo", "never asks"),
+            ]
         }
     }
 
     static func hardcodedModels(_ agent: Agent) -> [Option] {
         switch agent {
         case .claude:
+            // The fork's list: each key is the exact `--model` sent, and
+            // the name says that version. No "default" and no aliases.
             [
-                Option("claude-fable-5-1", "Fable 5.1", "1M context"),
-                Option("claude-fable-5", "Fable 5"),
-                Option("claude-opus-5-5", "Opus 5.5"),
-                Option("claude-opus-5", "Opus 5"),
-                Option("claude-sonnet-5-5", "Sonnet 5.5"),
-                Option("claude-haiku-5-5", "Haiku 5.5"),
+                Option("claude-fable-5-1", "fable 5.1", "latest & most capable"),
+                Option("claude-opus-5-5", "opus 5.5"),
+                Option("claude-sonnet-5-5", "sonnet 5.5"),
+                Option("claude-haiku-4-5", "haiku 4.5"),
             ]
         case .codex:
             [
@@ -244,6 +299,8 @@ public enum AgentDefaults {
                 Option("Claude Opus 4.6 (Thinking)", "Claude Opus 4.6 (Thinking)"),
                 Option("GPT-OSS 120B (Medium)", "GPT-OSS 120B (Medium)"),
             ]
+        case .opencode:
+            OpenCode.models
         }
     }
 
@@ -254,7 +311,7 @@ public enum AgentDefaults {
         let key = agent == .claude ? configured.map { retiredClaudeModelModes[$0] ?? $0 } : configured
         if agent == .claude || agent == .codex || agent == .agy,
            let key, key != "default", !models.contains(where: { $0.key == key }) {
-            let name = agent == .claude && key == "claude-sonnet-5" ? "Sonnet 5" : key
+            let name = agent == .claude ? humanizeClaudeModelKey(key) : key
             models.append(Option(key, name, agent == .codex ? "custom model" : "saved model"))
         }
         return models.filter { $0.key != "default" }
@@ -279,7 +336,7 @@ public enum AgentDefaults {
             keys = byModel[model] ?? ["low", "medium", "high", "xhigh"]
         case .agy:
             keys = model == "Gemini 3.8 Flash" ? ["low", "medium", "high"] : []
-        case .gemini, .openclaw:
+        case .gemini, .openclaw, .opencode:
             keys = []
         }
         return keys.map { Option($0, $0 == "xhigh" ? "xHigh" : $0.prefix(1).uppercased() + $0.dropFirst()) }

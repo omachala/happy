@@ -57,7 +57,7 @@ public enum SessionComposerRules {
     public static func canUseAttachments(starting agent: NewSessionDraft.Agent) -> Bool {
         switch agent {
         case .claude, .codex, .rig: true
-        case .gemini, .openclaw, .agy: false
+        case .gemini, .openclaw, .agy, .opencode: false
         }
     }
 }
@@ -421,6 +421,15 @@ public struct ComposerChipSet: Equatable, Sendable {
         public var key: String
         public var label: String
         public var isDisabled: Bool
+        /// A grey line under the label (a model's description).
+        public var subtitle: String?
+
+        public init(key: String, label: String, isDisabled: Bool, subtitle: String? = nil) {
+            self.key = key
+            self.label = label
+            self.isDisabled = isDisabled
+            self.subtitle = subtitle
+        }
     }
 
     public struct Section: Equatable, Sendable {
@@ -487,11 +496,16 @@ public struct ComposerChipSet: Equatable, Sendable {
     public var settings: [SettingsSection]
 
     /// `record` nil is a chat that doesn't exist yet: nothing can be picked.
+    ///
+    /// A Happy CLI session (not Happy Agent's) has no permission chip or
+    /// menu at all: every message runs in the agent's never-ask mode
+    /// (`AgentDefaults.forcedPermissionMode`). Its model menu is one list,
+    /// each model's description under its name (the fork's picker).
     public init(modes: ComposerModes, record: SessionRecord?, titles: Titles) {
         let metadata = record?.metadata
         let flavor = metadata?["flavor"]?.stringValue
         let isRig = RigCatalog.isRig(metadata)
-        let canPickPermission = record != nil && RigCatalog.isPermissionSelectionEnabled(metadata)
+        let canPickPermission = isRig && record != nil && RigCatalog.isPermissionSelectionEnabled(metadata)
         let canPickModel = record != nil && RigCatalog.isModelSelectionEnabled(metadata)
         let canPickEffort = record != nil && RigCatalog.isReasoningSelectionEnabled(metadata)
 
@@ -527,12 +541,14 @@ public struct ComposerChipSet: Equatable, Sendable {
         model = Chip(
             label: ModelModeOptions.truncateModelLabel(modelName),
             accessibilityLabel: titles.model,
-            sections: canOpenModels ? ModelModeOptions.groupByProvider(modes.availableModels).map { group in
+            sections: !canOpenModels ? nil : isRig ? ModelModeOptions.groupByProvider(modes.availableModels).map { group in
                 Section(
                     title: group.title ?? titles.model,
                     options: group.models.map { Option(key: $0.key, label: $0.name, isDisabled: $0.isDisabled) }
                 )
-            } : nil,
+            } : [Section(title: nil, options: modes.availableModels.map {
+                Option(key: $0.key, label: $0.name, isDisabled: $0.isDisabled, subtitle: $0.description)
+            })],
             selectedKey: modes.modelMode?.key
         )
 
@@ -549,7 +565,8 @@ public struct ComposerChipSet: Equatable, Sendable {
             effort = nil
         }
 
-        showsSettings = canPickPermission
+        // The wide composer's gear: wherever something can be picked.
+        showsSettings = isRig ? canPickPermission : record != nil && (model.sections != nil || effort != nil)
         var settings: [SettingsSection] = []
         if let permission, let options = permission.sections?.first?.options {
             settings.append(SettingsSection(
@@ -558,7 +575,9 @@ public struct ComposerChipSet: Equatable, Sendable {
         }
         for group in model.sections ?? [] {
             settings.append(SettingsSection(
-                kind: .model, title: group.title ?? titles.model, systemImage: "cube", options: group.options, selectedKey: model.selectedKey
+                kind: .model, title: group.title ?? titles.model, systemImage: "cube",
+                options: group.options.map { Option(key: $0.key, label: $0.label, isDisabled: $0.isDisabled) },
+                selectedKey: model.selectedKey
             ))
         }
         if let effort, let options = effort.sections?.first?.options {

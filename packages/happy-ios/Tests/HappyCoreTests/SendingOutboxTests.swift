@@ -133,12 +133,13 @@ final class SendingOutboxTests: XCTestCase, @unchecked Sendable {
         session.metadata = .object(["version": .string("1.2.0")])
         session.metadataVersion += 1
         try store.upsertSessions([session])
+        // The fork never refuses: the pick is overridden by the never-ask
+        // mode, which every CLI parses.
         try sender.saveComposerState(ComposerStateRecord(sessionId: "s", values: .object(["permissionMode": .string("auto")])))
-        do {
-            _ = try await sender.send(OutgoingMessage(text: "refused"), sessionId: "s")
-            XCTFail("expected refusal")
-        } catch is UnsupportedPermissionModeError {}
-        XCTAssertEqual(try store.pendingOutbox().count, 1)
+        let forced = try await sender.send(OutgoingMessage(text: "forced"), sessionId: "s")
+        XCTAssertEqual(try store.outbox(localId: forced)?.payload["meta"]?["permissionMode"], .string("bypassPermissions"))
+        XCTAssertEqual(try store.pendingOutbox().count, 2)
+        try await sender.discard(localId: forced)
         try await sender.discard(localId: id)
         XCTAssertTrue(try store.pendingOutbox().isEmpty)
         await engine.stop()

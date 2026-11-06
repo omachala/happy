@@ -48,6 +48,10 @@ public struct ChatReducer: Sendable {
     private var settled: Set<String> = []
     private var usageTime: Int64 = .min
     private var todosTime: Int64 = .min
+    /// The newest "Context was reset" (`/clear`): nothing before it is
+    /// shown, and older records arriving later are dropped (the fork's
+    /// reducer.ts `resetAt`). The server keeps everything.
+    public private(set) var resetAt: Int64?
     /// The newest model usage, including usage-only service records.
     public private(set) var usage: ChatUsage?
     /// The newest validated todos, updated only after a successful result.
@@ -73,6 +77,15 @@ public struct ChatReducer: Sendable {
         settled = []
         var ready = false
         var fresh: [NormalizedChatRecord] = []
+        var records = records
+        let resets = records.lazy.filter { $0.parent == nil && $0.body == .event(Self.contextReset) }.map(\.createdAt)
+        if let newest = resets.max(), newest > (resetAt ?? .min) {
+            resetAt = newest
+            wipe(before: newest)
+        }
+        if let resetAt {
+            records.removeAll { $0.createdAt < resetAt }
+        }
         for var record in records {
             if case .user = record.body, let local = record.localId, let row = localIds[local] {
                 join(serverId: record.id, rowId: row)
@@ -93,7 +106,7 @@ public struct ChatReducer: Sendable {
                 case .ready: ready = true
                 case .message("Turn started"): break
                 default:
-                    if event == .message("Context was reset") {
+                    if event == Self.contextReset {
                         if record.createdAt > todosTime {
                             todos = .array([])
                             todosTime = record.createdAt
@@ -367,6 +380,11 @@ public struct ChatReducer: Sendable {
             return
         }
         let time = ChatNormalizer.safeTime(value["createdAt"]) ?? 0
+        // A request from before the context was reset stays hidden with
+        // its call.
+        if let resetAt, time < resetAt, tools[call] == nil {
+            return
+        }
         let ended = ChatNormalizer.safeTime(value["completedAt"]) ?? time
         let permission = ToolPermission(
             id: id, status: status, reason: value["reason"]?.stringValue, mode: value["mode"]?.stringValue,
@@ -529,6 +547,34 @@ public struct ChatReducer: Sendable {
                 positions[sorted[i].id] = i
             }
         }
+    }
+
+    static let contextReset = AgentEvent.message("Context was reset")
+
+    /// Everything from before `time` leaves the view, with the joins that
+    /// pointed at it; what came after stays, joins and all.
+    private mutating func wipe(before time: Int64) {
+        let gone = Set(rows.values.lazy.filter { $0.createdAt < time }.map(\.id))
+        for id in gone {
+            rows.removeValue(forKey: id)
+        }
+        tools = tools.filter { !gone.contains($0.value) }
+        sidechainTools = sidechainTools.filter { !gone.contains($0.value) }
+        toolOwners = toolOwners.filter { !gone.contains($0.value) }
+        permissions = permissions.filter { $0.value.createdAt >= time }
+        unmatchedResults = unmatchedResults.filter { $0.value.time >= time }
+        orphanChildren = orphanChildren.compactMapValues { waiting in
+            let kept = waiting.subtracting(gone)
+            return kept.isEmpty ? nil : kept
+        }
+        parents = parents.filter { !gone.contains($0.key) && !gone.contains($0.value) }
+        children = children.filter { !gone.contains($0.key) }.mapValues { $0.filter { !gone.contains($0) } }
+        serverIds = serverIds.filter { !gone.contains($0.value) }
+        localIds = localIds.filter { !gone.contains($0.value) }
+        // Rebuilt from what is left (`refreshSorted` with nothing sorted).
+        sorted = []
+        positions = [:]
+        changed.formUnion(rows.keys)
     }
 
     private mutating func resetUsage(at time: Int64) {

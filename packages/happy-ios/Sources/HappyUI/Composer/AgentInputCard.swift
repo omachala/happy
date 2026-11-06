@@ -53,6 +53,14 @@ public enum AgentInputControl: Sendable {
     }
 }
 
+/// What the round button draws for Stop.
+public enum AgentInputStopGlyph: Sendable {
+    /// happy-app's rounded square.
+    case square
+    /// The fork's Octicons `x` (a Happy CLI chat).
+    case cross
+}
+
 /// How the round button is painted.
 public enum AgentInputPrimaryStyle: Sendable {
     /// AgentInput.tsx's chat composer: send and stop on `surfaceHighest`,
@@ -176,6 +184,9 @@ public struct AgentInputChipConfiguration: Equatable, Sendable {
     /// A usage ring before the label (`ChipRingLayout`): what is left of the
     /// window the selected account warns about. Nil draws none.
     public var ring: Ring?
+    /// The label in `success` green: the agent confirmed it runs what the
+    /// chip shows (the fork's model chip, `ModelConfirmation`).
+    public var isConfirmed: Bool
 
     public struct Ring: Equatable, Sendable {
         public var left: Int
@@ -187,12 +198,13 @@ public struct AgentInputChipConfiguration: Equatable, Sendable {
         }
     }
 
-    public init(content: Content, accessibilityLabel: String, menu: AgentInputMenu?, opensPicker: Bool = false, ring: Ring? = nil) {
+    public init(content: Content, accessibilityLabel: String, menu: AgentInputMenu?, opensPicker: Bool = false, ring: Ring? = nil, isConfirmed: Bool = false) {
         self.content = content
         self.accessibilityLabel = accessibilityLabel
         self.menu = menu
         self.opensPicker = opensPicker
         self.ring = ring
+        self.isConfirmed = isConfirmed
     }
 }
 
@@ -265,6 +277,12 @@ public struct AgentInputCardConfiguration: Equatable, Sendable {
     /// `compact`). Its owner decides from `restingHeight(fitting:)`. The
     /// flat panel ignores it.
     public var compact: Bool
+    /// A Happy CLI chat's trash after add (the fork's kill-and-respawn);
+    /// the delegate hears `agentInputCardDidPressTrash`. The full card
+    /// only: not the one-row compact card, not the flat panel.
+    public var showsTrash: Bool
+    /// What Stop draws.
+    public var stopGlyph: AgentInputStopGlyph
 
     public init(
         placeholder: String,
@@ -286,7 +304,9 @@ public struct AgentInputCardConfiguration: Equatable, Sendable {
         zenMode: Bool = false,
         desktop: AgentInputDesktopConfiguration? = nil,
         showsExpand: Bool = false,
-        compact: Bool = false
+        compact: Bool = false,
+        showsTrash: Bool = false,
+        stopGlyph: AgentInputStopGlyph = .square
     ) {
         self.placeholder = placeholder
         self.isEditable = isEditable
@@ -308,6 +328,8 @@ public struct AgentInputCardConfiguration: Equatable, Sendable {
         self.desktop = desktop
         self.showsExpand = showsExpand
         self.compact = compact
+        self.showsTrash = showsTrash
+        self.stopGlyph = stopGlyph
     }
 }
 
@@ -346,6 +368,8 @@ public protocol AgentInputCardDelegate: AnyObject {
     func agentInputCardDidRefuse(_ card: AgentInputCardView, control: AgentInputControl)
     /// The full-screen editor's button (`showsExpand`).
     func agentInputCardDidPressExpand(_ card: AgentInputCardView)
+    /// The trash (`showsTrash`).
+    func agentInputCardDidPressTrash(_ card: AgentInputCardView)
 }
 
 extension AgentInputCardDelegate {
@@ -365,6 +389,7 @@ extension AgentInputCardDelegate {
     public func agentInputCardShouldInsertTab(_ card: AgentInputCardView) -> Bool { true }
     public func agentInputCardDidRefuse(_ card: AgentInputCardView, control: AgentInputControl) {}
     public func agentInputCardDidPressExpand(_ card: AgentInputCardView) {}
+    public func agentInputCardDidPressTrash(_ card: AgentInputCardView) {}
 }
 
 /// The card. Give it a frame from `height(fitting:)`; it lays itself out.
@@ -406,6 +431,7 @@ public final class AgentInputCardView: UIView {
     private let addButton = ComposerIconButton(icon: .ionicons("add"), size: MobileComposerMetrics.mobile.addIconSize)
     /// The "+", for what it opens to sit over (the iPad's attachment card).
     var addControl: UIView { addButton }
+    private let trashButton = ComposerIconButton(icon: .ionicons("trash-outline"), size: AgentInputCardLayout.Metrics.trashIconSize)
     private let middle = UIView()
     private let permissionChip = ComposerChipButton(chip: .permission)
     private let modelChip = ComposerChipButton(chip: .model)
@@ -545,6 +571,11 @@ public final class AgentInputCardView: UIView {
         addButton.accessibilityLabel = Strings.Composer.addPhoto
         addButton.addTarget(self, action: #selector(addTapped), for: .touchUpInside)
         actionsGroup.addSubview(addButton)
+        trashButton.isHidden = true
+        trashButton.accessibilityLabel = Strings.ChatRespawn.trash
+        trashButton.accessibilityIdentifier = "composer-trash"
+        trashButton.addTarget(self, action: #selector(trashTapped), for: .touchUpInside)
+        actionsGroup.addSubview(trashButton)
 
         middle.clipsToBounds = true
         actionsGroup.addSubview(middle)
@@ -1168,7 +1199,8 @@ public final class AgentInputCardView: UIView {
             separator: config.effort == nil || !measuresChips ? .zero : separator.sizeThatFits(.zero),
             zenMode: config.zenMode,
             offersExpand: config.showsExpand,
-            compact: compact
+            compact: compact,
+            showsTrash: config.showsTrash
         )
     }
 
@@ -1224,6 +1256,10 @@ public final class AgentInputCardView: UIView {
         if let add = layout.add {
             addButton.setLayoutFrame(add)
         }
+        trashButton.isHidden = layout.trash == nil || configuration.desktop != nil
+        if let trash = layout.trash {
+            trashButton.setLayoutFrame(trash)
+        }
         optionsButton.isHidden = layout.options == nil
         if let options = layout.options {
             optionsButton.setLayoutFrame(options)
@@ -1253,6 +1289,7 @@ public final class AgentInputCardView: UIView {
         layer.shadowPath = nil
         expandButton.isHidden = true
         optionsButton.isHidden = true
+        trashButton.isHidden = true
         setTextTrailingInset(0)
         if let strip = layout.attachments {
             attachmentStrip.isHidden = false
@@ -1364,7 +1401,8 @@ public final class AgentInputCardView: UIView {
             action: config.primaryAction,
             style: config.primaryStyle,
             busy: config.isPrimaryBusy,
-            accessibilityLabel: config.primaryAccessibilityLabel
+            accessibilityLabel: config.primaryAccessibilityLabel,
+            stopGlyph: config.stopGlyph
         )
         if let desktop = config.desktop {
             desktopControls.configure(
@@ -1386,6 +1424,7 @@ public final class AgentInputCardView: UIView {
             || previous.effort != config.effort
             || previous.zenMode != config.zenMode
             || previous.compact != config.compact
+            || previous.showsTrash != config.showsTrash
             || Self.panelShape(previous.desktop) != Self.panelShape(config.desktop) {
             // Chips that come with the session's record, the panel: the
             // card takes its new height at once. What is typed, and a
@@ -1394,7 +1433,8 @@ public final class AgentInputCardView: UIView {
                 && previous.inputMinHeight == config.inputMinHeight && previous.showsAdd == config.showsAdd
                 && previous.permission == config.permission && previous.model == config.model
                 && previous.effort == config.effort && previous.zenMode == config.zenMode
-                && previous.compact == config.compact && Self.panelShape(previous.desktop) == Self.panelShape(config.desktop)
+                && previous.compact == config.compact && previous.showsTrash == config.showsTrash
+                && Self.panelShape(previous.desktop) == Self.panelShape(config.desktop)
             reportHeightChange(animated: picturesOnly && window != nil)
             setNeedsLayout()
         }
@@ -1481,6 +1521,10 @@ public final class AgentInputCardView: UIView {
 
     @objc private func primaryTapped() {
         delegate?.agentInputCardDidPressPrimary(self)
+    }
+
+    @objc private func trashTapped() {
+        delegate?.agentInputCardDidPressTrash(self)
     }
 
     @objc private func expandTapped() {
@@ -1688,7 +1732,8 @@ final class ComposerChipButton: UIButton {
     private func renderLabel() {
         guard case .label(let text) = chipConfiguration?.content else { return }
         let style = textScale.map { TextStyles.composerChip.scaled($0) } ?? TextStyles.composerChip
-        label.attributedText = style.attributedString(text, color: UIColor(Palette.text), lineBreakMode: .byTruncatingTail)
+        let color = chipConfiguration?.isConfirmed == true ? Palette.success : Palette.text
+        label.attributedText = style.attributedString(text, color: UIColor(color), lineBreakMode: .byTruncatingTail)
     }
 
     /// A refusing chip takes the press itself (RefusableControl's blocker
@@ -1815,6 +1860,11 @@ final class ComposerPrimaryButton: ComposerPressableButton {
     private let iconView = IconView(size: AgentInputCardLayout.Metrics.primaryIconSize)
     /// Stop's rounded square, in place of the icon.
     let stopView = StopGlyphView(glyphSize: AgentInputCardLayout.Metrics.primaryIconSize)
+    /// Stop's cross, for `AgentInputStopGlyph.cross`.
+    let crossView = IconView(.octicons("x"), size: AgentInputCardLayout.Metrics.primaryIconSize, tint: Palette.text)
+    private var stopGlyph: AgentInputStopGlyph = .square
+    /// What Stop draws now.
+    private var stopGlyphView: UIView { stopGlyph == .cross ? crossView : stopView }
     private let spinner = UIActivityIndicatorView(style: .medium)
     private var action: AgentInputPrimaryAction = .idle
     private var style: AgentInputPrimaryStyle = .standard
@@ -1834,6 +1884,8 @@ final class ComposerPrimaryButton: ComposerPressableButton {
         addSubview(iconView)
         stopView.isHidden = true
         addSubview(stopView)
+        crossView.isHidden = true
+        addSubview(crossView)
         spinner.hidesWhenStopped = true
         addSubview(spinner)
         isAccessibilityElement = true
@@ -1848,10 +1900,12 @@ final class ComposerPrimaryButton: ComposerPressableButton {
         fatalError("init(coder:) is not supported")
     }
 
-    func configure(action: AgentInputPrimaryAction, style: AgentInputPrimaryStyle, busy: Bool, accessibilityLabel: String?) {
+    func configure(action: AgentInputPrimaryAction, style: AgentInputPrimaryStyle, busy: Bool, accessibilityLabel: String?, stopGlyph: AgentInputStopGlyph = .square) {
         // Send to stop and back is the one button changing its glyph, so
         // the glyph changes in place: the old one shrinks away as the new
         // one grows in.
+        let previousStop = stopGlyphView
+        self.stopGlyph = stopGlyph
         let wasStop = self.action == .stop
         let glyphChanges = configured && !busy && !self.busy && wasStop != (action == .stop)
         configured = true
@@ -1882,7 +1936,7 @@ final class ComposerPrimaryButton: ComposerPressableButton {
         }
         self.accessibilityLabel = accessibilityLabel ?? (action == .stop ? Strings.Composer.stop : Strings.Composer.send)
         if glyphChanges, window != nil {
-            showGlyph(from: wasStop ? stopView : iconView)
+            showGlyph(from: wasStop ? previousStop : iconView)
         } else {
             showGlyph(from: nil)
             applyColors()
@@ -1893,9 +1947,9 @@ final class ComposerPrimaryButton: ComposerPressableButton {
     /// glyph going away, shrinks and fades out as the new one grows in,
     /// and the fill changes with them.
     private func showGlyph(from old: UIView?) {
-        let new: UIView = action == .stop ? stopView : iconView
+        let new: UIView = action == .stop ? stopGlyphView : iconView
         guard let old, old !== new else {
-            for glyph in [iconView, stopView] {
+            for glyph in [iconView, stopView, crossView] as [UIView] {
                 glyph.layer.removeAllAnimations()
                 glyph.alpha = 1
                 glyph.transform = .identity
@@ -1916,7 +1970,7 @@ final class ComposerPrimaryButton: ComposerPressableButton {
             self.applyColors()
         } completion: { _ in
             // A later change may have made the old glyph the shown one again.
-            guard old !== (self.action == .stop ? self.stopView : self.iconView) else { return }
+            guard old !== (self.action == .stop ? self.stopGlyphView : self.iconView) else { return }
             old.isHidden = true
             old.alpha = 1
             old.transform = .identity
@@ -1933,6 +1987,7 @@ final class ComposerPrimaryButton: ComposerPressableButton {
             backgroundColor = UIColor(filled ? Palette.composerNewSessionPrimaryFill : Palette.surfaceHighest)
             iconView.tintColor = UIColor(filled ? Palette.composerNewSessionPrimaryIcon : Palette.textSecondary)
             stopView.tintColor = iconView.tintColor
+            crossView.tintColor = iconView.tintColor
             spinner.color = UIColor(Palette.textSecondary)
             return
         }
@@ -1943,6 +1998,7 @@ final class ComposerPrimaryButton: ComposerPressableButton {
             // Send's fill and tint: the one button, its glyph changed.
             backgroundColor = UIColor(Palette.surfaceHighest)
             stopView.tintColor = UIColor(Palette.text)
+            crossView.tintColor = UIColor(Palette.text)
         case .blocked:
             backgroundColor = UIColor(Palette.surfaceHigh)
             layer.borderWidth = 1
@@ -1969,7 +2025,7 @@ final class ComposerPrimaryButton: ComposerPressableButton {
         flashOverlay.frame = bounds
         // Bounds and centre, not frame: a glyph may be mid-scale.
         let center = CGPoint(x: bounds.midX, y: bounds.midY)
-        for glyph in [iconView, stopView] as [UIView] {
+        for glyph in [iconView, stopView, crossView] as [UIView] {
             glyph.bounds = CGRect(origin: .zero, size: bounds.size)
             glyph.center = center
         }

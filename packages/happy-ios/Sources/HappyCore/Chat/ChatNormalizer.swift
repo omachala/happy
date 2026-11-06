@@ -47,6 +47,15 @@ public struct NormalizedChatRecord: Equatable, Sendable {
 
 /// Decodes only current producer formats, after happy-app's typesRaw.ts.
 public enum ChatNormalizer {
+    /// Older CLIs leaked a Claude Code skill file into the chat as agent
+    /// text; Claude Code always starts it with this (the fork's typesRaw.ts).
+    static let skillBodyPrefix = "Base directory for this skill:"
+
+    /// An agent text that is a skill file's body, left-trimmed: dropped.
+    static func isLeakedSkillBody(_ text: String) -> Bool {
+        text.drop(while: { $0.isWhitespace || $0.isNewline }).hasPrefix(skillBodyPrefix)
+    }
+
     /// Normalizes stored plaintext. Undecryptable records remain visible as
     /// unsupported placeholders. Only recognized control records return nil.
     public static func normalize(_ record: MessageRecord) -> NormalizedChatRecord? {
@@ -125,6 +134,9 @@ public enum ChatNormalizer {
             case .text(let text, let thinking):
                 let visible = stripTaskNotifications(text)
                 if visible != text && visible.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    return nil
+                }
+                if envelope.role != .user, isLeakedSkillBody(text) {
                     return nil
                 }
                 record.body =

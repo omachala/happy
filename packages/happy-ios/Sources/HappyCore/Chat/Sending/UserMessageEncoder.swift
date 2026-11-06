@@ -144,29 +144,25 @@ public enum UserMessageEncoder {
         let agent = AgentDefaults.Agent(rawValue: flavor) ?? .claude
         let overrides = settings?["agentDefaultOverrides"]?.objectValue ?? [:]
         let version = m["version"]?.stringValue.flatMap { $0.isEmpty ? nil : $0 }
-        let concrete = flavor == "codex" || flavor == "agy"
-        var permission = c["permissionMode"]?.stringValue
-            ?? AgentDefaults.override(overrides, agent, .permissionMode)
-        var model = c["modelMode"]?.stringValue
+        // The fork (messageMeta.ts): every Happy CLI message runs in the
+        // agent's never-ask mode, whatever the session, the settings or an
+        // auto-entered plan mode say. Model and effort are the session's
+        // pick, else the settings' override, else the default, so what the
+        // chips show is what is sent. With nothing picked, a model the CLI
+        // reports it runs (a `/model` typed in the terminal) stands for the
+        // default, so a send doesn't switch it back.
+        let code = AgentDefaults.codeDefaults(agent, cliVersion: version)
+        let observed = ModelModeOptions.observedModelKey(metadata: m)
+        let permission = AgentDefaults.forcedPermissionMode(agent)
+        let model = c["modelMode"]?.stringValue
             ?? AgentDefaults.override(overrides, agent, .modelMode)
-        var effort = c["effortLevel"]?.stringValue
+            ?? (agent == .claude ? observed : nil)
+            ?? code.modelMode
+        let effort = c["effortLevel"]?.stringValue
             ?? AgentDefaults.override(overrides, agent, .effortLevel)
-        if concrete {
-            let defaults = AgentDefaults.resolve(overrides, agent, cliVersion: version)
-            permission = permission ?? defaults.permissionMode
-            model = model ?? defaults.modelMode
-            effort = effort ?? defaults.effortLevel
-        }
-        if let selected = permission {
-            let retired = AgentDefaults.retirePermissionMode(selected)
-            guard AgentDefaults.permissionModeSupportedByCli(retired, cliVersion: version) else {
-                throw UnsupportedPermissionModeError(mode: retired, cliVersion: version ?? "unknown")
-            }
-            result["permissionMode"] = .string(retired)
-        }
-        if let model {
-            result["model"] = model == "default" ? .null : .string(model)
-        }
+            ?? code.effortLevel
+        result["permissionMode"] = .string(permission)
+        result["model"] = model == "default" ? .null : .string(model)
         if let effort {
             result["effort"] = .string(effort)
         }

@@ -133,7 +133,11 @@ public actor LegacySyncEngine {
 
     // MARK: Lifecycle
 
-    /// Launch and every socket (re)connect: pull everything that changed.
+    /// Launch and every socket (re)connect: pull everything that changed,
+    /// and the messages of every chat on screen (the fork's reconnect
+    /// refetch), so what was said while the socket was down shows in the
+    /// open chat even before the session list says its seq moved. Only
+    /// message rows are written: a session's live `thinking` is left alone.
     public func syncAll() async {
         ThreadRules.assertOffMain()
         guard !stopped else { return }
@@ -142,6 +146,19 @@ public actor LegacySyncEngine {
         for job in [Job.sessions, .machines, .settings, .profile, .outbox] {
             await invalidate(job)
         }
+        for sessionId in viewedSessions.keys.sorted() {
+            await invalidate(.messages(sessionId: sessionId))
+        }
+    }
+
+    /// The chats on screen, counted: the same session may be open twice
+    /// (the phone's stack and the iPad's panel).
+    private var viewedSessions: [String: Int] = [:]
+
+    /// A chat came on screen or left it.
+    public func setViewing(_ sessionId: String, _ viewing: Bool) {
+        let count = (viewedSessions[sessionId] ?? 0) + (viewing ? 1 : -1)
+        viewedSessions[sessionId] = count > 0 ? count : nil
     }
 
     /// Returns once what `syncAll` pulls for home has landed (sessions,

@@ -89,7 +89,11 @@ extension ChatSessionState {
         record.updatedAt = 0
         record.lastMessageSentAt = nil
         if record.active { record.activeAt = 0 }
-        record.metadataVersion = 0
+        // The fork's CLI writes the model it runs (`currentAgentModel`) at
+        // every turn's end, the same value or not: each new version can
+        // turn the model chip green (`ModelConfirmation`). Other sessions'
+        // versions stay unread.
+        if record.metadata?["currentAgentModel"] == nil { record.metadataVersion = 0 }
         record.metadataCipher = ""
         record.agentStateVersion = 0
         record.agentStateCipher = nil

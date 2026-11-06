@@ -574,6 +574,11 @@ extension NewSessionLaunch {
         let model = modes.model
         let effort = modes.effort
         guard let permission, let model else { return .failure(.configurationUnavailable) }
+        // The fork: a Happy CLI session starts in its agent's never-ask
+        // mode, whatever the picker held, as every message it gets will.
+        let permissionMode = rig == nil
+            ? agent.defaultsAgent.map(AgentDefaults.forcedPermissionMode) ?? permission.key
+            : permission.key
 
         let projectId = draft.selectedProjectId?.trimmingCharacters(in: .whitespacesAndNewlines).nonEmpty
         if projectId != nil && rig == nil { return .failure(.projectNeedsHappyAgent) }
@@ -627,7 +632,7 @@ extension NewSessionLaunch {
             worktreeSelection: worktree,
             worktreeCreationMachineId: creator?.id,
             target: target,
-            permissionMode: permission.key,
+            permissionMode: permissionMode,
             modelMode: model.key,
             effortLevel: effort?.key,
             // An empty chat's first send is a bot's first message, as it is
@@ -642,7 +647,7 @@ extension NewSessionLaunch {
                 place: createsTask ? Self.taskPlace : projectId.map(SessionPlaces.projectKey) ?? selectedPath,
                 worktree: worktree,
                 modelKey: model.key,
-                permissionMode: permission.key,
+                permissionMode: permissionMode,
                 effort: effort?.key,
                 bot: botName.map { (name: $0, faceSeed: bot?.faceSeed ?? "") }
             ),

@@ -66,6 +66,9 @@ final class SessionComposerView: UIView, ChatComposerView, AgentInputCardDelegat
     private var state: ChatComposerState?
     private var picks = ComposerPicks()
     private var modes: ComposerModes
+    /// The model chip's green (the fork's `useModelConfirmed`): grey on
+    /// every open, green once the CLI reports the selected model.
+    private var modelConfirmation = ModelConfirmation()
     /// The session's status: the header's capsule says it
     /// (`headerStatus`), not the row over the card, which says only a
     /// voice session's.
@@ -546,11 +549,40 @@ final class SessionComposerView: UIView, ChatComposerView, AgentInputCardDelegat
     // MARK: Modes
 
     private func recomputeModes() {
+        let record = state?.session.record
         modes = ComposerModes(
-            metadata: state?.session.record?.metadata,
+            metadata: record?.metadata,
             picks: picks,
             agentDefaultOverrides: state?.session.settings.agentDefaultOverrides ?? [:]
         )
+        // Happy Agent's sessions never go green (the fork passes nothing).
+        if let record, !record.isRig {
+            modelConfirmation.update(
+                metadataVersion: record.metadataVersion,
+                currentAgentModel: record.metadata?["currentAgentModel"]?.stringValue,
+                selectedKey: modes.modelMode?.key
+            )
+        }
+    }
+
+    /// A Happy CLI chat (or an empty chat about to start one): no
+    /// permission UI, the stop is a cross, the trash shows.
+    private var isLegacyAgent: Bool {
+        if let choices = state?.newSessionChoices { return choices.currentAgent.key != "rig" }
+        return state?.session.record?.isRig != true
+    }
+
+    /// The trash's plan: a connected Happy CLI session that names its
+    /// computer and directory, and not an empty chat still being started.
+    private var respawnPlan: LegacySessionRespawn.Plan? {
+        guard environment.newSession == nil, !isPending, state?.newSessionChoices == nil else { return nil }
+        return LegacySessionRespawn.plan(state?.session.record)
+    }
+
+    func agentInputCardDidPressTrash(_ card: AgentInputCardView) {
+        guard let plan = respawnPlan else { return }
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        composerDelegate?.composer(self, didAskToRespawn: plan)
     }
 
     func agentInputCard(_ card: AgentInputCardView, didSelect key: String, in chip: AgentInputChip) {
@@ -635,9 +667,14 @@ final class SessionComposerView: UIView, ChatComposerView, AgentInputCardDelegat
             canVoice: LegacyVoice.isEnabled && record != nil && !environment.sessionId.hasPrefix("pending-chat:")
         )
         var configuration = card.configuration
-        configuration.permission = chips.permission.map(Self.chip)
-        configuration.model = Self.chip(chips.model)
+        let legacy = isLegacyAgent
+        configuration.permission = legacy ? nil : chips.permission.map(Self.chip)
+        var model = Self.chip(chips.model)
+        model.isConfirmed = legacy && state?.newSessionChoices == nil && modelConfirmation.isConfirmed
+        configuration.model = model
         configuration.effort = chips.effort.map(Self.chip)
+        configuration.showsTrash = legacy && respawnPlan != nil
+        configuration.stopGlyph = legacy ? .cross : .square
         configuration.placeholder = state?.newSessionPlaceholder ?? state?.newSessionChoices?.promptPlaceholder ?? Strings.Composer.inputPlaceholder
         configuration.refusesControls = state?.isStartingNewSession == true
         configuration.primaryAction = primary
@@ -647,8 +684,9 @@ final class SessionComposerView: UIView, ChatComposerView, AgentInputCardDelegat
         configuration.attachments = canAttach
             ? images.images.map { AgentInputAttachmentPreview(id: $0.id, fileURL: $0.attachment.fileURL, preparing: $0.preparing) }
             : []
+        let settings = chips.settings.filter { !legacy || $0.kind != .permission }
         configuration.desktop = isWide ? AgentInputDesktopConfiguration(
-            settings: chips.showsSettings ? AgentInputSettingsMenu(sections: chips.settings.map(Self.settingsSection)) : nil,
+            settings: chips.showsSettings && !settings.isEmpty ? AgentInputSettingsMenu(sections: settings.map(Self.settingsSection)) : nil,
             showsStop: SessionComposerRules.canAbort(record),
             isStopBusy: isAborting,
             // SessionView passes no `isSending`: a send never spins here.
@@ -690,7 +728,7 @@ final class SessionComposerView: UIView, ChatComposerView, AgentInputCardDelegat
                     sections: sections.map { section in
                         AgentInputMenu.Section(
                             title: section.title,
-                            options: section.options.map { .init(key: $0.key, label: $0.label, isDisabled: $0.isDisabled) }
+                            options: section.options.map { .init(key: $0.key, label: $0.label, isDisabled: $0.isDisabled, subtitle: $0.subtitle) }
                         )
                     },
                     selectedKey: chip.selectedKey
