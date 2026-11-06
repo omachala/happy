@@ -42,7 +42,9 @@ final class HomeUltraRow: ListRow {
         if leaves {
             return [ListSwipeAction(title: Strings.Tasks.leave, image: .icon(.ionicons("exit-outline"), size: 20), color: UIColor(Palette.statusError), isDestructive: true) { archive() }]
         }
-        return [ListSwipeAction(title: Strings.SessionInfo.archiveSession, image: .icon(.ionicons("archive-outline"), size: 20), color: UIColor(Palette.statusError), isDestructive: true) { archive() }]
+        // "Archive" (session.archiveAction): "Archive Session" doesn't fit
+        // the 76 point button and was cut to "chive Sessi".
+        return [ListSwipeAction(title: Strings.Session.archiveAction, image: .icon(.ionicons("archive-outline"), size: 20), color: UIColor(Palette.statusError), isDestructive: true) { archive() }]
     }
 
     init(identity: String, revision: UInt64, plan: HomeRowDrawing, plannedWidth: CGFloat? = nil,
