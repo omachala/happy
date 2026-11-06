@@ -60,6 +60,19 @@ public enum LegacyFirstPrompts {
         return titles
     }
 
+    /// One chat's title from its first prompt, as stored now; nil when it
+    /// has none yet. Off the main thread (the chat header's fallback).
+    public static func title(_ store: LocalStore, sessionId: String) throws -> String? {
+        try store.writer.read { db in
+            let messages = try MessageRecord
+                .filter(Column("sessionId") == sessionId)
+                .order(Column("createdAt"), Column("seq"))
+                .limit(scanLimit)
+                .fetchAll(db)
+            return firstPrompt(messages)
+        }
+    }
+
     /// storage.ts `applyMessages`: the earliest user text among `messages`,
     /// as a title; nil when there is none or it is blank.
     static func firstPrompt(_ messages: [MessageRecord]) -> String? {

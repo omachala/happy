@@ -60,6 +60,19 @@ final class LegacyFirstPromptsTests: XCTestCase {
         ])
     }
 
+    /// The chat header's fallback reads one chat, ended or not.
+    func testOneChatsTitleForItsHeader() throws {
+        try store.upsertSessions([F.session("ended", machine: "m1", path: "/w", active: false), F.session("silent", machine: "m1", path: "/w")])
+        try store.applyMessagePages([
+            MessagePageWrite(sessionId: "ended", messages: [
+                message("e2", in: "ended", seq: 2, at: 20, user("later")),
+                message("e1", in: "ended", seq: 1, at: 10, user("  what   broke? ")),
+            ]),
+        ])
+        XCTAssertEqual(try LegacyFirstPrompts.title(store, sessionId: "ended"), "what broke?")
+        XCTAssertNil(try LegacyFirstPrompts.title(store, sessionId: "silent"))
+    }
+
     /// An older page landing later moves the name to the true first prompt.
     func testAnOlderPageConvergesOnTheFirstPrompt() throws {
         try store.upsertSessions([F.session("s", machine: "m1", path: "/w")])

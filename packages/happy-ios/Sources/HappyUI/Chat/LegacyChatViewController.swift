@@ -1103,10 +1103,14 @@ final class LegacyChatViewController: UIViewController, ChatListViewDelegate, Ch
         let headerRecord = session.record ?? (pending ? anchorRecord : nil)
         var model = ChatHeaderModel(session: headerRecord, dataReady: (session.dataReady && !awaitingRecord) || isFixture, gitStatus: gitStatus, pending: pending && headerRecord == nil)
         if pending, model.title != .loading { model.title = .name(nil) }
+        // The fork's getSessionName: a chat the agent hasn't named goes by
+        // its first prompt (`LegacyFirstPrompts`), as on home.
+        needsFallbackTitle = !pending && !isComposing && { if case .name(nil) = model.title { return true }; return false }()
+        if needsFallbackTitle { loadFallbackTitle() }
         var title = switch model.title {
         case .loading: ""
         case .deleted: Strings.SessionDetail.sessionDeleted
-        case .name(let name): name ?? Strings.Session.newChat
+        case .name(let name): name ?? fallbackTitle ?? Strings.Session.newChat
         }
         // Grouped by project the header names the checkout; the strip
         // under it holds its tabs. Under the name is the status, as in the
@@ -1574,6 +1578,36 @@ final class LegacyChatViewController: UIViewController, ChatListViewDelegate, Ch
         }
     }
 
+    // MARK: Fallback title
+
+    /// The header shows no name of the agent's: the first prompt stands in.
+    private var needsFallbackTitle = false
+    /// That first prompt, made a title; nil until one is stored.
+    private var fallbackTitle: String?
+    private var fallbackLoading = false
+    private var fallbackTriedAt: ContinuousClock.Instant?
+
+    /// Reads the chat's first prompt off the main thread, at most once a
+    /// second until one is found; the earliest message never changes.
+    private func loadFallbackTitle() {
+        guard fallbackTitle == nil, !fallbackLoading, !isFixture else { return }
+        if let at = fallbackTriedAt, ContinuousClock.now - at < .seconds(1) { return }
+        fallbackLoading = true
+        fallbackTriedAt = .now
+        let store = account.store
+        let sessionId = chatId
+        Task { [weak self] in
+            let title = await Task.detached(priority: .utility) {
+                (try? LegacyFirstPrompts.title(store, sessionId: sessionId)) ?? nil
+            }.value
+            guard let self else { return }
+            fallbackLoading = false
+            guard let title, chatId == sessionId else { return }
+            fallbackTitle = title
+            updateHeader()
+        }
+    }
+
     // MARK: Respawn
 
     /// A respawn is on its way: the trash does nothing meanwhile.
@@ -1837,6 +1871,8 @@ final class LegacyChatViewController: UIViewController, ChatListViewDelegate, Ch
     /// was planned for another width or text size: the next pass
     /// has the new one.
     private func applyRows(_ update: ChatRowsUpdate) -> Bool {
+        // Messages arrived: an unnamed chat may have its first prompt now.
+        if needsFallbackTitle { loadFallbackTitle() }
         if update.list != nil,
            update.width != list.contentWidth || update.text != list.traitCollection.textEnvironment {
             return false
