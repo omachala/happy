@@ -72,9 +72,27 @@ final class LegacyMachineHomeTests: XCTestCase {
     func testASingleComputerStillHasItsHeading() {
         let home = LegacyMachineHome(snapshot([machine("m1", name: "Studio")], [session("a", machine: "m1", path: "/work/a", created: 1)]))
         XCTAssertEqual(home.rows, [
-            .machine(LegacyMachineHeader(machineId: "m1", name: "Studio", first: true)),
+            .machine(LegacyMachineHeader(machineId: "m1", name: "Studio", first: true, firstPath: "/work/a")),
             .session(LegacyMachineSessionRow(id: "a", projectName: "A", status: .waiting)),
         ])
+    }
+
+    /// new/index.tsx: a computer's `+` clears the path, and the screen picks
+    /// the first of the folders its sessions ran in, live or not, sorted.
+    func testAComputersPlusStartsInItsFirstFolder() {
+        let home = LegacyMachineHome(snapshot([machine("m1", name: "Studio"), machine("m2", name: "Air")], [
+            session("a", machine: "m1", path: "/work/zeta", created: 3),
+            session("b", machine: "m1", path: "/work/alpha", created: 2, active: false),
+            session("c", machine: "m1", path: "/work/zeta/.dev/worktree/x", created: 1),
+            session("d", machine: "m2", path: "/Users/me", created: 1),
+            session("e", machine: nil, path: "/elsewhere", created: 4),
+        ]))
+        let headers = home.rows.compactMap { row -> LegacyMachineHeader? in
+            if case .machine(let header) = row { return header }
+            return nil
+        }
+        XCTAssertEqual(headers.map(\.machineId), [nil, "m2", "m1"])
+        XCTAssertEqual(headers.map(\.firstPath), [nil, "/Users/me", "/work/alpha"])
     }
 
     /// Projects in the order of their newest session, newest first inside

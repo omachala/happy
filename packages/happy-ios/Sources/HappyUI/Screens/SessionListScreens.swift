@@ -118,10 +118,11 @@ final class SessionListViewController: UIViewController {
             switch self.row(id) {
             case .project(.project(let entry))?: self.createWorkspace(entry)
             // A computer's `+` (MachineHeader `onAddPress`): the draft on
-            // that computer with no place yet, which the new-session screen
-            // fills with its first place or home; no computer, as it was.
+            // that computer, in the first folder its sessions ran in (as
+            // new/index.tsx fills a cleared path), else home; no computer,
+            // the draft as it was.
             case .machines(.machine(let header))?:
-                self.push(.newSession(machineId: header.machineId, path: nil, prompt: nil), context: self.context)
+                self.push(.newSession(machineId: header.machineId, path: header.firstPath, prompt: nil), context: self.context)
             default: break
             }
         }

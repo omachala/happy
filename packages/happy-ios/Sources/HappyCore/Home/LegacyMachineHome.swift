@@ -35,6 +35,8 @@ public struct LegacyMachineHome: Equatable, Sendable {
     }
 
     public var sections: [Section]
+    /// Each computer's first known folder (`machineId` to path).
+    public var firstPaths: [String: String] = [:]
 
     public var sessionCount: Int { sections.reduce(0) { $0 + $1.sessions.count } }
 
@@ -85,6 +87,16 @@ public struct LegacyMachineHome: Equatable, Sendable {
             if groups[machineId]?.projects[project] == nil { groups[machineId]?.projectOrder.append(project) }
             groups[machineId]?.projects[project, default: []].append(row)
         }
+
+        // new/index.tsx `pathItems`: every folder a session of that computer
+        // ran in (live or not), sorted; the first is where its `+` starts.
+        var paths: [String: Set<String>] = [:]
+        for session in snapshot.sessions {
+            guard let machineId = Self.nonEmpty(session.metadata?["machineId"]?.stringValue),
+                  let path = Self.nonEmpty(session.metadata?["path"]?.stringValue) else { continue }
+            paths[machineId, default: []].insert(path)
+        }
+        firstPaths = paths.mapValues { $0.min()! }
 
         sections = order.compactMap { groups[$0] }
             .map { group in
@@ -158,7 +170,10 @@ public struct LegacyMachineHome: Equatable, Sendable {
     /// The list as it is drawn: each computer's heading, then its sessions.
     public var rows: [LegacyMachineHomeRow] {
         sections.enumerated().flatMap { index, section in
-            [LegacyMachineHomeRow.machine(LegacyMachineHeader(machineId: section.machineId, name: section.name, first: index == 0))]
+            [LegacyMachineHomeRow.machine(LegacyMachineHeader(
+                machineId: section.machineId, name: section.name, first: index == 0,
+                firstPath: section.machineId.flatMap { firstPaths[$0] }
+            ))]
                 + section.sessions.map(LegacyMachineHomeRow.session)
         }
     }
@@ -223,11 +238,16 @@ public struct LegacyMachineHeader: Equatable, Sendable {
     public var name: String
     /// The list's first heading, which sits closer to the top.
     public var first: Bool
+    /// Where its `+` starts the new session: the alphabetically first
+    /// folder any session of this computer ran in (new/index.tsx picks it
+    /// when the draft's path is cleared); nil for home.
+    public var firstPath: String?
 
-    public init(machineId: String?, name: String, first: Bool = false) {
+    public init(machineId: String?, name: String, first: Bool = false, firstPath: String? = nil) {
         self.machineId = machineId
         self.name = name
         self.first = first
+        self.firstPath = firstPath
     }
 }
 
