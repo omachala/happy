@@ -34,7 +34,7 @@ if [ "${KEEP_SIMULATOR:-}" != 1 ]; then
 fi
 xcrun simctl boot "$SIM" 2>/dev/null; xcrun simctl bootstatus "$SIM" -b > /dev/null
 xcrun simctl keychain "$SIM" add-root-cert "$MOCK_DIR/ca.crt"
-xcrun simctl uninstall "$SIM" com.slopus.happy.dev 2>/dev/null
+xcrun simctl uninstall "$SIM" com.omachala.happy.dev 2>/dev/null
 cd "$SRC" && xcodegen generate --spec project.yml > "$OUT/xcodegen.log" 2>&1
 xcodebuild test -project Happy.xcodeproj -scheme HappyDirectUI -configuration Debug -destination "platform=iOS Simulator,id=$SIM" \
   -derivedDataPath "$DD" CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual DEVELOPMENT_TEAM= PROVISIONING_PROFILE_SPECIFIER= CODE_SIGNING_ALLOWED=YES \

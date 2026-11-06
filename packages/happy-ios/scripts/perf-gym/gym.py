@@ -31,7 +31,7 @@ MAP = os.path.join(WORK, "map.json")
 CONNECTOR_PORT = int(os.environ.get("GYM_CONNECTOR_PORT", "24821"))
 FAKE_PORT = int(os.environ.get("GYM_FAKE_PORT", "24823"))
 SIMULATOR = os.environ.get("GYM_SIMULATOR", "Happy Perf Gym")
-BUNDLE = "com.slopus.happy.dev"
+BUNDLE = "com.omachala.happy.dev"
 FAKE_MODE = {"providerId": "fake", "modelId": "fake-stream", "effort": "low", "serviceTier": None, "permissionMode": "auto"}
 
 # The synthetic chats, by title: the long one, and the one heavy with pictures.

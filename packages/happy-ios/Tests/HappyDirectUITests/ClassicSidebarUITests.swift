@@ -7,7 +7,7 @@ import XCTest
 /// the installed app to drive (the preview build by default).
 @MainActor
 final class ClassicSidebarUITests: XCTestCase {
-    private lazy var app = XCUIApplication(bundleIdentifier: ProcessInfo.processInfo.environment["CLASSIC_BUNDLE"] ?? "com.slopus.happy.preview")
+    private lazy var app = XCUIApplication(bundleIdentifier: ProcessInfo.processInfo.environment["CLASSIC_BUNDLE"] ?? "com.omachala.happy.preview")
 
     override func setUp() {
         continueAfterFailure = false
