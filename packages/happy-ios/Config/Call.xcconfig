@@ -6,9 +6,14 @@
 // Without it, the voice button says voice isn't set up.
 HAPPY_CALL_AGENT_ID =
 
-// RevenueCat's public Apple app key, for voice's subscription (pro). The
-// same key the Expo app gets from EXPO_PUBLIC_REVENUE_CAT_APPLE, which is
-// where it comes from here too: set that in the build's environment, or
-// override this in Call.local.xcconfig. Without it voice sells nothing.
-HAPPY_REVENUE_CAT_APPLE_KEY = $(EXPO_PUBLIC_REVENUE_CAT_APPLE)
+// RevenueCat's public Apple app key, for voice's subscription (pro).
+// Upstream reads EXPO_PUBLIC_REVENUE_CAT_APPLE from the environment; the
+// omachala fork sells nothing (no RevenueCat, no StoreKit), so it is empty
+// whatever the environment holds. Without it voice sells nothing.
+HAPPY_REVENUE_CAT_APPLE_KEY =
+
+// PostHog's project key, for the one feature flag the app reads
+// (MigrationNoteFlag). The fork has no analytics: empty, so nothing is
+// asked of PostHog whatever the environment holds.
+HAPPY_POSTHOG_API_KEY =
 #include? "Call.local.xcconfig"
