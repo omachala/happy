@@ -93,6 +93,10 @@ final class LegacyMachineHomeLayoutTests: XCTestCase {
         assertFrame(layout.text, rect(22, 5, 24, 16))
         assertSize(layout.size, CGSize(width: 56, height: 26))
         XCTAssertEqual(layout.cornerRadius, 13)
+        // A long reason is cut, so the status title beside it keeps room.
+        let long = UsagePillLayout(text: CGSize(width: 230, height: 16))
+        assertFrame(long.text, rect(22, 5, 120, 16))
+        assertSize(long.size, CGSize(width: 152, height: 26))
     }
 
     // MARK: Usage sheet

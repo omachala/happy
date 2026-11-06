@@ -11,6 +11,9 @@ public struct UsagePillLayout: Equatable, Sendable {
         public static let paddingY: CGFloat = 5
         public static let dotSize: CGFloat = 6
         public static let dotGap: CGFloat = 6
+        /// The longest reason ("Anthropic account not connected") is cut
+        /// here, so the bar's status title keeps its room.
+        public static let maxTextWidth: CGFloat = 120
     }
 
     public var size: CGSize
@@ -18,8 +21,9 @@ public struct UsagePillLayout: Equatable, Sendable {
     public var text: CGRect
     public var cornerRadius: CGFloat { size.height / 2 }
 
-    public init(text: CGSize) {
+    public init(text measured: CGSize) {
         typealias M = Metrics
+        let text = CGSize(width: min(measured.width, M.maxTextWidth), height: measured.height)
         let inner = max(M.dotSize, text.height)
         let height = inner + 2 * M.paddingY
         let mid = height / 2
