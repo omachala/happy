@@ -18,9 +18,12 @@ const {
         s3PostUrl: "https://s3.test/post-url",
         s3GetUrl: "https://s3.test/get-url",
         s3PolicyMaxLength: 0,
+        s3Objects: new Map<string, Buffer>(),
     };
 
     const resetState = () => {
+        state.s3Objects = new Map();
+        delete process.env.S3_PRESIGNED_ATTACHMENTS;
         state.sessions = [];
         state.uploads = new Map();
         state.useLocalStorage = true;
@@ -64,6 +67,13 @@ const {
                 formData: { key: _policy.key, policy: "stub-policy" },
             })),
             presignedGetObject: vi.fn(async (_bucket: string, _key: string, _ttl: number) => state.s3GetUrl),
+            putObject: vi.fn(async (_bucket: string, key: string, data: Buffer) => { state.s3Objects.set(key, data); }),
+            getObject: vi.fn(async (_bucket: string, key: string) => {
+                const data = state.s3Objects.get(key);
+                if (!data) throw Object.assign(new Error("not found"), { code: "NoSuchKey" });
+                const { Readable } = await import("stream");
+                return Readable.from([data]);
+            }),
         },
         s3bucket: "test-bucket",
         isLocalStorage: vi.fn(() => state.useLocalStorage),
@@ -151,6 +161,7 @@ describe("attachmentRoutes — request-upload", () => {
     it("returns 200 with method=POST + formFields and a content-length-range policy in S3 mode", async () => {
         seedSession("s1", "u1");
         state.useLocalStorage = false;
+        process.env.S3_PRESIGNED_ATTACHMENTS = "true";
         app = await createApp();
 
         const res = await app.inject({
@@ -261,6 +272,7 @@ describe("attachmentRoutes — PUT (local-mode upload)", () => {
     it("returns 404 for PUT in S3 mode (direct upload not available)", async () => {
         seedSession("s1", "u1");
         state.useLocalStorage = false;
+        process.env.S3_PRESIGNED_ATTACHMENTS = "true";
         app = await createApp();
 
         const res = await app.inject({
@@ -298,6 +310,7 @@ describe("attachmentRoutes — POST request-download", () => {
     it("returns a presigned S3 GET URL in S3 mode", async () => {
         seedSession("s1", "u1");
         state.useLocalStorage = false;
+        process.env.S3_PRESIGNED_ATTACHMENTS = "true";
         app = await createApp();
 
         const res = await app.inject({
@@ -393,6 +406,7 @@ describe("attachmentRoutes — GET (download)", () => {
     it("redirects to a presigned GET URL in S3 mode for the session owner", async () => {
         seedSession("s1", "u1");
         state.useLocalStorage = false;
+        process.env.S3_PRESIGNED_ATTACHMENTS = "true";
         app = await createApp();
 
         const res = await app.inject({
@@ -443,5 +457,68 @@ describe("attachmentRoutes — GET (download)", () => {
             headers: { "x-user-id": "u1" },
         });
         expect(res.statusCode).toBe(404);
+    });
+});
+
+describe("attachmentRoutes — S3 relayed through the server (fork default)", () => {
+    let app: Fastify;
+    beforeEach(() => { resetState(); state.useLocalStorage = false; });
+    afterEach(async () => { if (app) await app.close(); });
+
+    it("request-upload returns a PUT to this server, at the forwarded public origin", async () => {
+        seedSession("s1", "u1");
+        app = await createApp();
+        const res = await app.inject({
+            method: "POST",
+            url: "/v1/sessions/s1/attachments/request-upload",
+            headers: { "x-user-id": "u1", "x-forwarded-host": "happy.example", "x-forwarded-proto": "https" },
+            payload: { filename: "img.jpg", size: 1024 },
+        });
+        expect(res.statusCode).toBe(200);
+        const body = res.json();
+        expect(body.method).toBe("PUT");
+        expect(body.uploadUrl).toMatch(/^https:\/\/happy\.example\/v1\/sessions\/s1\/attachments\/[A-Fa-f0-9-]+\.enc$/);
+        expect(body.formFields).toBeUndefined();
+    });
+
+    it("PUT stores the blob in the bucket, then GET streams it back to the owner", async () => {
+        seedSession("s1", "u1");
+        app = await createApp();
+        const blob = Buffer.from([1, 2, 3, 4, 5]);
+        const put = await app.inject({
+            method: "PUT",
+            url: "/v1/sessions/s1/attachments/abc.enc",
+            headers: { "x-user-id": "u1", "content-type": "application/octet-stream" },
+            payload: blob,
+        });
+        expect(put.statusCode).toBe(200);
+        expect(state.s3Objects.get("sessions/s1/attachments/abc.enc")).toEqual(blob);
+
+        const get = await app.inject({ method: "GET", url: "/v1/sessions/s1/attachments/abc.enc", headers: { "x-user-id": "u1" } });
+        expect(get.statusCode).toBe(200);
+        expect(Buffer.from(get.rawPayload)).toEqual(blob);
+    });
+
+    it("request-download returns this server's URL, not a presigned bucket URL", async () => {
+        seedSession("s1", "u1");
+        app = await createApp();
+        const res = await app.inject({
+            method: "POST",
+            url: "/v1/sessions/s1/attachments/request-download",
+            headers: { "x-user-id": "u1", host: "happy.home" },
+            payload: { ref: "sessions/s1/attachments/abc.enc" },
+        });
+        expect(res.statusCode).toBe(200);
+        expect(res.json().downloadUrl).toBe("http://happy.home/v1/sessions/s1/attachments/abc.enc");
+    });
+
+    it("GET is 404 for a blob the bucket doesn't have, and for a non-owner", async () => {
+        seedSession("s1", "u1");
+        app = await createApp();
+        const missing = await app.inject({ method: "GET", url: "/v1/sessions/s1/attachments/nope.enc", headers: { "x-user-id": "u1" } });
+        expect(missing.statusCode).toBe(404);
+        state.s3Objects.set("sessions/s1/attachments/abc.enc", Buffer.from([9]));
+        const other = await app.inject({ method: "GET", url: "/v1/sessions/s1/attachments/abc.enc", headers: { "x-user-id": "u2" } });
+        expect(other.statusCode).toBe(404);
     });
 });

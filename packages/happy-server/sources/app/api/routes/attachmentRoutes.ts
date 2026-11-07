@@ -1,9 +1,14 @@
 /**
  * Attachment upload/download routes for image attachments in chat sessions.
  *
- * Two storage modes:
- * - S3: Returns presigned PUT/GET URLs. Server never touches file bytes.
+ * Storage modes:
  * - Local: Server accepts/serves encrypted blobs directly.
+ * - S3, relayed (this fork's default): the server accepts/serves the blobs
+ *   itself and moves them to/from the bucket. For a bucket only the server
+ *   can reach (a MinIO on the Docker network), presigned URLs would point
+ *   the phone and the daemons at a host they cannot reach.
+ * - S3, presigned (`S3_PRESIGNED_ATTACHMENTS=true`): presigned POST/GET
+ *   URLs; the server never touches file bytes.
  *
  * No database records — attachments are identified by their ref path.
  * Cleanup happens when sessions are deleted (Phase 8).
@@ -17,6 +22,11 @@ import { db } from '@/storage/db';
 import { s3client, s3bucket, isLocalStorage, getLocalFilesDir, putLocalFile } from '@/storage/files';
 
 const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
+
+/** The client talks to this server for the bytes (local, or S3 relayed). */
+function relaysAttachments(): boolean {
+    return isLocalStorage() || process.env.S3_PRESIGNED_ATTACHMENTS !== 'true';
+}
 const PRESIGNED_TTL_SECONDS = 15 * 60; // 15 minutes (design spec)
 
 // Per-user, per-process token bucket for request-upload. Best-effort flood
@@ -122,8 +132,8 @@ export function attachmentRoutes(app: Fastify) {
         const attachmentFile = `${attachmentId}.enc`;
         const ref = `sessions/${sessionId}/attachments/${attachmentFile}`;
 
-        if (isLocalStorage()) {
-            // Local mode: client uploads to our own PUT endpoint (the server
+        if (relaysAttachments()) {
+            // Local or relayed mode: client uploads to our own PUT endpoint (the server
             // enforces the size limit by inspecting the request body before
             // it hits disk, so PUT is fine here).
             const baseUrl = resolveBaseUrl(request);
@@ -167,7 +177,7 @@ export function attachmentRoutes(app: Fastify) {
         },
         preHandler: app.authenticate,
     }, async (request, reply) => {
-        if (!isLocalStorage()) {
+        if (!relaysAttachments()) {
             return reply.code(404).send({ error: 'Direct upload not available in S3 mode' });
         }
 
@@ -193,7 +203,11 @@ export function attachmentRoutes(app: Fastify) {
         }
 
         const ref = `sessions/${sessionId}/attachments/${attachmentFile}`;
-        await putLocalFile(ref, body);
+        if (isLocalStorage()) {
+            await putLocalFile(ref, body);
+        } else {
+            await s3client.putObject(s3bucket, ref, body, body.length, { 'Content-Type': 'application/octet-stream' });
+        }
 
         return reply.send({ ok: true });
     });
@@ -245,7 +259,7 @@ export function attachmentRoutes(app: Fastify) {
             return reply.code(400).send({ error: 'Invalid attachment ref' });
         }
 
-        if (isLocalStorage()) {
+        if (relaysAttachments()) {
             const baseUrl = resolveBaseUrl(request);
             const downloadUrl = `${baseUrl}/v1/sessions/${sessionId}/attachments/${attachmentFile}`;
             return reply.send({ downloadUrl });
@@ -293,6 +307,17 @@ export function attachmentRoutes(app: Fastify) {
             }
             reply.header('Content-Type', 'application/octet-stream');
             return reply.type('application/octet-stream').send(fs.readFileSync(fullPath));
+        } else if (relaysAttachments()) {
+            // S3 relayed: stream the blob from the bucket.
+            try {
+                const stream = await s3client.getObject(s3bucket, ref);
+                return reply.type('application/octet-stream').send(stream);
+            } catch (error: any) {
+                if (error?.code === 'NoSuchKey' || error?.code === 'NotFound') {
+                    return reply.code(404).send({ error: 'Attachment not found' });
+                }
+                throw error;
+            }
         } else {
             // S3 mode: redirect to presigned GET URL (15 min, per design).
             const url = await s3client.presignedGetObject(s3bucket, ref, PRESIGNED_TTL_SECONDS);
