@@ -202,8 +202,12 @@ export class SDKToLogConverter {
                 } as any
         }
 
-        // Update last UUID for parent tracking
-        if (logMessage && logMessage.type !== 'summary') {
+        // Update last UUID for parent tracking. Only main-chain messages move
+        // the main chain: a sub-agent's messages are chained per tool call in
+        // sidechainLastUUID. Chaining a main reply to a background sub-agent's
+        // last message made the protocol mapper treat the reply as that
+        // sub-agent's and drop it (replies vanished from the app).
+        if (logMessage && logMessage.type !== 'summary' && !isSidechain) {
             this.lastUuid = uuid
         }
 
@@ -295,8 +299,10 @@ export class SDKToLogConverter {
             toolUseResult: `Error: ${errorMessage}`
         } as any
         
-        // Update last UUID for tracking
-        this.lastUuid = uuid
+        // Update last UUID for tracking (main chain only, see convert())
+        if (!isSidechain) {
+            this.lastUuid = uuid
+        }
         
         return logMessage
     }

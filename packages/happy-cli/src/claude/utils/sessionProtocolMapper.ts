@@ -259,7 +259,10 @@ function resolveProviderSubagent(message: RawJSONLines, state: ClaudeSessionProt
     }
 
     const parentUuid = pickParentUuid(message);
-    if (parentUuid) {
+    // Only sidechain messages inherit a sub-agent from their parent. A
+    // main-chain message never belongs to a sub-agent, and inheriting one
+    // buffered main replies forever once the turn had cleared the mapping.
+    if (parentUuid && isSidechainMessage(message)) {
         const inheritedSubagent = getUuidToProviderSubagent(state).get(parentUuid);
         if (inheritedSubagent) {
             return inheritedSubagent;
