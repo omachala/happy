@@ -56,14 +56,14 @@ describe('modelModeOptions', () => {
     it('pins every claude model fallback to a versioned id', () => {
         const models = getClaudeModelModes();
         expect(models.map((model) => model.key)).toEqual([
-            'claude-fable-5-1',
+            'claude-fable-5-2',
             'claude-opus-5-5',
             'claude-sonnet-5-5',
             'claude-haiku-4-5',
         ]);
         // Display names carry the version so the picker label matches the id sent.
         expect(models.map((model) => model.name)).toEqual([
-            'fable 5.1',
+            'fable 5.2',
             'opus 5.5',
             'sonnet 5.5',
             'haiku 4.5',
@@ -226,7 +226,7 @@ describe('getClaudeFamilyKeyFromModelId', () => {
     it('resolves exact picker models, including dated and vendor-prefixed ids', () => {
         expect(getClaudeFamilyKeyFromModelId('claude-opus-5-5')).toBe('claude-opus-5-5');
         expect(getClaudeFamilyKeyFromModelId('claude-opus-5-5-20260901')).toBe('claude-opus-5-5');
-        expect(getClaudeFamilyKeyFromModelId('claude-fable-5-1[1m]')).toBe('claude-fable-5-1');
+        expect(getClaudeFamilyKeyFromModelId('claude-fable-5-2[1m]')).toBe('claude-fable-5-2');
         expect(getClaudeFamilyKeyFromModelId('us.anthropic.claude-sonnet-5-5-v1:0')).toBe('claude-sonnet-5-5');
         expect(getClaudeFamilyKeyFromModelId('claude-haiku-4-5')).toBe('claude-haiku-4-5');
     });
@@ -236,6 +236,7 @@ describe('getClaudeFamilyKeyFromModelId', () => {
         expect(getClaudeFamilyKeyFromModelId('claude-opus-5')).toBeNull();
         expect(getClaudeFamilyKeyFromModelId('claude-opus-4-6')).toBeNull();
         expect(getClaudeFamilyKeyFromModelId('claude-sonnet-5')).toBeNull();
+        expect(getClaudeFamilyKeyFromModelId('claude-fable-5-1')).toBeNull();
         expect(getClaudeFamilyKeyFromModelId('claude-sonnet-4-6')).toBeNull();
         expect(getClaudeFamilyKeyFromModelId(null)).toBeNull();
         expect(getClaudeFamilyKeyFromModelId('')).toBeNull();
