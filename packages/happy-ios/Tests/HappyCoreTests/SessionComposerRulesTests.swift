@@ -333,7 +333,7 @@ final class ComposerChipSetTests: XCTestCase {
         XCTAssertEqual(chips.model.sections?.count, 1)
         XCTAssertNil(chips.model.sections?.first?.title)
         XCTAssertEqual(chips.model.sections?.first?.options.map(\.key), [
-            "claude-fable-5-1", "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-4-5",
+            "claude-fable-5-2", "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-4-5",
         ])
         XCTAssertEqual(chips.model.sections?.first?.options.map(\.subtitle), ["latest & most capable", nil, nil, nil])
         XCTAssertEqual(chips.model.selectedKey, "claude-opus-5-5")

@@ -15,8 +15,8 @@ final class ForkModelPickTests: XCTestCase {
 
     func testTheClaudeListIsTheForksExactly() {
         let models = Options.availableModels(flavor: "claude", metadata: json(#"{ "flavor": "claude" }"#))
-        XCTAssertEqual(models.map(\.key), ["claude-fable-5-1", "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-4-5"])
-        XCTAssertEqual(models.map(\.name), ["fable 5.1", "opus 5.5", "sonnet 5.5", "haiku 4.5"])
+        XCTAssertEqual(models.map(\.key), ["claude-fable-5-2", "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-4-5"])
+        XCTAssertEqual(models.map(\.name), ["fable 5.2", "opus 5.5", "sonnet 5.5", "haiku 4.5"])
         XCTAssertEqual(models.first?.description, "latest & most capable")
         XCTAssertFalse(models.contains { $0.key == "default" })
     }
@@ -33,6 +33,11 @@ final class ForkModelPickTests: XCTestCase {
         XCTAssertEqual(modes.availableModels.first, ModeOption(key: "claude-opus-5", name: "opus 5"))
         XCTAssertEqual(modes.modelMode?.key, "claude-opus-5", "never silently the default")
         XCTAssertEqual(modes.availableModels.count, 5)
+        // A session pinned to Fable 5.1 keeps it, named for its version, above 5.2.
+        let fable51 = ComposerModes(metadata: json(#"{ "flavor": "claude" }"#), picks: ComposerPicks(modelMode: "claude-fable-5-1"), agentDefaultOverrides: [:])
+        XCTAssertEqual(fable51.availableModels.first, ModeOption(key: "claude-fable-5-1", name: "fable 5.1"))
+        XCTAssertEqual(fable51.modelMode?.key, "claude-fable-5-1")
+        XCTAssertEqual(fable51.availableModels.map(\.key).dropFirst().first, "claude-fable-5-2")
         let unknown = ComposerModes(metadata: json(#"{ "flavor": "claude" }"#), picks: ComposerPicks(modelMode: "my-model"), agentDefaultOverrides: [:])
         XCTAssertEqual(unknown.availableModels.first, ModeOption(key: "my-model", name: "my-model"))
         let none = ComposerModes(metadata: json(#"{ "flavor": "claude" }"#), picks: ComposerPicks(modelMode: "default"), agentDefaultOverrides: [:])
@@ -41,6 +46,7 @@ final class ForkModelPickTests: XCTestCase {
 
     func testHumanizedClaudeKeys() {
         XCTAssertEqual(AgentDefaults.humanizeClaudeModelKey("claude-opus-5"), "opus 5")
+        XCTAssertEqual(AgentDefaults.humanizeClaudeModelKey("claude-fable-5-2"), "fable 5.2")
         XCTAssertEqual(AgentDefaults.humanizeClaudeModelKey("claude-fable-5-1"), "fable 5.1")
         XCTAssertEqual(AgentDefaults.humanizeClaudeModelKey("claude-haiku-4-5-20251001"), "claude-haiku-4-5-20251001")
         XCTAssertEqual(AgentDefaults.humanizeClaudeModelKey("gpt-5"), "gpt-5")
@@ -53,7 +59,9 @@ final class ForkModelPickTests: XCTestCase {
             ("claude-opus-5-5", "claude-opus-5-5"),
             ("claude-opus-5-5-20260901", "claude-opus-5-5"),
             ("CLAUDE-OPUS-5-5", "claude-opus-5-5"),
-            ("claude-fable-5-1[1m]", "claude-fable-5-1"),
+            ("claude-fable-5-2[1m]", "claude-fable-5-2"),
+            ("claude-fable-5-2-20261101", "claude-fable-5-2"),
+            ("claude-fable-5-2-20261101[1m]", "claude-fable-5-2"),
             ("us.anthropic.claude-sonnet-5-5-v1:0", "claude-sonnet-5-5"),
             ("anthropic/claude-haiku-4-5", "claude-haiku-4-5"),
             ("claude-haiku-4-5-20251001", "claude-haiku-4-5"),
@@ -61,6 +69,9 @@ final class ForkModelPickTests: XCTestCase {
             ("claude-opus-5", nil),
             ("claude-opus-5-20260101", nil),
             ("claude-sonnet-5", nil),
+            // Fable 5.1 left the list for 5.2.
+            ("claude-fable-5-1", nil),
+            ("claude-fable-5-1-20260801", nil),
             ("opus", nil),
             ("gpt-6.1-sol", nil),
             ("", nil),
@@ -74,14 +85,14 @@ final class ForkModelPickTests: XCTestCase {
     // MARK: The model shown
 
     func testTheModelShownIsThePickThenWhatTheCLIRunsThenTheDefault() {
-        let observed = json(#"{ "flavor": "claude", "version": "1.2.0", "currentAgentModel": "claude-fable-5-1-20260801", "currentModelCode": "claude-haiku-4-5" }"#)
+        let observed = json(#"{ "flavor": "claude", "version": "1.2.0", "currentAgentModel": "claude-fable-5-2-20261101", "currentModelCode": "claude-haiku-4-5" }"#)
         // A pick wins.
         XCTAssertEqual(ComposerModes(metadata: observed, picks: ComposerPicks(modelMode: "claude-sonnet-5-5"), agentDefaultOverrides: [:]).modelMode?.key, "claude-sonnet-5-5")
         // No pick: what the CLI says it runs (a `/model` in the terminal).
-        XCTAssertEqual(ComposerModes(metadata: observed, picks: ComposerPicks(), agentDefaultOverrides: [:]).modelMode?.key, "claude-fable-5-1")
+        XCTAssertEqual(ComposerModes(metadata: observed, picks: ComposerPicks(), agentDefaultOverrides: [:]).modelMode?.key, "claude-fable-5-2")
         // ... over the settings' default.
         let overrides = ["claude": json(#"{ "modelMode": "claude-sonnet-5-5" }"#)]
-        XCTAssertEqual(ComposerModes(metadata: observed, picks: ComposerPicks(), agentDefaultOverrides: overrides).modelMode?.key, "claude-fable-5-1")
+        XCTAssertEqual(ComposerModes(metadata: observed, picks: ComposerPicks(), agentDefaultOverrides: overrides).modelMode?.key, "claude-fable-5-2")
         // A model the list doesn't name exactly: the default.
         let older = json(#"{ "flavor": "claude", "currentAgentModel": "claude-opus-5", "currentModelCode": "claude-haiku-4-5" }"#)
         XCTAssertEqual(ComposerModes(metadata: older, picks: ComposerPicks(), agentDefaultOverrides: [:]).modelMode?.key, "claude-opus-5-5")

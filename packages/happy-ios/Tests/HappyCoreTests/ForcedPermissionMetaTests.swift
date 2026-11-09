@@ -58,10 +58,10 @@ final class ForcedPermissionMetaTests: XCTestCase {
         XCTAssertEqual(overridden["effort"], .string("low"))
         // The session's pick wins.
         let picked = try meta(
-            flavor: "claude", composer: json(#"{ "modelMode": "claude-fable-5-1", "effortLevel": "max" }"#),
+            flavor: "claude", composer: json(#"{ "modelMode": "claude-fable-5-2", "effortLevel": "max" }"#),
             overrides: json(#"{ "claude": { "modelMode": "claude-sonnet-5-5", "effortLevel": "low" } }"#)
         )
-        XCTAssertEqual(picked["model"], .string("claude-fable-5-1"))
+        XCTAssertEqual(picked["model"], .string("claude-fable-5-2"))
         XCTAssertEqual(picked["effort"], .string("max"))
         // `default` is sent as null.
         XCTAssertEqual(try meta(flavor: "claude", composer: json(#"{ "modelMode": "default" }"#))["model"], .null)
@@ -77,13 +77,13 @@ final class ForcedPermissionMetaTests: XCTestCase {
 
     func testAModelTheCLIReportsStandsForTheDefaultWhenNothingIsPicked() throws {
         // A `/model` typed in the terminal is not switched back.
-        let observed = try meta(flavor: "claude", extra: ["currentAgentModel": .string("claude-fable-5-1-20260801")])
-        XCTAssertEqual(observed["model"], .string("claude-fable-5-1"))
+        let observed = try meta(flavor: "claude", extra: ["currentAgentModel": .string("claude-fable-5-2-20261101")])
+        XCTAssertEqual(observed["model"], .string("claude-fable-5-2"))
         // Not one the list names exactly: the default.
         let older = try meta(flavor: "claude", extra: ["currentAgentModel": .string("claude-opus-5")])
         XCTAssertEqual(older["model"], .string("claude-opus-5-5"))
         // A pick wins over it.
-        let picked = try meta(flavor: "claude", extra: ["currentAgentModel": .string("claude-fable-5-1")], composer: json(#"{ "modelMode": "claude-haiku-4-5" }"#))
+        let picked = try meta(flavor: "claude", extra: ["currentAgentModel": .string("claude-fable-5-2")], composer: json(#"{ "modelMode": "claude-haiku-4-5" }"#))
         XCTAssertEqual(picked["model"], .string("claude-haiku-4-5"))
     }
 

@@ -126,7 +126,7 @@ public enum AgentDefaults {
     // MARK: Claude models
 
     /// `humanizeClaudeModelKey`: "claude-opus-5" → "opus 5",
-    /// "claude-fable-5-1" → "fable 5.1"; anything else as it is.
+    /// "claude-fable-5-2" → "fable 5.2"; anything else as it is.
     public static func humanizeClaudeModelKey(_ key: String) -> String {
         guard let match = key.wholeMatch(of: /claude-([a-z]+)-([0-9]+)(?:-([0-9]+))?/) else { return key }
         let version = match.3.map { "\(match.2).\($0)" } ?? String(match.2)
@@ -266,7 +266,7 @@ public enum AgentDefaults {
             // The fork's list: each key is the exact `--model` sent, and
             // the name says that version. No "default" and no aliases.
             [
-                Option("claude-fable-5-1", "fable 5.1", "latest & most capable"),
+                Option("claude-fable-5-2", "fable 5.2", "latest & most capable"),
                 Option("claude-opus-5-5", "opus 5.5"),
                 Option("claude-sonnet-5-5", "sonnet 5.5"),
                 Option("claude-haiku-4-5", "haiku 4.5"),

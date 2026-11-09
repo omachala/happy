@@ -181,8 +181,8 @@ final class ModelModeOptionsTests: XCTestCase {
 
     func testTheForksClaudeModelsExactly() {
         let models = Options.hardcodedModelModes(flavor: "claude")
-        XCTAssertEqual(keys(models), ["claude-fable-5-1", "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-4-5"])
-        XCTAssertEqual(models.map(\.name), ["fable 5.1", "opus 5.5", "sonnet 5.5", "haiku 4.5"])
+        XCTAssertEqual(keys(models), ["claude-fable-5-2", "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-4-5"])
+        XCTAssertEqual(models.map(\.name), ["fable 5.2", "opus 5.5", "sonnet 5.5", "haiku 4.5"])
         XCTAssertEqual(models.map(\.description), ["latest & most capable", nil, nil, nil])
         XCTAssertFalse(models.contains { $0.key == "default" })
         XCTAssertFalse(models.contains { ["opus", "sonnet", "fable", "haiku"].contains($0.key) })
@@ -241,7 +241,7 @@ final class ModelModeOptionsTests: XCTestCase {
     }
 
     func testClaudeGetsTheSDKScaleForEveryModel() {
-        for model in ["claude-fable-5-1", "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-4-5", "claude-opus-5"] {
+        for model in ["claude-fable-5-2", "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-4-5", "claude-opus-5"] {
             let levels = Options.effortLevelsForModel(flavor: "claude", modelKey: model)
             XCTAssertEqual(keys(levels), ["low", "medium", "high", "xhigh", "max"])
             XCTAssertEqual(levels.map(\.name), ["Low", "Medium", "High", "xHigh", "Max"])
@@ -685,11 +685,11 @@ final class ComposerModesTests: XCTestCase {
     func testTheSessionsPicksWin() {
         let modes = ComposerModes(
             metadata: claudeSession,
-            picks: ComposerPicks(values: json(#"{ "permissionMode": "plan", "modelMode": "claude-fable-5-1", "effortLevel": "max" }"#)),
+            picks: ComposerPicks(values: json(#"{ "permissionMode": "plan", "modelMode": "claude-fable-5-2", "effortLevel": "max" }"#)),
             agentDefaultOverrides: [:]
         )
         XCTAssertEqual(modes.permissionMode?.key, "plan")
-        XCTAssertEqual(modes.modelMode?.key, "claude-fable-5-1")
+        XCTAssertEqual(modes.modelMode?.key, "claude-fable-5-2")
         XCTAssertEqual(modes.effortLevel?.key, "max")
     }
 
