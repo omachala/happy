@@ -50,10 +50,10 @@ extension Strings {
         public static let noMessages = "No messages yet"
         /// EmptyMessages.tsx (not in en.ts)
         public static func created(_ time: String) -> String { "Created \(time)" }
-        /// RigActivityBar.tsx (not in en.ts): "2 agents", "1 +3 queued tasks".
+        /// RigActivityBar.tsx (not in en.ts): "2 sub-agents", "1 +3 queued tasks".
         public static func rigActivity(_ indicator: RigActivityIndicator) -> String {
             let label = switch indicator.kind {
-            case .subagents: "agents"
+            case .subagents: indicator.count + indicator.queued == 1 ? "sub-agent" : "sub-agents"
             case .workflows: "workflows"
             case .processes: "processes"
             case .tasks: "tasks"

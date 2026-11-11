@@ -230,6 +230,8 @@ public struct ChatSnapshotFacts: Equatable, Sendable {
     public var hasPendingQuestion: Bool
     /// Local ids of the user messages the server has stored.
     public var storedLocalIds: Set<String>
+    /// Claude sub-agents at work, for the activity bar.
+    public var runningSubagents: Int
 
     public init(_ snapshot: LegacyChatSnapshot) {
         isLoaded = snapshot.isLoaded
@@ -239,6 +241,7 @@ public struct ChatSnapshotFacts: Equatable, Sendable {
         windowEpoch = snapshot.windowEpoch
         usage = snapshot.usage
         delivery = snapshot.delivery
+        runningSubagents = snapshot.runningSubagents
         var pendingQuestion = false
         var stored = Set<String>()
         for message in snapshot.messages {

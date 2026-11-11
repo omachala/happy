@@ -157,7 +157,8 @@ struct FeedState: Sendable {
         let loaded = change.session?.isLoaded ?? false
         return LegacyChatSnapshot(
             sessionId: sessionId, messages: messages, delivery: delivery, isLoaded: loaded,
-            usage: reducer.usage, todos: reducer.todos, hasMoreOlder: change.hasMoreOlder,
+            usage: reducer.usage, todos: reducer.todos, runningSubagents: reducer.runningSubagents,
+            hasMoreOlder: change.hasMoreOlder,
             olderBoundary: change.olderBoundary, windowEpoch: windowEpoch)
     }
 }

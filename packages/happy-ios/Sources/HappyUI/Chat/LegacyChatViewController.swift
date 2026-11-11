@@ -1735,7 +1735,12 @@ final class LegacyChatViewController: UIViewController, ChatListViewDelegate, Ch
         }
         goalBar.isHidden = goal == nil
         updateQuestionBanner()
-        let indicators = RigActivityIndicator.indicators(session.metadata)
+        var indicators = RigActivityIndicator.indicators(session.metadata)
+        // A Claude session has no rig activity; its sub-agents are counted
+        // from the chat, shown while its CLI is still there to run them.
+        if indicators.isEmpty, hint == nil, let running = facts?.runningSubagents, running > 0 {
+            indicators = [RigActivityIndicator(kind: .subagents, count: running)]
+        }
         rigActivity.show(indicators)
         rigActivity.isHidden = indicators.isEmpty
 
@@ -1883,10 +1888,12 @@ final class LegacyChatViewController: UIViewController, ChatListViewDelegate, Ch
             if let facts = update.facts {
                 // Before the placeholder reads its status.
                 windowReset = historyPager?.receive(.init(facts)) ?? false
+                let subagentsMoved = self.facts?.runningSubagents != facts.runningSubagents
                 self.facts = facts
                 dismissAnsweredQuestions(facts)
                 updatePlaceholder()
                 updateComposer()
+                if subagentsMoved { updateDockBars() }
             }
             if let forms = update.questionForms { questionForms = forms }
             scheduleGraceEnd(update.graceEnd, now: update.now)

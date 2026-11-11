@@ -43,6 +43,9 @@ public struct NormalizedChatRecord: Equatable, Sendable {
     public var usage: SessionUsage?
     /// Original plaintext, including fields this version does not recognize.
     public var raw: JSONValue
+    /// Tool-use IDs of background tasks (a background Agent, a background
+    /// shell) that this record's `<task-notification>`s report as done.
+    public var finishedTasks: [String] = []
 }
 
 /// Decodes only current producer formats, after happy-app's typesRaw.ts.
@@ -133,8 +136,17 @@ public enum ChatNormalizer {
                 record.body = .agent(usageOnly ? [] : [.text(text, thinking: false)])
             case .text(let text, let thinking):
                 let visible = stripTaskNotifications(text)
+                if visible != text {
+                    record.finishedTasks = finishedTaskCalls(text)
+                }
                 if visible != text && visible.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    return nil
+                    // Nothing to show, but the reducer still learns which
+                    // background agents finished; no blocks draws no row.
+                    guard !record.finishedTasks.isEmpty else { return nil }
+                    record.body = .agent([])
+                    record.parent = nil
+                    record.turn = nil
+                    return record
                 }
                 if envelope.role != .user, isLeakedSkillBody(text) {
                     return nil
@@ -291,6 +303,31 @@ public enum ChatNormalizer {
 
     private static func number(_ n: Double) -> String {
         n.rounded() == n ? String(format: "%.0f", n) : String(n)
+    }
+
+    /// The `<tool-use-id>` of each `<task-notification>` in the text whose
+    /// `<status>` is final (anything but "running"): Claude Code's word that
+    /// a background task, such as an Agent run in the background, ended.
+    static func finishedTaskCalls(_ text: String) -> [String] {
+        func tag(_ name: String, in block: Substring) -> String? {
+            guard let start = block.range(of: "<\(name)>"),
+                let end = block.range(of: "</\(name)>", range: start.upperBound..<block.endIndex)
+            else { return nil }
+            return block[start.upperBound..<end.lowerBound].trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        let open = "<task-notification>", close = "</task-notification>"
+        var ids: [String] = []
+        var cursor = text.startIndex
+        while let start = text.range(of: open, range: cursor..<text.endIndex) {
+            let end = text.range(of: close, range: start.upperBound..<text.endIndex)
+            let block = text[start.upperBound..<(end?.lowerBound ?? text.endIndex)]
+            if let id = tag("tool-use-id", in: block), !id.isEmpty, tag("status", in: block) != "running" {
+                ids.append(id)
+            }
+            guard let end else { break }
+            cursor = end.upperBound
+        }
+        return ids
     }
 
     static func stripTaskNotifications(_ text: String) -> String {

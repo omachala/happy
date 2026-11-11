@@ -47,6 +47,10 @@ public struct ChatReducer: Sendable {
     private var changed: Set<String> = []
     private var settled: Set<String> = []
     private var usageTime: Int64 = .min
+    /// Main-chain Agent/Task calls, by call ID, for `runningSubagents`.
+    private var subagentCalls: Set<String> = []
+    /// Call IDs whose background task a `<task-notification>` closed.
+    private var finishedTasks: Set<String> = []
     private var todosTime: Int64 = .min
     /// The newest "Context was reset" (`/clear`): nothing before it is
     /// shown, and older records arriving later are dropped (the fork's
@@ -65,6 +69,45 @@ public struct ChatReducer: Sendable {
 
     /// Current root rows in display order, with sidechains nested in tools.
     public var messages: [ChatMessage] { sorted }
+
+    /// Claude's sub-agent tools.
+    static let subagentToolNames: Set<String> = ["Agent", "Task"]
+
+    /// Sub-agents at work: an Agent call still running in the foreground,
+    /// or one launched in the background whose `<task-notification>` hasn't
+    /// come yet. Only calls in the records reduced so far are counted.
+    public var runningSubagents: Int {
+        subagentCalls.reduce(0) { count, call in
+            guard let id = tools[call], case .toolCall(let row) = rows[id] else { return count }
+            return Self.isRunningSubagent(row.tool, finished: finishedTasks.contains(call)) ? count + 1 : count
+        }
+    }
+
+    static func isRunningSubagent(_ tool: ToolCall, finished: Bool) -> Bool {
+        switch tool.state {
+        case .running:
+            // Still waiting for the person to allow it: nothing started yet.
+            return tool.permission == nil || tool.permission?.status == .approved
+        case .completed:
+            return !finished && launchedInBackground(tool)
+        case .error:
+            return false
+        }
+    }
+
+    /// An Agent call that returned at once and left its sub-agent running:
+    /// asked for with `run_in_background`, or answered with Claude Code's
+    /// "Async agent launched" receipt.
+    static func launchedInBackground(_ tool: ToolCall) -> Bool {
+        if tool.input["run_in_background"]?.boolValue == true { return true }
+        func text(_ value: JSONValue?) -> String? {
+            guard let value else { return nil }
+            if let string = value.stringValue { return string }
+            if let items = value.arrayValue { return items.lazy.compactMap { text($0) }.first }
+            return value["text"]?.stringValue ?? text(value["content"])
+        }
+        return text(tool.result)?.prefix(200).contains("Async agent launched") == true
+    }
 
     /// Folds appended records and the latest permission state into chat.
     /// Missing calls and sidechain owners remain buffered across batches.
@@ -95,6 +138,7 @@ public struct ChatReducer: Sendable {
                 continue
             }
             processedRecordCount += 1
+            finishedTasks.formUnion(record.finishedTasks)
             if record.parent == nil, let event = messageToEvent(record) {
                 record.body = .event(event)
             }
@@ -225,6 +269,7 @@ public struct ChatReducer: Sendable {
                             sidechainTools[call] = target
                         } else {
                             tools[call] = target
+                            if Self.subagentToolNames.contains(name) { subagentCalls.insert(call) }
                         }
                         toolOwners[call] = target
                         adoptOrphans(reference: call)

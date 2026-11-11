@@ -76,7 +76,7 @@ targets:
           PRODUCT_BUNDLE_IDENTIFIER: com.omachala.happy
           INFOPLIST_FILE: App/Info-Production.plist
           CODE_SIGN_ENTITLEMENTS: App/Happy-Production.entitlements
-          CURRENT_PROJECT_VERSION: "42"
+          CURRENT_PROJECT_VERSION: "43"
   HappyMac:
     # Genuine AppKit/macOS SDK target. No UIKit, Catalyst or iPad binary.
     type: application
