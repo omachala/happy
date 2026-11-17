@@ -57,6 +57,18 @@ final class SubagentActivityTests: XCTestCase {
         XCTAssertEqual(reducer.runningSubagents, 0)
     }
 
+    func testForegroundAgentWithoutResultStopsCountingAtTurnEnd() {
+        // Interrupted, respawned or lost result: the call never completes.
+        var reducer = ChatReducer()
+        _ = reducer.reduce([
+            ChatRecords.call("c1", call: "toolu_a", name: "Agent", input: .object(["prompt": .string("look")])),
+        ])
+        XCTAssertEqual(reducer.runningSubagents, 1)
+        let end = ChatRecords.session("end", at: 500, event: ChatRecords.json(#"{"t":"turn-end","status":"cancelled"}"#))
+        _ = reducer.reduce([ChatRecords.normalized("end", at: 500, raw: end)])
+        XCTAssertEqual(reducer.runningSubagents, 0)
+    }
+
     func testBackgroundAgentCountsUntilItsNotification() {
         var reducer = ChatReducer()
         _ = reducer.reduce([

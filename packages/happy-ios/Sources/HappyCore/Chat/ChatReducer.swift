@@ -51,6 +51,10 @@ public struct ChatReducer: Sendable {
     private var subagentCalls: Set<String> = []
     /// Call IDs whose background task a `<task-notification>` closed.
     private var finishedTasks: Set<String> = []
+    /// When the main chain last ended a turn. A foreground Agent call still
+    /// without a result from before then was cut off (stopped, respawned,
+    /// result lost): its sub-agent is gone, not running.
+    private var lastTurnEnd: Int64 = .min
     private var todosTime: Int64 = .min
     /// The newest "Context was reset" (`/clear`): nothing before it is
     /// shown, and older records arriving later are dropped (the fork's
@@ -79,6 +83,7 @@ public struct ChatReducer: Sendable {
     public var runningSubagents: Int {
         subagentCalls.reduce(0) { count, call in
             guard let id = tools[call], case .toolCall(let row) = rows[id] else { return count }
+            if case .running = row.tool.state, row.createdAt <= lastTurnEnd { return count }
             return Self.isRunningSubagent(row.tool, finished: finishedTasks.contains(call)) ? count + 1 : count
         }
     }
@@ -147,7 +152,9 @@ public struct ChatReducer: Sendable {
                 case .userMessageAccepted(let ref): receive(ref, receipt: Receipt(time: record.createdAt))
                 case .userMessageRejected(let ref, let reason):
                     receive(ref, receipt: Receipt(time: record.createdAt, error: reason))
-                case .ready: ready = true
+                case .ready:
+                    ready = true
+                    if record.parent == nil { lastTurnEnd = max(lastTurnEnd, record.createdAt) }
                 case .message("Turn started"): break
                 default:
                     if event == Self.contextReset {

@@ -136,7 +136,8 @@ public enum ChatNormalizer {
                 record.body = .agent(usageOnly ? [] : [.text(text, thinking: false)])
             case .text(let text, let thinking):
                 let visible = stripTaskNotifications(text)
-                if visible != text {
+                // Also when the notification follows other text and so isn't stripped.
+                if text.contains("<task-notification>") {
                     record.finishedTasks = finishedTaskCalls(text)
                 }
                 if visible != text && visible.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
