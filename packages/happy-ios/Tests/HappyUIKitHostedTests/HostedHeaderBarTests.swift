@@ -231,8 +231,8 @@ final class HostedHeaderBarTests: XCTestCase {
     }
 
     /// This fork's Happy CLI home header (MainView.tsx): the logo to
-    /// Settings on the left, the socket's status as the title, the usage
-    /// pill and `+` on the right; a clear bar. The pill and the status are
+    /// Settings on the left, the socket's status and the usage pill as the
+    /// title, only `+` on the right; a clear bar. The pill and the status are
     /// plain controls, so they must listen for `.touchUpInside`: on
     /// `.primaryActionTriggered` a tap did nothing.
     func testLegacyHomeHasTheForksHeaderAndTheClearBar() async throws {
@@ -254,11 +254,16 @@ final class HostedHeaderBarTests: XCTestCase {
         window.layoutIfNeeded()
         try await Task.sleep(for: .milliseconds(500))
         XCTAssertEqual(home.navigationItem.leftBarButtonItem?.accessibilityIdentifier, "settings")
-        let status = try XCTUnwrap(home.navigationItem.titleView as? LegacyConnectionStatusView)
-        // Outermost first: `+` at the edge, the pill inside it.
+        // The title holds the status and the usage pill beside it; `+` is
+        // alone on the right, in a container of its own.
+        let title = try XCTUnwrap(home.navigationItem.titleView as? LegacyHomeTitleView)
+        let status = title.status
+        let pill = title.pill
+        XCTAssertTrue(status.isDescendant(of: title))
+        XCTAssertTrue(pill.isDescendant(of: title))
+        XCTAssertGreaterThan(pill.frame.minX, status.frame.maxX)
         let items = home.navigationItem.rightBarButtonItems ?? []
-        XCTAssertEqual(items.first?.accessibilityIdentifier, "compose")
-        let pill = try XCTUnwrap(items.last?.customView as? UsagePillView)
+        XCTAssertEqual(items.map(\.accessibilityIdentifier), ["compose"])
         for control in [pill, status] as [UIControl] {
             var onTap = false
             control.enumerateEventHandlers { action, _, event, _ in

@@ -172,3 +172,25 @@ public struct LegacyConnectionStatusLayout: Equatable, Sendable {
         size = CGSize(width: (infoFrame ?? textFrame).maxX, height: height)
     }
 }
+
+/// The Happy CLI home's title (this fork): the connection status, then the
+/// Claude usage pill 8 after it, both centred on one line, so the usage
+/// reads at a glance and the bar's right side holds only `+`.
+///
+///     ● Connected  ( ● 26%  ● W 41% )
+public struct LegacyHomeTitleLayout: Equatable, Sendable {
+    public enum Metrics {
+        public static let gap: CGFloat = 8
+    }
+
+    public var size: CGSize
+    public var status: CGRect
+    public var pill: CGRect
+
+    public init(status: CGSize, pill: CGSize) {
+        let height = max(status.height, pill.height)
+        self.status = CGRect(x: 0, y: (height - status.height) / 2, width: status.width, height: status.height)
+        self.pill = CGRect(x: self.status.maxX + Metrics.gap, y: (height - pill.height) / 2, width: pill.width, height: pill.height)
+        size = CGSize(width: self.pill.maxX, height: height)
+    }
+}
