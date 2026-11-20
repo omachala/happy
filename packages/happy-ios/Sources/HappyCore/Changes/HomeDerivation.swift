@@ -380,6 +380,8 @@ public enum NewSessionSnapshot {
         var snapshot = snapshot
         // The pickers show no last seen: a presence tick changes nothing.
         snapshot.presenceNow = nil
+        // Nor the fork home's order: opening a chat changes nothing here.
+        snapshot.activity = [:]
         snapshot.sessions = snapshot.sessions.map { original in
             var record = ChatSessionState.rendered(original)
             if let at = original.metadata?["lastMeaningfulMessageAt"], case .object(var fields)? = record.metadata {

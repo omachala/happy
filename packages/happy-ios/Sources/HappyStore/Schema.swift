@@ -220,6 +220,19 @@ enum Schema {
             try db.execute(sql: "INSERT INTO sessionRead (sessionId, seq, readAt) SELECT id, seq, 0 FROM session")
         }
 
+        migrator.registerMigration("v10-session-message-at") { db in
+            // When each chat last had a message, either side, to the minute
+            // (LocalStore.noteMessageAt): the fork's home orders by it and
+            // `updatedAt`, which moves with every presence flush, can't.
+            // Seeded from the newest stored message.
+            try db.execute(sql: "ALTER TABLE sessionRead ADD COLUMN messageAt INTEGER NOT NULL DEFAULT 0")
+            try db.execute(sql: """
+                UPDATE sessionRead SET messageAt = coalesce((
+                    SELECT createdAt FROM message WHERE message.sessionId = sessionRead.sessionId ORDER BY seq DESC LIMIT 1
+                ), 0)
+                """)
+        }
+
         return migrator
     }
 }

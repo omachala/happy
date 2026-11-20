@@ -68,17 +68,39 @@ extension LocalStore {
         }
     }
 
-    /// When the person last opened or left each chat (ms), for home order.
-    public func sessionReadTimes() throws -> [String: Int64] {
-        try performRead { db in try Self.fetchReadTimes(db) }
-    }
-
-    static func fetchReadTimes(_ db: Database) throws -> [String: Int64] {
+    /// Each chat's latest activity (ms): the later of its newest message,
+    /// either side, and when the person last opened or left it. Home orders
+    /// the fork's sessions by it and calls one stale past a day.
+    static func fetchActivity(_ db: Database) throws -> [String: Int64] {
         var result: [String: Int64] = [:]
-        for row in try Row.fetchAll(db, sql: "SELECT sessionId, readAt FROM sessionRead WHERE readAt > 0") {
-            result[row["sessionId"]] = row["readAt"]
+        // A cache read before its migrations (the migration tests) has none.
+        guard try db.tableExists("sessionRead") else { return result }
+        for row in try Row.fetchAll(db, sql: "SELECT sessionId, max(readAt, messageAt) AS at FROM sessionRead WHERE readAt > 0 OR messageAt > 0") {
+            result[row["sessionId"]] = row["at"]
         }
         return result
+    }
+
+    /// How far a newer message must be before it is written down: home
+    /// orders to the minute, so a streaming turn writes once a minute,
+    /// not once a message, and its row does not shuffle meanwhile.
+    static let messageAtGranularityMs: Int64 = 60_000
+
+    /// A message, either side, at `at`: the chat's activity, to the minute.
+    static func noteMessageAt(_ sessionId: String, _ at: Int64, _ db: Database) throws {
+        try db.execute(sql: """
+            INSERT INTO sessionRead (sessionId, seq, readAt, messageAt) VALUES (?, 0, 0, ?)
+            ON CONFLICT(sessionId) DO UPDATE SET messageAt = excluded.messageAt
+            WHERE excluded.messageAt >= sessionRead.messageAt + ?
+            """, arguments: [sessionId, at, messageAtGranularityMs])
+    }
+
+    /// The newest message a sync asked for alone (`recoverUnread`).
+    public func noteSessionMessage(id: String, at: Int64) throws {
+        try performWrite { db in
+            guard try SessionRecord.exists(db, key: id) else { return }
+            try Self.noteMessageAt(id, at, db)
+        }
     }
 
     /// Sessions whose newest message is past where the person last read

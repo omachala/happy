@@ -64,8 +64,12 @@ public final class LocalStore: Sendable {
             """)
         // Async consumers must use SharedObservationBridge: GRDB invokes
         // shared callbacks while holding its client lock.
+        // Opening or leaving a chat and its newest message, to the minute
+        // (LocalStore+Unread): the fork's home order. Read markers' seq is
+        // left out.
+        let homeActivityRegion = SQLRequest<Row>(sql: "SELECT sessionId, readAt, messageAt FROM sessionRead")
         homeObservation = ValueObservation.tracking(
-            region: homeSessionRegion, MachineRecord.all(), ProjectRecord.all(),
+            region: homeSessionRegion, homeActivityRegion, MachineRecord.all(), ProjectRecord.all(),
             AccountSettingsRecord.all(), PendingSettingsRecord.all(), AccountProfileRecord.all(),
             SyncStateRecord.select(Column("key")).filter([SyncCursor.machinesLastSync.rawValue, SyncCursor.sessionsChangedSince.rawValue].contains(Column("key"))),
             fetch: { db in try Self.fetchHomeSnapshot(db) }
@@ -371,6 +375,7 @@ public final class LocalStore: Sendable {
                 for message in page.messages {
                     try Self.insertMessage(message, db)
                 }
+                if let newest = page.messages.map(\.createdAt).max() { try Self.noteMessageAt(page.sessionId, newest, db) }
                 let last = max(page.messages.map(\.seq).max() ?? 0, page.syncedThrough ?? 0)
                 if last > session.syncedMessageSeq {
                     session.syncedMessageSeq = last
@@ -400,6 +405,7 @@ public final class LocalStore: Sendable {
             }
             let old = session
             try Self.insertMessage(message, db)
+            try Self.noteMessageAt(message.sessionId, message.createdAt, db)
             session.seq = max(session.seq, message.seq)
             // The server bumps the session row in the same write that
             // allocates the message seq.
@@ -614,7 +620,8 @@ public final class LocalStore: Sendable {
             sessions: try SessionRecord.order(Column("updatedAt").desc).fetchAll(db),
             projects: try ProjectRecord.fetchAll(db),
             settings: try fetchSettingsSnapshot(db),
-            sessionsSynced: try SyncStateRecord.exists(db, key: SyncCursor.sessionsChangedSince.rawValue)
+            sessionsSynced: try SyncStateRecord.exists(db, key: SyncCursor.sessionsChangedSince.rawValue),
+            activity: try fetchActivity(db)
         )
     }
 
@@ -1045,14 +1052,19 @@ public struct LegacyHomeSnapshot: Equatable, Sendable {
     /// Updated only when disconnected last-seen text crosses its display
     /// granularity. Consumers use this clock when deriving status text.
     public var presenceNow: Int64?
+    /// Each chat's latest activity (ms) as this device saw it: its newest
+    /// message, either side, to the minute, or when it was last opened or
+    /// left, whichever is later. Absent for a chat with neither.
+    public var activity: [String: Int64]
 
-    public init(machines: MachinesSnapshot, sessions: [SessionRecord], projects: [ProjectRecord] = [], settings: SettingsSnapshot = SettingsSnapshot(), sessionsSynced: Bool = false) {
+    public init(machines: MachinesSnapshot, sessions: [SessionRecord], projects: [ProjectRecord] = [], settings: SettingsSnapshot = SettingsSnapshot(), sessionsSynced: Bool = false, activity: [String: Int64] = [:]) {
         self.machines = machines
         self.sessions = sessions
         self.projects = projects
         self.settings = settings
         self.sessionsSynced = sessionsSynced
         self.presenceNow = nil
+        self.activity = activity
     }
 }
 

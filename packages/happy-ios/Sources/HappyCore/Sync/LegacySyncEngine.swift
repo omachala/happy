@@ -341,6 +341,7 @@ public actor LegacySyncEngine {
                 else { continue }
                 let cipher = keyRing.cipher(wrappedKey: session.dataKeyCipher)
                 let newest = page.messages.max { $0.seq < $1.seq }
+                if let newest { try? store.noteSessionMessage(id: candidate.id, at: newest.createdAt) }
                 fromUser = newest.map { LocalStore.isUserSide(decoder.message($0, sessionId: candidate.id, cipher: cipher).content) } ?? false
             }
             guard viewing.current != candidate.id else { continue }

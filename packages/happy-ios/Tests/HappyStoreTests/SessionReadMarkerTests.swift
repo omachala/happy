@@ -66,7 +66,7 @@ final class SessionReadMarkerTests: XCTestCase {
         try store.markSessionRead(id: "a", at: 5_000)
         XCTAssertFalse(try XCTUnwrap(store.session(id: "a")).unread)
         XCTAssertEqual(try store.unreadCandidates(excluding: nil, now: 0), [])
-        XCTAssertEqual(try store.sessionReadTimes(), ["a": 5_000])
+        XCTAssertEqual(try store.homeSnapshot().activity, ["a": 5_000])
         XCTAssertFalse(try store.markSessionUnread(id: "a", through: 7), "read since the candidate was found")
     }
 
@@ -77,7 +77,7 @@ final class SessionReadMarkerTests: XCTestCase {
         try store.advanceReadMarker(id: "a", through: 6)
         XCTAssertEqual(try store.unreadCandidates(excluding: nil, now: 0), [])
         XCTAssertFalse(try XCTUnwrap(store.session(id: "a")).unread)
-        XCTAssertEqual(try store.sessionReadTimes(), [:], "not opened")
+        XCTAssertEqual(try store.homeSnapshot().activity, [:], "not opened")
     }
 
     func testAFreshlyThinkingSessionWaitsForItsTurnToEnd() throws {
@@ -118,6 +118,32 @@ final class SessionReadMarkerTests: XCTestCase {
         XCTAssertEqual(try upgraded.unreadCandidates(excluding: nil, now: 0).map(\.id), ["old"], "a turn after the upgrade still counts")
     }
 
+    /// Home's order: the newest message to the minute, or the last open.
+    func testActivityIsTheNewestMessageToTheMinuteOrTheLastRead() throws {
+        try store.upsertSessions([makeSession("a", seq: 0)])
+        XCTAssertEqual(try store.homeSnapshot().activity, [:])
+        _ = try store.applyLiveMessage(agent("a", seq: 1).at(100_000))
+        XCTAssertEqual(try store.homeSnapshot().activity, ["a": 100_000])
+        _ = try store.applyLiveMessage(agent("a", seq: 2).at(130_000))
+        XCTAssertEqual(try store.homeSnapshot().activity, ["a": 100_000], "a streaming turn writes once a minute")
+        _ = try store.applyLiveMessage(user("a", seq: 3).at(161_000))
+        XCTAssertEqual(try store.homeSnapshot().activity, ["a": 161_000], "either side")
+        try store.markSessionRead(id: "a", at: 500_000)
+        XCTAssertEqual(try store.homeSnapshot().activity, ["a": 500_000])
+    }
+
+    func testTheUpgradeSeedsActivityFromTheNewestStoredMessage() throws {
+        let queue = try DatabaseQueue()
+        try Schema.migrator.migrate(queue, upTo: "v9-session-read")
+        try queue.write { db in
+            try makeSession("old", seq: 2).insert(db)
+            try db.execute(sql: "INSERT INTO sessionRead (sessionId, seq, readAt) VALUES ('old', 2, 0)")
+            try agent("old", seq: 1).at(7_000).insert(db)
+            try agent("old", seq: 2).at(9_000).insert(db)
+        }
+        XCTAssertEqual(try LocalStore(writer: queue).homeSnapshot().activity, ["old": 9_000])
+    }
+
     func testTheUserSideOfTheChat() {
         XCTAssertTrue(LocalStore.isUserSide(.object(["role": .string("user")])))
         XCTAssertTrue(LocalStore.isUserSide(.object(["role": .string("session"), "content": .object(["role": .string("user"), "ev": .object(["t": .string("text")])])])))
@@ -125,5 +151,13 @@ final class SessionReadMarkerTests: XCTestCase {
         XCTAssertFalse(LocalStore.isUserSide(.object(["role": .string("session"), "content": .object(["role": .string("agent"), "ev": .object(["t": .string("turn-end")])])])))
         XCTAssertFalse(LocalStore.isUserSide(.object(["role": .string("agent"), "content": .object(["type": .string("event"), "data": .object(["type": .string("ready")])])])))
         XCTAssertFalse(LocalStore.isUserSide(nil))
+    }
+}
+
+private extension MessageRecord {
+    func at(_ createdAt: Int64) -> MessageRecord {
+        var copy = self
+        copy.createdAt = createdAt
+        return copy
     }
 }

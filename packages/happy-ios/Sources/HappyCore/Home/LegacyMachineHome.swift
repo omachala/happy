@@ -5,11 +5,12 @@ import HappyStore
 /// only live sessions, one section per computer, always headed, computers
 /// A–Z, and one row per session.
 ///
-/// Within a computer, sessions group by project (the repository a
-/// `/.dev/worktree/<name>` checkout belongs to) in the order of each
-/// project's newest session, newest session first inside a project; the
-/// groups are then flattened into one card. "Newest" is creation time, or
-/// the last activity when the synced `sortSessionsByActivity` is on.
+/// Within a computer, sessions go by latest activity, newest first
+/// (`activityAt`: the newest message either side, or when the person last
+/// opened or left the chat). A stale session (`isStale`: nothing new for
+/// a day, and not unread, working or asking) sits below every other, in
+/// the same order, drawn muted. The order moves only with activity, never
+/// with presence or `thinking`, so rows don't jump while an agent works.
 ///
 /// Pure and off the main thread; the words it can't know (`<unknown>`,
 /// "Home") are handed in, read in the screens' language on the main thread.
@@ -42,50 +43,50 @@ public struct LegacyMachineHome: Equatable, Sendable {
 
     /// `fallbackTitles` are the chats' first prompts, already made titles
     /// (`LegacyFirstPrompts`), for chats the agent hasn't named.
-    public init(_ snapshot: LegacyHomeSnapshot, fallbackTitles: [String: String] = [:], words: Words = Words()) {
-        // Only an explicit synced value counts: the fork's default is
-        // creation order, while AccountSettings defaults this key to true.
-        var stored = snapshot.settings.synced?.settings?.objectValue ?? [:]
-        stored.merge(snapshot.settings.pending) { _, pending in pending }
-        let byActivity = stored["sortSessionsByActivity"]?.boolValue ?? false
+    /// `now` (ms) decides which sessions are stale.
+    public init(_ snapshot: LegacyHomeSnapshot, fallbackTitles: [String: String] = [:], words: Words = Words(),
+                now: Int64 = Int64(Date().timeIntervalSince1970 * 1000)) {
         let machines = Dictionary(snapshot.machines.machines.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
 
-        var live = snapshot.sessions.filter(Self.isListed)
-        // The store's active list: newest first; ties in id order so the
-        // list never shuffles.
+        struct Listed {
+            var row: LegacyMachineSessionRow
+            var activityAt: Int64
+        }
+        var live = snapshot.sessions.filter(Self.isListed).map { session in
+            let path = session.metadata?["path"]?.stringValue ?? ""
+            let activityAt = Self.activityAt(session, seen: snapshot.activity[session.id])
+            let status = LegacyMachineSessionStatus(session)
+            return (session, Listed(row: LegacyMachineSessionRow(
+                id: session.id,
+                projectName: Self.projectName(Self.repoPath(path), homeDir: session.metadata?["homeDir"]?.stringValue, home: words.home),
+                worktreeName: Self.worktreeName(path),
+                title: session.title ?? fallbackTitles[session.id],
+                status: status,
+                stale: Self.isStale(status: status, activityAt: activityAt, now: now)
+            ), activityAt: activityAt))
+        }
+        // Fresh before stale, then newest activity first; ties in id order
+        // so the list never shuffles.
         live.sort { a, b in
-            let keyA = byActivity ? a.lastActivityAt : a.createdAt
-            let keyB = byActivity ? b.lastActivityAt : b.createdAt
-            if keyA != keyB { return keyA > keyB }
-            return a.id < b.id
+            if a.1.row.stale != b.1.row.stale { return !a.1.row.stale }
+            if a.1.activityAt != b.1.activityAt { return a.1.activityAt > b.1.activityAt }
+            return a.0.id < b.0.id
         }
 
         struct Group {
             var machineId: String?
             var name: String
-            var projectOrder: [String] = []
-            var projects: [String: [LegacyMachineSessionRow]] = [:]
+            var sessions: [LegacyMachineSessionRow] = []
         }
         var order: [String?] = []
         var groups: [String?: Group] = [:]
-        for session in live {
-            let metadata = session.metadata
-            let machineId = Self.nonEmpty(metadata?["machineId"]?.stringValue)
+        for (session, listed) in live {
+            let machineId = Self.nonEmpty(session.metadata?["machineId"]?.stringValue)
             if groups[machineId] == nil {
                 order.append(machineId)
                 groups[machineId] = Group(machineId: machineId, name: Self.machineName(machineId.flatMap { machines[$0] }, id: machineId, unknown: words.unknownMachine))
             }
-            let path = metadata?["path"]?.stringValue ?? ""
-            let project = Self.repoPath(path)
-            let row = LegacyMachineSessionRow(
-                id: session.id,
-                projectName: Self.projectName(project, homeDir: metadata?["homeDir"]?.stringValue, home: words.home),
-                worktreeName: Self.worktreeName(path),
-                title: session.title ?? fallbackTitles[session.id],
-                status: LegacyMachineSessionStatus(session)
-            )
-            if groups[machineId]?.projects[project] == nil { groups[machineId]?.projectOrder.append(project) }
-            groups[machineId]?.projects[project, default: []].append(row)
+            groups[machineId]?.sessions.append(listed.row)
         }
 
         // new/index.tsx `pathItems`: every folder a session of that computer
@@ -100,13 +101,35 @@ public struct LegacyMachineHome: Equatable, Sendable {
 
         sections = order.compactMap { groups[$0] }
             .map { group in
-                Section(machineId: group.machineId, name: group.name, sessions: group.projectOrder.flatMap { group.projects[$0] ?? [] })
+                Section(machineId: group.machineId, name: group.name, sessions: group.sessions)
             }
             .sorted { a, b in
                 let byName = Collation.compare(a.name, b.name)
                 if byName != .orderedSame { return byName == .orderedAscending }
                 return (a.machineId ?? "") < (b.machineId ?? "")
             }
+    }
+
+    /// Nothing new this long and the row goes stale.
+    public static let staleAfterMs: Int64 = 24 * 60 * 60 * 1000
+
+    /// The latest activity: the newest message either side (the server's
+    /// `lastMeaningfulMessageAt` when a CLI stamps it, this device's own
+    /// last send, the newest message seen here) or when the person last
+    /// opened or left the chat (`seen`, from `LegacyHomeSnapshot.activity`),
+    /// whichever is later; creation when there is nothing else.
+    static func activityAt(_ session: SessionRecord, seen: Int64?) -> Int64 {
+        let stamped = session.metadata?["lastMeaningfulMessageAt"]?.numberValue.map { Int64($0) } ?? 0
+        return max(session.createdAt, stamped, session.lastMessageSentAt ?? 0, seen ?? 0)
+    }
+
+    /// Stale: idle or offline with nothing new for a day. Unread, working,
+    /// or asking for a permission or an answer never is.
+    static func isStale(status: LegacyMachineSessionStatus, activityAt: Int64, now: Int64) -> Bool {
+        switch status {
+        case .unread, .thinking, .permissionRequired: return false
+        case .waiting, .disconnected: return now - activityAt > staleAfterMs
+        }
     }
 
     /// `session.active === true`: running and not archived (or being
@@ -219,15 +242,19 @@ public struct LegacyMachineSessionRow: Equatable, Sendable {
     /// The chat's name; nil reads "New chat".
     public var title: String?
     public var status: LegacyMachineSessionStatus
+    /// Nothing new for a day (`LegacyMachineHome.isStale`): below the rest,
+    /// muted, with no dot.
+    public var stale: Bool
 
     public var unread: Bool { status == .unread }
 
-    public init(id: String, projectName: String, worktreeName: String? = nil, title: String? = nil, status: LegacyMachineSessionStatus) {
+    public init(id: String, projectName: String, worktreeName: String? = nil, title: String? = nil, status: LegacyMachineSessionStatus, stale: Bool = false) {
         self.id = id
         self.projectName = projectName
         self.worktreeName = worktreeName
         self.title = title
         self.status = status
+        self.stale = stale
     }
 }
 
