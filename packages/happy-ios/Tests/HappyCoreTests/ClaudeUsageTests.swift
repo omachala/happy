@@ -29,14 +29,11 @@ final class ClaudeUsageTests: XCTestCase {
         func read(_ text: String) throws -> ClaudeUsage { ClaudeUsage(json: try JSONValue.decode(Data(text.utf8))) }
         let both = try read(#"{"five_hour":{"utilization":26},"seven_day":{"utilization":"41.2","resets_at":"2026-11-23T08:00:00+00:00"}}"#)
         XCTAssertEqual(both.sevenDay, .init(utilization: 41.2, resetsAt: "2026-11-23T08:00:00+00:00"))
-        XCTAssertEqual(ClaudeUsageFormat.weekly(41.2), "W 41%")
-        XCTAssertEqual(ClaudeUsageFormat.weekly(79.5), "W 80%")
-        XCTAssertEqual(ClaudeUsageFormat.spoken(both), "session 26%, weekly 41%")
+        XCTAssertEqual(ClaudeUsageFormat.percent(both.sevenDay?.utilization ?? 0), "41%")
 
         for missing in [#"{"five_hour":{"utilization":26}}"#, #"{"five_hour":{"utilization":26},"seven_day":null}"#, #"{"five_hour":{"utilization":26},"seven_day":{"utilization":null}}"#] {
             let usage = try read(missing)
             XCTAssertNil(usage.sevenDay, missing)
-            XCTAssertEqual(ClaudeUsageFormat.spoken(usage), "session 26%", missing)
         }
     }
 

@@ -178,6 +178,10 @@ public struct LegacyConnectionStatusLayout: Equatable, Sendable {
 /// reads at a glance and the bar's right side holds only `+`.
 ///
 ///     ● Connected  ( ● 26%  ● W 41% )
+///
+/// Within `width` (what the bar gives the title): the status keeps its
+/// words, and the pill takes what is left (`UsagePillLayout`'s
+/// `maxWidth`: the weekly figure goes first, then its words are cut).
 public struct LegacyHomeTitleLayout: Equatable, Sendable {
     public enum Metrics {
         public static let gap: CGFloat = 8
@@ -186,11 +190,18 @@ public struct LegacyHomeTitleLayout: Equatable, Sendable {
     public var size: CGSize
     public var status: CGRect
     public var pill: CGRect
+    /// The pill inside `pill`, as it fits there.
+    public var pillLayout: UsagePillLayout
 
-    public init(status: CGSize, pill: CGSize) {
+    public init(status: CGSize, pillText: CGSize, pillWeekly: CGSize?, width: CGFloat = .greatestFiniteMagnitude) {
+        let width = max(0, width)
+        let statusWidth = min(status.width, max(0, width - Metrics.gap - UsagePillLayout.minWidth))
+        let pillLayout = UsagePillLayout(text: pillText, weekly: pillWeekly, maxWidth: max(0, width - statusWidth - Metrics.gap))
+        let pill = pillLayout.size
         let height = max(status.height, pill.height)
-        self.status = CGRect(x: 0, y: (height - status.height) / 2, width: status.width, height: status.height)
+        self.status = CGRect(x: 0, y: (height - status.height) / 2, width: statusWidth, height: status.height)
         self.pill = CGRect(x: self.status.maxX + Metrics.gap, y: (height - pill.height) / 2, width: pill.width, height: pill.height)
+        self.pillLayout = pillLayout
         size = CGSize(width: self.pill.maxX, height: height)
     }
 }

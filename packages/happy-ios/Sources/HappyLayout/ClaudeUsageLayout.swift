@@ -7,6 +7,9 @@ import CoreGraphics
 /// words, in a capsule 10 across and 5 down. With a weekly figure its own
 /// dot and words follow 8 after the session's, so both windows read at a
 /// glance: `( ● 26%  ● W 41% )`.
+///
+/// Given less room than that (`maxWidth`), the weekly figure goes first,
+/// then the session's words (or the reason) are cut to what is left.
 public struct UsagePillLayout: Equatable, Sendable {
     public enum Metrics {
         public static let paddingX: CGFloat = 10
@@ -28,7 +31,25 @@ public struct UsagePillLayout: Equatable, Sendable {
     public var weeklyText: CGRect?
     public var cornerRadius: CGFloat { size.height / 2 }
 
-    public init(text measured: CGSize, weekly: CGSize? = nil) {
+    /// The narrowest a pill gets: its padding and dot, no words.
+    public static let minWidth: CGFloat = 2 * Metrics.paddingX + Metrics.dotSize + Metrics.dotGap
+
+    public init(text measured: CGSize, weekly measuredWeekly: CGSize? = nil, maxWidth: CGFloat = .greatestFiniteMagnitude) {
+        let full = Self(fitting: measured, weekly: measuredWeekly)
+        if full.size.width <= maxWidth {
+            self = full
+            return
+        }
+        let alone = Self(fitting: measured, weekly: nil)
+        if alone.size.width <= maxWidth {
+            self = alone
+            return
+        }
+        let room = max(0, maxWidth - Self.minWidth)
+        self = Self(fitting: CGSize(width: min(measured.width, room), height: measured.height), weekly: nil)
+    }
+
+    private init(fitting measured: CGSize, weekly: CGSize?) {
         typealias M = Metrics
         let text = CGSize(width: min(measured.width, M.maxTextWidth), height: measured.height)
         let weekly = weekly.map { CGSize(width: min($0.width, M.maxTextWidth), height: $0.height) }

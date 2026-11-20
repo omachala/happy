@@ -90,6 +90,9 @@ final class LegacyHomeHeader {
 /// The bar's title: the connection status, then the usage pill. Each stays
 /// its own control (the status opens the connection error, the pill the
 /// usage sheet); this view only places them and resizes when either does.
+/// It asks for its natural width and lays out within whatever the bar
+/// gives it (`LegacyHomeTitleLayout`): on a narrow phone the weekly figure
+/// goes first, then the pill's words are cut.
 final class LegacyHomeTitleView: UIView {
     let status: LegacyConnectionStatusView
     let pill: UsagePillView
@@ -107,11 +110,14 @@ final class LegacyHomeTitleView: UIView {
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
 
-    private func measured() -> LegacyHomeTitleLayout {
-        LegacyHomeTitleLayout(status: status.sizeThatFits(.zero), pill: pill.sizeThatFits(.zero))
+    private func measured(width: CGFloat = .greatestFiniteMagnitude) -> LegacyHomeTitleLayout {
+        let parts = pill.measuredParts()
+        return LegacyHomeTitleLayout(status: status.sizeThatFits(.zero), pillText: parts.text, pillWeekly: parts.weekly, width: width)
     }
 
-    override func sizeThatFits(_ size: CGSize) -> CGSize { measured().size }
+    override func sizeThatFits(_ size: CGSize) -> CGSize {
+        measured(width: size.width > 0 ? size.width : .greatestFiniteMagnitude).size
+    }
     override var intrinsicContentSize: CGSize { measured().size }
 
     /// A child changed size: grow or shrink to fit, and let the bar re-centre.
@@ -126,9 +132,10 @@ final class LegacyHomeTitleView: UIView {
 
     override func layoutSubviews() {
         super.layoutSubviews()
-        let layout = measured()
+        let layout = measured(width: bounds.width)
         status.setLayoutFrame(layout.status)
         pill.setLayoutFrame(layout.pill)
+        pill.setNeedsLayout()
     }
 }
 
@@ -259,14 +266,15 @@ final class UsagePillView: UIControl {
         case .loaded(let usage):
             dot.backgroundColor = UIColor(Self.color(usage.fiveHour.utilization))
             label.string = ClaudeUsageFormat.percent(usage.fiveHour.utilization)
-            spoken = ClaudeUsageFormat.spoken(usage)
+            spoken = Strings.LegacyHome.usageSpoken(usage)
             week = usage.sevenDay
             accessibilityHint = nil
         }
         if let week {
             weeklyDot.backgroundColor = UIColor(Self.color(week.utilization))
-            weeklyLabel.string = ClaudeUsageFormat.weekly(week.utilization)
+            weeklyLabel.string = Strings.LegacyHome.usageWeeklyFigure(week.utilization)
         }
+        hasWeekly = week != nil
         weeklyDot.isHidden = week == nil
         weeklyLabel.isHidden = week == nil
         accessibilityLabel = [Strings.LegacyHome.usageLabel, spoken].joined(separator: ", ")
@@ -284,9 +292,18 @@ final class UsagePillView: UIControl {
         }
     }
 
-    private func measured() -> UsagePillLayout {
+    /// The words' natural sizes: the session's (or the reason), and the
+    /// weekly figure's when the answer has one.
+    func measuredParts() -> (text: CGSize, weekly: CGSize?) {
         let unbounded = CGSize(width: CGFloat.greatestFiniteMagnitude, height: .greatestFiniteMagnitude)
-        return UsagePillLayout(text: label.sizeThatFits(unbounded), weekly: weeklyLabel.isHidden ? nil : weeklyLabel.sizeThatFits(unbounded))
+        return (label.sizeThatFits(unbounded), hasWeekly ? weeklyLabel.sizeThatFits(unbounded) : nil)
+    }
+
+    private var hasWeekly = false
+
+    private func measured(width: CGFloat = .greatestFiniteMagnitude) -> UsagePillLayout {
+        let parts = measuredParts()
+        return UsagePillLayout(text: parts.text, weekly: parts.weekly, maxWidth: width)
     }
 
     override func sizeThatFits(_ size: CGSize) -> CGSize { measured().size }
@@ -294,7 +311,10 @@ final class UsagePillView: UIControl {
 
     override func layoutSubviews() {
         super.layoutSubviews()
-        let layout = measured()
+        // Within the room the title gave it: the weekly figure goes first.
+        let layout = measured(width: bounds.width > 0 ? bounds.width : .greatestFiniteMagnitude)
+        weeklyDot.isHidden = layout.weeklyText == nil
+        weeklyLabel.isHidden = layout.weeklyText == nil
         ground.setLayoutFrame(CGRect(origin: .zero, size: layout.size))
         ground.layer.cornerRadius = layout.cornerRadius
         dot.setLayoutFrame(layout.dot)

@@ -99,19 +99,6 @@ public enum ClaudeUsageFormat {
         "\(Int((value + 0.5).rounded(.down)))%"
     }
 
-    /// The pill's weekly figure, "W 41%".
-    public static func weekly(_ value: Double) -> String {
-        "W \(percent(value))"
-    }
-
-    /// The pill's spoken value: "session 26%, weekly 41%", or the session
-    /// alone when there is no weekly window.
-    public static func spoken(_ usage: ClaudeUsage) -> String {
-        var parts = ["session \(percent(usage.fiveHour.utilization))"]
-        if let week = usage.sevenDay { parts.append("weekly \(percent(week.utilization))") }
-        return parts.joined(separator: ", ")
-    }
-
     /// A bar's fill, 0 to 1.
     public static func fraction(_ percent: Double) -> Double {
         min(max(percent, 0), 100) / 100

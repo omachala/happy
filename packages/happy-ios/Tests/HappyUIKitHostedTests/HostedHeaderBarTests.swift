@@ -277,6 +277,74 @@ final class HostedHeaderBarTests: XCTestCase {
         keep(window, "legacy-home-light")
     }
 
+    /// The title on a full phone and an iPhone SE (320 wide): Connected with
+    /// both figures, Disconnected with its info glyph, and a long reason.
+    /// It stays inside what the bar gives it, clear of the logo and `+`:
+    /// the weekly figure goes first, then the pill's words are cut.
+    func testTheLegacyTitleFitsANarrowBar() async throws {
+        let controller = AccountController(
+            serverConfig: ServerConfig(storage: InMemoryKeyValueStore()), clientID: "ios/test",
+            credentialStore: InMemoryCredentialStore(), storeDirectory: nil,
+            rnServerImport: { .confirmed(ServerConfig.defaultServerURL) },
+            transport: HeaderNoNetwork(), connector: HeaderNoSockets()
+        )
+        try await controller.signIn(Credentials(token: "t", secret: Data(repeating: 9, count: 32)))
+        let account = try XCTUnwrap(controller.session)
+        let context = AppContext(account: controller, variant: .preview, version: "test")
+        let both = ClaudeUsage(fiveHour: .init(utilization: 26, resetsAt: nil), sevenDay: .init(utilization: 41, resetsAt: nil), extra: nil)
+        let states: [(String, RealtimeStatus, Bool, ClaudeUsageState)] = [
+            ("connected", .connected, false, .loaded(both)),
+            ("disconnected", .disconnected, true, .loaded(both)),
+            ("reason", .connected, false, .failed("Anthropic account not connected")),
+        ]
+        for width in [CGFloat(393), 320] {
+            let home = LegacyHomeViewController(context: context, session: account)
+            let navigation = UINavigationController(rootViewController: home)
+            AppCoordinator.applyAppearance(to: navigation.navigationBar)
+            let scene = try await hostedActiveScene()
+            let window = hostedKeyWindow(in: scene, root: navigation)
+            window.frame = CGRect(x: 0, y: 0, width: width, height: width == 320 ? 568 : 852)
+            window.layoutIfNeeded()
+            try await Task.sleep(for: .milliseconds(400))
+            let title = try XCTUnwrap(home.navigationItem.titleView as? LegacyHomeTitleView)
+            for (name, status, tappable, usage) in states {
+                title.status.show(status, tappable: tappable)
+                title.pill.usage = usage
+                navigation.navigationBar.setNeedsLayout()
+                window.layoutIfNeeded()
+                title.layoutIfNeeded()
+                title.pill.layoutIfNeeded()
+                let inWindow = title.convert(title.bounds, to: window)
+                XCTAssertGreaterThanOrEqual(inWindow.minX, 0, "\(name) @\(width)")
+                XCTAssertLessThanOrEqual(inWindow.maxX, width, "\(name) @\(width)")
+                XCTAssertLessThanOrEqual(title.pill.frame.maxX, title.bounds.maxX + 0.5, "\(name) @\(width): the pill runs out of the title")
+                XCTAssertLessThanOrEqual(title.status.frame.maxX, title.pill.frame.minX, "\(name) @\(width)")
+                for frame in Self.barButtonFrames(navigation.navigationBar, in: window) {
+                    XCTAssertFalse(frame.intersects(inWindow.insetBy(dx: 1, dy: 1)), "\(name) @\(width): the title runs under a bar button \(frame) vs \(inWindow)")
+                }
+                keep(window, "legacy-title-\(name)-\(Int(width))")
+            }
+            window.isHidden = true
+        }
+    }
+
+    /// The bar buttons' frames (logo and `+`), in the window.
+    private static func barButtonFrames(_ bar: UINavigationBar, in window: UIWindow) -> [CGRect] {
+        var frames: [CGRect] = []
+        func walk(_ view: UIView) {
+            if let control = view as? UIControl, !(control is LegacyConnectionStatusView), !(control is UsagePillView),
+               ["settings", "compose"].contains(control.accessibilityIdentifier ?? "") || String(describing: type(of: control)).contains("Button") {
+                if !control.isHidden, control.bounds.width > 0 {
+                    frames.append(control.convert(control.bounds, to: window))
+                }
+                return
+            }
+            for child in view.subviews where !(child is LegacyHomeTitleView) { walk(child) }
+        }
+        walk(bar)
+        return frames
+    }
+
     /// A signed-in Happy account and an open agent connection each report
     /// themselves active, from two fields that know nothing of each other
     /// (`AccountController.accounts`: the anon ID and the connections'
