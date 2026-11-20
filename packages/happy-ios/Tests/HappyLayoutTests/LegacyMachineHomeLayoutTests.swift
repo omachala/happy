@@ -149,7 +149,9 @@ final class LegacyMachineHomeLayoutTests: XCTestCase {
         assertFrame(try XCTUnwrap(both.weeklyText), rect(66, 5, 36, 16))
         assertSize(both.size, CGSize(width: 112, height: 26))
         // Within a width: the weekly figure goes, then the words are cut.
-        XCTAssertNil(UsagePillLayout(text: CGSize(width: 24, height: 16), weekly: CGSize(width: 36, height: 16), maxWidth: 111).weeklyText)
+        XCTAssertNil(UsagePillLayout(text: CGSize(width: 24, height: 16), weekly: CGSize(width: 36, height: 16), maxWidth: 110).weeklyText)
+        // A width snapped to the pixel grid a hair under the natural one still fits whole.
+        XCTAssertNotNil(UsagePillLayout(text: CGSize(width: 24, height: 16), weekly: CGSize(width: 36.4, height: 16), maxWidth: 112.33).weeklyText)
         let cut = UsagePillLayout(text: CGSize(width: 24, height: 16), weekly: CGSize(width: 36, height: 16), maxWidth: 40)
         assertFrame(cut.text, rect(22, 5, 8, 16))
         assertSize(cut.size, CGSize(width: 40, height: 26))

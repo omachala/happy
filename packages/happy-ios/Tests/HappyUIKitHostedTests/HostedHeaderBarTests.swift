@@ -322,6 +322,9 @@ final class HostedHeaderBarTests: XCTestCase {
                 for frame in Self.barButtonFrames(navigation.navigationBar, in: window) {
                     XCTAssertFalse(frame.intersects(inWindow.insetBy(dx: 1, dy: 1)), "\(name) @\(width): the title runs under a bar button \(frame) vs \(inWindow)")
                 }
+                if width > 390, case .loaded = usage {
+                    XCTAssertEqual(title.pill.subviews.filter { !$0.isHidden }.count, 5, "\(name) @\(width): a full phone shows the weekly figure")
+                }
                 keep(window, "legacy-title-\(name)-\(Int(width))")
             }
             window.isHidden = true
@@ -333,7 +336,7 @@ final class HostedHeaderBarTests: XCTestCase {
         var frames: [CGRect] = []
         func walk(_ view: UIView) {
             if let control = view as? UIControl, !(control is LegacyConnectionStatusView), !(control is UsagePillView),
-               ["settings", "compose"].contains(control.accessibilityIdentifier ?? "") || String(describing: type(of: control)).contains("Button") {
+               ["settings", "compose"].contains(control.accessibilityIdentifier ?? "") || String(describing: Swift.type(of: control)).contains("Button") {
                 if !control.isHidden, control.bounds.width > 0 {
                     frames.append(control.convert(control.bounds, to: window))
                 }

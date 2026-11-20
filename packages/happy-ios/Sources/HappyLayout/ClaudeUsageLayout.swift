@@ -31,17 +31,21 @@ public struct UsagePillLayout: Equatable, Sendable {
     public var weeklyText: CGRect?
     public var cornerRadius: CGFloat { size.height / 2 }
 
+    /// A width given back after pixel snapping can be a hair under the
+    /// natural one: within this, it still fits whole.
+    public static let snapTolerance: CGFloat = 1
+
     /// The narrowest a pill gets: its padding and dot, no words.
     public static let minWidth: CGFloat = 2 * Metrics.paddingX + Metrics.dotSize + Metrics.dotGap
 
     public init(text measured: CGSize, weekly measuredWeekly: CGSize? = nil, maxWidth: CGFloat = .greatestFiniteMagnitude) {
         let full = Self(fitting: measured, weekly: measuredWeekly)
-        if full.size.width <= maxWidth {
+        if full.size.width <= maxWidth + Self.snapTolerance {
             self = full
             return
         }
         let alone = Self(fitting: measured, weekly: nil)
-        if alone.size.width <= maxWidth {
+        if alone.size.width <= maxWidth + Self.snapTolerance {
             self = alone
             return
         }
