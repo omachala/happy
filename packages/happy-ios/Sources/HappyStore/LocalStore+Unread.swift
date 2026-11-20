@@ -2,19 +2,33 @@ import Foundation
 import GRDB
 import HappyWire
 
-/// A session that moved past where the person last read it, found by
-/// `LocalStore.unreadCandidates`. `newestFromUser` says whether the
-/// newest message is the person's own (`LocalStore.isUserSide`) when it is
-/// stored here, nil when it has to be asked for.
+/// Who a stored message is from, as far as unread goes
+/// (`LocalStore.side`): the person, the agent saying something (its
+/// words, tools, files, a permission or a question), or housekeeping
+/// (ready, turn start and end, a mode switch, an abort, metrics, receipts
+/// of nothing) that never counts as something new to read.
+public enum MessageSide: Equatable, Sendable {
+    case user
+    case agent
+    case housekeeping
+}
+
+/// A session that moved past where the person last read it (`readSeq`),
+/// found by `LocalStore.unreadCandidates`. `newestSaid` is the side of the
+/// newest message after the marker that is not housekeeping, worked out
+/// from what is stored: `.housekeeping` when everything after the marker is
+/// stored and is housekeeping, nil when it has to be asked for.
 public struct UnreadCandidate: Equatable, Sendable {
     public var id: String
     public var seq: Int
-    public var newestFromUser: Bool?
+    public var readSeq: Int
+    public var newestSaid: MessageSide?
 
-    public init(id: String, seq: Int, newestFromUser: Bool?) {
+    public init(id: String, seq: Int, readSeq: Int = 0, newestSaid: MessageSide?) {
         self.id = id
         self.seq = seq
-        self.newestFromUser = newestFromUser
+        self.readSeq = readSeq
+        self.newestSaid = newestSaid
     }
 }
 
@@ -107,26 +121,56 @@ extension LocalStore {
     /// them and that are not unread yet: what a turn finished while the app
     /// was suspended, killed or offline leaves behind. Leaves out `viewing`
     /// (the chat on screen), sessions archived or being archived, sessions
-    /// that cannot be opened, and one still working on its turn by a fresh
-    /// `thinking` (it is flagged once it settles; a stale flag from before a
-    /// suspension does not hold it back).
-    public func unreadCandidates(excluding viewing: String?, now: Int64, freshThinkingMs: Int64 = 60_000) throws -> [UnreadCandidate] {
+    /// that cannot be opened, and one still working on its turn
+    /// (`isStillThinking`): it is flagged once it settles.
+    public func unreadCandidates(excluding viewing: String?, now: Int64, resumedAt: Int64? = nil,
+                                 freshPingMs: Int64 = 60_000, pingGraceMs: Int64 = 10_000) throws -> [UnreadCandidate] {
         try performRead { db in
-            let rows = try SessionRecord.fetchAll(db, sql: """
-                SELECT s.* FROM session s LEFT JOIN sessionRead r ON r.sessionId = s.id
+            let rows = try Row.fetchAll(db, sql: """
+                SELECT s.*, coalesce(r.seq, 0) AS readSeq FROM session s LEFT JOIN sessionRead r ON r.sessionId = s.id
                 WHERE s.unread = 0 AND s.archiving = 0 AND s.decryptable = 1 AND s.seq > coalesce(r.seq, 0)
                 ORDER BY s.updatedAt DESC
                 """)
-            return try rows.compactMap { session in
+            return try rows.compactMap { row in
+                let session = try SessionRecord(row: row)
+                let readSeq: Int = row["readSeq"]
                 guard session.id != viewing, !session.isArchivedOnServer else { return nil }
-                if session.thinking, now - session.thinkingAt < freshThinkingMs,
-                   !session.hasPendingPermissionRequests { return nil }
-                let newest = try MessageRecord
-                    .filter(Column("sessionId") == session.id && Column("seq") == session.seq)
-                    .fetchOne(db)
-                return UnreadCandidate(id: session.id, seq: session.seq, newestFromUser: newest.map { Self.isUserSide($0.content) })
+                if !session.hasPendingPermissionRequests,
+                   isStillThinking(session, now: now, resumedAt: resumedAt, freshPingMs: freshPingMs, pingGraceMs: pingGraceMs) {
+                    return nil
+                }
+                let said: MessageSide?
+                if session.hasPendingPermissionRequests {
+                    said = .agent
+                } else {
+                    let stored = try MessageRecord
+                        .filter(Column("sessionId") == session.id && Column("seq") > readSeq && Column("seq") <= session.seq)
+                        .order(Column("seq").desc)
+                        .fetchAll(db)
+                    if stored.first?.seq != session.seq {
+                        said = nil
+                    } else {
+                        said = Self.newestSaid(stored.map(\.content), complete: stored.count >= session.seq - readSeq)
+                    }
+                }
+                return UnreadCandidate(id: session.id, seq: session.seq, readSeq: readSeq, newestSaid: said)
             }
         }
+    }
+
+    /// Whether the agent is still on its turn, judged by its last ping, not
+    /// by when thinking started (a turn may run for many minutes): the
+    /// presence overlay's `latestAt` moves with every heartbeat, the row's
+    /// stamps only at a checkpoint. A thinking flag with no ping for
+    /// `freshPingMs` is stale (the agent died, or the app was away), except
+    /// just after the socket came back (`resumedAt`): the first ping since
+    /// gets `pingGraceMs` to arrive and say whether the turn goes on.
+    func isStillThinking(_ row: SessionRecord, now: Int64, resumedAt: Int64?, freshPingMs: Int64, pingGraceMs: Int64) -> Bool {
+        guard presenceOverlay.session(row).thinking else { return false }
+        let lastPing = max(row.activeAt, row.thinkingAt, presenceOverlay.sessionLatestAt(row.id) ?? 0)
+        if now - lastPing < freshPingMs { return true }
+        if let resumedAt, lastPing < resumedAt, now - resumedAt < pingGraceMs { return true }
+        return false
     }
 
     /// The person's side of the chat: their text (`role: user`), a session
@@ -151,6 +195,60 @@ extension LocalStore {
     }
 
     private static let receipts: Set<String> = ["user-message-accepted", "user-message-rejected"]
+
+    /// The side of the newest message that is not housekeeping, given
+    /// messages newest first. Only housekeeping: `.housekeeping` when they
+    /// are all there was (`complete`), nil when older ones are missing.
+    public static func newestSaid(_ contents: [JSONValue?], complete: Bool) -> MessageSide? {
+        for content in contents {
+            let side = side(content)
+            if side != .housekeeping { return side }
+        }
+        return complete ? .housekeeping : nil
+    }
+
+    /// Who a message is from, for unread (`MessageSide`). Only the agent's
+    /// own words, thinking, tool calls and results, files, and Gemini's
+    /// permission requests count as the agent's; its lifecycle and status
+    /// events (turn start and end, ready, mode switch, aborts, task status,
+    /// limits, metrics, sub-agent start and stop) are housekeeping. A
+    /// message that cannot be opened counts as the agent's.
+    public static func side(_ content: JSONValue?) -> MessageSide {
+        guard let content else { return .agent }
+        if isUserSide(content) { return .user }
+        switch content["role"]?.stringValue {
+        case "session":
+            let body = content["content"] ?? .null
+            let envelope = body["type"]?.stringValue == "session" ? body["data"] ?? .null : body
+            let ev = envelope["ev"] ?? .null
+            switch ev["t"]?.stringValue {
+            case "text", "service":
+                let text = ev["text"]?.stringValue ?? ""
+                return text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? .housekeeping : .agent
+            case "tool-call-start", "tool-call-end", "file":
+                return .agent
+            default:
+                return .housekeeping
+            }
+        case "agent":
+            let body = content["content"] ?? .null
+            switch body["type"]?.stringValue {
+            case "acp":
+                return agentACPContent.contains(body["data"]?["type"]?.stringValue ?? "") ? .agent : .housekeeping
+            case "output", "codex":
+                return .agent
+            default:
+                return .housekeeping
+            }
+        default:
+            return .housekeeping
+        }
+    }
+
+    private static let agentACPContent: Set<String> = [
+        "message", "reasoning", "thinking", "tool-call", "tool-result", "tool-call-result",
+        "file-edit", "terminal-output", "permission-request",
+    ]
 
     /// A session first seen after the account's first sync has no marker:
     /// it counts from zero, so one started elsewhere that ran a turn shows.

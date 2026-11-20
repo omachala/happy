@@ -15,6 +15,7 @@ final class UnreadRecoveryTests: XCTestCase {
     var engine: LegacySyncEngine!
     var server: ServerSessions!
     var newest: NewestMessage!
+    var clock: LegacySyncEngineTests.Clock!
 
     final class NewestMessage: @unchecked Sendable {
         var fromUser = false
@@ -26,7 +27,10 @@ final class UnreadRecoveryTests: XCTestCase {
         store = try LocalStore.inMemory()
         var options = LegacySyncEngine.Options()
         options.backoff = Backoff(initial: .milliseconds(1), maximum: .milliseconds(2))
-        engine = LegacySyncEngine(api: testAPI(http), store: store, keys: fixture.keys, options: options, now: { 10_000_000 })
+        let clock = LegacySyncEngineTests.Clock()
+        clock.now = 10_000_000
+        self.clock = clock
+        engine = LegacySyncEngine(api: testAPI(http), store: store, keys: fixture.keys, options: options, now: { clock.now })
         let fixture = self.fixture!
         let server = ServerSessions([fixture.session("s", seq: 2, updatedAt: 100), fixture.session("t", seq: 4, updatedAt: 100)])
         self.server = server
@@ -82,14 +86,84 @@ final class UnreadRecoveryTests: XCTestCase {
         XCTAssertFalse(try unread("t"), "nothing new there")
     }
 
-    /// The newest message not on disk yet is asked for alone.
-    func testOnlyTheNewestMessageIsAskedFor() async throws {
+    /// What is not on disk yet is asked for from the marker on, at most
+    /// the newest few (a turn ends with housekeeping after what was said).
+    func testOnlyTheMessagesPastTheMarkerAreAskedFor() async throws {
         await sync()
         let decoder = RecordDecoder(keyRing: KeyRing(keys: fixture.keys))
         try store.upsertSessions([decoder.session(fixture.session("s", seq: 5, updatedAt: 2_000))])
         await engine.recoverUnread()
-        XCTAssertEqual(http.requests("GET /v3/sessions/s/messages").last?.query("after_seq"), "4")
-        XCTAssertEqual(http.requests("GET /v3/sessions/s/messages").last?.query("limit"), "1")
+        XCTAssertEqual(http.requests("GET /v3/sessions/s/messages").last?.query("after_seq"), "2")
+        XCTAssertEqual(http.requests("GET /v3/sessions/s/messages").last?.query("limit"), "3")
+        XCTAssertTrue(try unread("s"))
+    }
+
+    /// The agent pings every couple of seconds through a turn; thinking
+    /// started long ago does not make the turn over. Only its end does.
+    func testATurnLongerThanAMinuteIsNotFlaggedMidTurn() async throws {
+        await sync()
+        let start = clock.now
+        let ping = { (offset: Int64, thinking: Bool) async in
+            self.clock.now = start + offset
+            await self.engine.presence.activity(id: "s", active: true, activeAt: start + offset, thinking: thinking)
+        }
+        await ping(0, true)
+        await ping(30_000, true)
+        await ping(59_000, true)
+        turnEnded("s", seq: 5)
+        clock.now = start + 90_000
+        await sync()
+        XCTAssertFalse(try unread("s"), "pinged 31 s ago: still on its turn, 90 s after it began")
+
+        await ping(150_000, true)
+        clock.now = start + 200_000
+        await sync()
+        XCTAssertFalse(try unread("s"), "still on its turn after three minutes")
+
+        await ping(210_000, false)
+        await sync()
+        XCTAssertTrue(try unread("s"), "the turn ended")
+    }
+
+    /// Thinking when the app went away: after a reconnect it is held back
+    /// until its first ping since has had time to come, then judged by it.
+    func testAThinkingSessionWaitsForItsFirstPingAfterAResume() async throws {
+        await sync()
+        let start = clock.now
+        await engine.presence.activity(id: "s", active: true, activeAt: start, thinking: true)
+        turnEnded("s", seq: 5)
+
+        clock.now = start + 300_000
+        await engine.noteResumed()
+        await sync()
+        XCTAssertFalse(try unread("s"), "the first ping since the resume has not had time to come")
+
+        await engine.presence.activity(id: "s", active: true, activeAt: start + 302_000, thinking: true)
+        clock.now = start + 312_000
+        await engine.recoverUnread()
+        XCTAssertFalse(try unread("s"), "it pinged: still on its turn")
+
+        await engine.presence.activity(id: "s", active: true, activeAt: start + 320_000, thinking: false)
+        clock.now = start + 320_000
+        await engine.recoverUnread()
+        XCTAssertTrue(try unread("s"), "the turn ended")
+    }
+
+    /// Thinking when the app went away and never pinged again (the agent
+    /// died): flagged once the grace after the reconnect is over.
+    func testAThinkingSessionThatNeverPingsAgainIsFlaggedAfterTheGrace() async throws {
+        await sync()
+        let start = clock.now
+        await engine.presence.activity(id: "s", active: true, activeAt: start, thinking: true)
+        turnEnded("s", seq: 5)
+
+        clock.now = start + 300_000
+        await engine.noteResumed()
+        await sync()
+        XCTAssertFalse(try unread("s"))
+
+        clock.now = start + 300_000 + LegacySyncEngine.unreadPingGraceMs
+        await engine.recoverUnread()
         XCTAssertTrue(try unread("s"))
     }
 

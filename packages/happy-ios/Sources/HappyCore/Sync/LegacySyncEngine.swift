@@ -141,6 +141,7 @@ public actor LegacySyncEngine {
     public func syncAll() async {
         ThreadRules.assertOffMain()
         guard !stopped else { return }
+        noteResumed()
         await presence.start()
         followIntents()
         for job in [Job.sessions, .machines, .settings, .profile, .outbox] {
@@ -150,6 +151,17 @@ public actor LegacySyncEngine {
             await invalidate(.messages(sessionId: sessionId))
         }
     }
+
+    /// When the last launch or reconnect began (`syncAll`): a session that
+    /// was thinking when the app went away is not flagged unread until its
+    /// first ping since has had `unreadPingGraceMs` to arrive.
+    private var resumedAt: Int64?
+    private var recoveryFollowUp: Task<Void, Never>?
+    func noteResumed() { resumedAt = now() }
+    static let unreadPingGraceMs: Int64 = 10_000
+    /// How many of a session's newest messages a sync asks for to find what
+    /// was last said past the housekeeping a turn ends with.
+    static let unreadLookBack = 20
 
     /// The chats on screen, counted: the same session may be open twice
     /// (the phone's stack and the iPad's panel).
@@ -178,6 +190,8 @@ public actor LegacySyncEngine {
         await rigComposer.stop()
         retryTask?.cancel()
         retryTask = nil
+        recoveryFollowUp?.cancel()
+        recoveryFollowUp = nil
         for job in jobs.values {
             await job.stop()
         }
@@ -330,27 +344,55 @@ public actor LegacySyncEngine {
     /// failed fetch leaves the session for the next sync.
     func recoverUnread() async {
         ThreadRules.assertOffMain()
+        let time = now()
         guard !stopped,
-              let candidates = try? store.unreadCandidates(excluding: viewing.current, now: now()) else { return }
+              let candidates = try? store.unreadCandidates(excluding: viewing.current, now: time, resumedAt: resumedAt,
+                                                           pingGraceMs: Self.unreadPingGraceMs) else { return }
+        scheduleRecoveryFollowUp(at: time)
         for candidate in candidates {
             guard !stopped else { return }
-            var fromUser = candidate.newestFromUser
-            if fromUser == nil {
+            var said = candidate.newestSaid
+            if said == nil {
+                // The newest few after the marker: a turn ends with
+                // housekeeping (turn-end, ready) after what was said.
+                let after = max(candidate.readSeq, candidate.seq - Self.unreadLookBack)
                 guard let session = try? store.session(id: candidate.id),
-                      let page = try? await api.messages(sessionId: candidate.id, afterSeq: max(0, candidate.seq - 1), limit: 1)
+                      let page = try? await api.messages(sessionId: candidate.id, afterSeq: after, limit: candidate.seq - after)
                 else { continue }
                 let cipher = keyRing.cipher(wrappedKey: session.dataKeyCipher)
-                let newest = page.messages.max { $0.seq < $1.seq }
-                if let newest { try? store.noteSessionMessage(id: candidate.id, at: newest.createdAt) }
-                fromUser = newest.map { LocalStore.isUserSide(decoder.message($0, sessionId: candidate.id, cipher: cipher).content) } ?? false
+                let messages = page.messages.sorted { $0.seq > $1.seq }
+                if let newest = messages.first { try? store.noteSessionMessage(id: candidate.id, at: newest.createdAt) }
+                let contents = messages.map { decoder.message($0, sessionId: candidate.id, cipher: cipher).content }
+                // What lies before the window, or an empty answer, is
+                // unknown: count it as said.
+                said = contents.isEmpty ? .agent : LocalStore.newestSaid(contents, complete: after == candidate.readSeq) ?? .agent
             }
             guard viewing.current != candidate.id else { continue }
-            if fromUser == true {
+            if said != .agent {
                 try? store.advanceReadMarker(id: candidate.id, through: candidate.seq)
             } else {
                 try? store.markSessionUnread(id: candidate.id, through: candidate.seq)
             }
         }
+    }
+
+    /// Inside the grace after a reconnect, a session that was thinking may
+    /// have been held back waiting for its first ping. Look once more when
+    /// the grace is over, so one whose agent never pings again still shows.
+    private func scheduleRecoveryFollowUp(at time: Int64) {
+        guard let resumedAt, recoveryFollowUp == nil else { return }
+        let remaining = resumedAt + Self.unreadPingGraceMs - time
+        guard remaining > 0 else { return }
+        let sleep = self.sleep
+        recoveryFollowUp = Task { [weak self] in
+            do { try await sleep(.milliseconds(remaining + 100)) } catch { return }
+            await self?.finishRecoveryFollowUp()
+        }
+    }
+
+    private func finishRecoveryFollowUp() async {
+        recoveryFollowUp = nil
+        await recoverUnread()
     }
 
     func pullMachines() async throws {
