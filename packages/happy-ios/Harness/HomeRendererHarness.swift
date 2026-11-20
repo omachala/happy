@@ -165,6 +165,21 @@ final class HomeRendererHarness {
                 }
                 shell.updateMode()
                 if let script = option("-desktopCard") { DesktopCardScript.run(script, in: window) }
+                // `-openChat <id>`: that seeded Happy CLI chat, pushed over
+                // home, as a tap on its row would; a second later its
+                // metadata names the model (the fork's green chip).
+                if let id = option("-openChat") {
+                    navigation.pushViewController(LegacyChatViewController(context: context, session: session, sessionId: id), animated: false)
+                    try? await Task.sleep(for: .seconds(1))
+                    try await Task.detached {
+                        guard var row = try store.sessions().first(where: { $0.id == id }) else { return }
+                        var metadata = row.metadata?.objectValue ?? [:]
+                        metadata["currentAgentModel"] = .string("claude-opus-5-5")
+                        row.metadata = .object(metadata)
+                        row.metadataVersion += 1
+                        try store.upsertSessions([row])
+                    }.value
+                }
                 if archiveCount > 0, let window = window as? HarnessWindow {
                     archiveProbe = HomeArchiveProbe(window: window, snapshots: store.homeSnapshots())
                 }
