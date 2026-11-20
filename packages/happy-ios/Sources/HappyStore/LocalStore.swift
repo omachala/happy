@@ -100,11 +100,10 @@ public final class LocalStore: Sendable {
         // Live state from a previous run is stale: the server re-sends
         // `thinking` every few seconds while it holds. An archive or leave
         // still waiting in `intent` keeps its session out of the list; any
-        // other was answered. Unread lasts one run, as the fork's in-memory
-        // set does (`markSessionUnread`).
+        // other was answered. Unread is kept: a turn that ended while the
+        // app was away stays unread until its chat is read.
         try performWrite { db in
             try db.execute(sql: "UPDATE session SET thinking = 0, thinkingAt = 0 WHERE thinking = 1")
-            try db.execute(sql: "UPDATE session SET unread = 0 WHERE unread = 1")
             try db.execute(sql: "UPDATE session SET archiving = \(Self.removalPending) WHERE archiving != \(Self.removalPending)")
             try db.execute(sql: "UPDATE outbox SET state = 'queued' WHERE state = 'sending'")
         }
@@ -252,13 +251,6 @@ public final class LocalStore: Sendable {
             record.thinkingAt = activeAt
             Self.settle(old: old, &record)
             if record != old { _ = try record.updateChanges(db, from: old) }
-        }
-    }
-
-    /// The person has seen the session's latest turn.
-    public func markSessionRead(id: String) throws {
-        try performWrite { db in
-            try db.execute(sql: "UPDATE session SET unread = 0 WHERE id = ? AND unread = 1", arguments: [id])
         }
     }
 
@@ -901,7 +893,7 @@ public final class LocalStore: Sendable {
         try performWrite { db in
             for table in [
                 "message", "outbox", "chatHistory", "session", "machine", "project", "accountSettings", "pendingSettings",
-                "accountProfile", "syncState", "attachment", "draft", "composerState", "intent",
+                "accountProfile", "syncState", "attachment", "draft", "composerState", "intent", "sessionRead",
             ] {
                 try db.execute(sql: "DELETE FROM \(table)")
             }
@@ -928,6 +920,7 @@ public final class LocalStore: Sendable {
             fresh.archiving = false
             fresh.avatarVersion = incoming.avatarVersion ?? incoming.avatar?.version
             try fresh.insert(db)
+            try seedReadMarker(fresh, db)
             return (nil, fresh)
         }
         let old = record

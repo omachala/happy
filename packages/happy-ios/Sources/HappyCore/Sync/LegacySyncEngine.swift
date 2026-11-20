@@ -320,6 +320,38 @@ public actor LegacySyncEngine {
         if full { await presence.reconcileStoredRows() }
     }
 
+    /// What the live `session-event` missed: a turn that ended, or a
+    /// permission or question that came, while the app was suspended,
+    /// killed or offline (push is off in this fork, so nothing else says).
+    /// Every session that moved past where the person last read it
+    /// (`sessionRead`) is marked unread, unless it is the chat on screen or
+    /// its newest message is the person's own, which only moves the marker.
+    /// The newest message is read from the store, or else fetched alone; a
+    /// failed fetch leaves the session for the next sync.
+    func recoverUnread() async {
+        ThreadRules.assertOffMain()
+        guard !stopped,
+              let candidates = try? store.unreadCandidates(excluding: viewing.current, now: now()) else { return }
+        for candidate in candidates {
+            guard !stopped else { return }
+            var fromUser = candidate.newestFromUser
+            if fromUser == nil {
+                guard let session = try? store.session(id: candidate.id),
+                      let page = try? await api.messages(sessionId: candidate.id, afterSeq: max(0, candidate.seq - 1), limit: 1)
+                else { continue }
+                let cipher = keyRing.cipher(wrappedKey: session.dataKeyCipher)
+                let newest = page.messages.max { $0.seq < $1.seq }
+                fromUser = newest.map { LocalStore.isUserSide(decoder.message($0, sessionId: candidate.id, cipher: cipher).content) } ?? false
+            }
+            guard viewing.current != candidate.id else { continue }
+            if fromUser == true {
+                try? store.advanceReadMarker(id: candidate.id, through: candidate.seq)
+            } else {
+                try? store.markSessionUnread(id: candidate.id, through: candidate.seq)
+            }
+        }
+    }
+
     func pullMachines() async throws {
         ThreadRules.assertOffMain()
         let rows = try await api.machines()
@@ -375,6 +407,10 @@ public actor LegacySyncEngine {
         try await pullMessageBatch(sessions)
         if sessions.count == options.messageSessionsPerPass {
             await invalidate(.pendingMessages)
+        } else {
+            // Every session list pull ends here: the newest messages are
+            // mostly on disk now, so few need asking for.
+            await recoverUnread()
         }
     }
 

@@ -209,6 +209,17 @@ enum Schema {
             try db.execute(sql: "CREATE TABLE intent (slot TEXT PRIMARY KEY NOT NULL, id TEXT NOT NULL UNIQUE, value BLOB NOT NULL)")
         }
 
+        migrator.registerMigration("v9-session-read") { db in
+            // Where the person last read each chat: the message seq the chat
+            // had when it was opened or left, and when. A sync that finds a
+            // session past its marker marks it unread (LocalStore+Unread).
+            // Seeded from what is stored now, so an upgrade lights nothing.
+            try db.execute(sql: """
+                CREATE TABLE sessionRead (sessionId TEXT PRIMARY KEY NOT NULL, seq INTEGER NOT NULL, readAt INTEGER NOT NULL)
+                """)
+            try db.execute(sql: "INSERT INTO sessionRead (sessionId, seq, readAt) SELECT id, seq, 0 FROM session")
+        }
+
         return migrator
     }
 }
