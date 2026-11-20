@@ -35,6 +35,8 @@ data class References(
     /** People the computer doesn't know; any other unnamed one is still being read. */
     val missingUsers: Set<String> = emptySet(),
     val words: ReferenceWords = ReferenceWords.English,
+    /** The Surfaces the person is in, by ID, as named ("" unnamed): a Surface link opens one. */
+    val surfaces: Map<String, String> = emptyMap(),
 ) {
     /** Something a reference can open: a conversation. */
     data class Entity(val label: String, val agentId: String)
@@ -47,11 +49,12 @@ data class References(
     }
 
     /**
-     * An HTML artifact whose latest version asks to be shown inline at its
-     * full height (`display` `inline_expanded`): the version and entry the
-     * conversation's page loads, and the colour behind it, if any.
+     * An artifact the conversation shows inline under its card, at its latest
+     * version: an HTML page that asks for it (`display` `inline_expanded`),
+     * with the entry the page loads and the colour behind it, if any; or a
+     * Gen UI view ([genUi]), drawn natively.
      */
-    data class Page(val version: Int, val entry: String, val background: String? = null)
+    data class Page(val version: Int, val entry: String, val background: String? = null, val genUi: Boolean = false)
 
     sealed interface View {
         val label: String
@@ -96,9 +99,30 @@ data class References(
                     else -> View.Mention("@…", me = reference.id == me)
                 }
             }
+            "surface" -> surfaces[reference.id]?.let { name -> View.Link(name.trim().ifEmpty { words.untitledSurface }) } ?: inert
             // Projects aren't on this phone; services open nowhere yet.
             else -> inert
         }
+    }
+
+    /**
+     * The reference a link to [url] names when this connection holds it, read
+     * from the address (a Happy URL or a share link; [here] says which
+     * installation is this connection's): an in-app link, desktop's `link`
+     * view. Null for another server's, for what isn't held (archived, a
+     * project, a person) and for any other address.
+     */
+    fun resolve(url: String, here: (String) -> Boolean): HappyReferences.Reference? {
+        val (reference, instanceId) = HappyReferences.reference(url) ?: return null
+        if (instanceId != null && !here(instanceId)) return null
+        return reference.takeIf { view(it) is View.Link }
+    }
+
+    /** Whether a link to [url] names a conversation [resolve] finds whose work runs now, one of [busy]'s agent IDs: its label shimmers. */
+    fun busy(url: String, here: (String) -> Boolean, busy: Set<String>): Boolean {
+        if (busy.isEmpty()) return false
+        val reference = resolve(url, here) ?: return false
+        return entity(reference)?.agentId in busy
     }
 
     /** The conversation a reference opens, for an agent or a workspace. */
@@ -125,13 +149,25 @@ data class References(
     }
 
     companion object {
-        /** Whether [text] may hold a reference at all: most messages don't, and are never parsed for one. */
-        fun mayHold(text: String): Boolean = text.contains("<happy-")
+        /** Whether [text] may hold a reference at all, a tag, a Happy link or a share link: most messages don't, and are never parsed for one. */
+        fun mayHold(text: String): Boolean =
+            text.contains("<happy-") || text.contains("happy:", ignoreCase = true) || text.contains("happy-file:", ignoreCase = true) ||
+                text.contains(com.slopus.happy.agent.HappyShareLinks.PREFIX)
 
         /**
          * `messageReferenceEntities`, from the bots and tasks [catalog] holds,
          * each owner's agent as the catalog has it newest, with its active subtasks.
          */
+        /**
+         * The Surfaces a reference can name, by ID, as named: the ones the
+         * person is in and hasn't archived (desktop's catalog names, home's list).
+         */
+        fun surfaces(catalog: AgentCatalog): Map<String, String> = catalog.surfaces.values
+            .filter { it["status"].str != "archived" && (it["archivedAt"] ?: JsonNull) == JsonNull }
+            .filter { surface -> (surface["members"] as? JsonArray).orEmpty().any { (it as? JsonObject)?.get("userId").str == catalog.userId } }
+            .mapNotNull { surface -> surface["id"].str?.let { it to surface["name"].str.orEmpty() } }
+            .toMap()
+
         fun entities(catalog: AgentCatalog): Pair<Map<String, Entity>, Map<String, Entity>> {
             val agents = HashMap<String, Entity>()
             val workspaces = HashMap<String, Entity>()
@@ -174,10 +210,18 @@ data class References(
         /**
          * An artifact object as a page the conversation shows inline: an
          * active HTML artifact of files (not a live URL) whose latest version
-         * asks for `inline_expanded`. Null for anything else, which stays a card.
+         * asks for `inline_expanded`, or an active Gen UI artifact unless its
+         * latest version asks to stay at its title (`inline_compact`, `side`),
+         * as desktop does. Null for anything else, which stays a card.
          */
         fun page(artifact: JsonObject): Page? {
-            if (artifact["status"].str == "deleted" || artifact["type"].str != "html" || artifact["display"].str != "inline_expanded") return null
+            if (artifact["status"].str == "deleted") return null
+            if (artifact["type"].str == "gen_ui") {
+                if (artifact["display"].str == "inline_compact" || artifact["display"].str == "side") return null
+                val version = artifact["latestVersion"].num?.toInt() ?: return null
+                return Page(version, artifact["entry"].obj?.get("path").str.orEmpty(), genUi = true)
+            }
+            if (artifact["type"].str != "html" || artifact["display"].str != "inline_expanded") return null
             if (artifact["live"].let { it != null && it !is JsonNull }) return null
             val entry = artifact["entry"].obj?.get("path").str ?: return null
             val version = artifact["latestVersion"].num?.toInt() ?: return null
@@ -206,6 +250,8 @@ data class ReferenceWords(
     /** By kind; [unavailableReference] for any other. */
     val unavailableKinds: Map<String, String>,
     val unavailableReference: String,
+    /** A Surface with no name (desktop's). */
+    val untitledSurface: String = "Untitled",
 ) {
     fun unavailable(kind: String): String = unavailableKinds[kind] ?: unavailableReference
 

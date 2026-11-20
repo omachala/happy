@@ -65,7 +65,7 @@ public struct Shared: Equatable, Sendable {
     static func of(item: ChatItem) -> Shared {
         var shared = Shared()
         switch item.role {
-        case .collaborator, .failure, .turnEnd, .question, .trace: return shared
+        case .collaborator, .own, .failure, .turnEnd, .question, .trace, .section: return shared
         // A tool call's pieces are what it showed.
         case .user, .agent, .tool: break
         }
@@ -78,7 +78,7 @@ public struct Shared: Equatable, Sendable {
             case .file(let one): media.append(.tool(one))
             case .text(let text): texts.append(text)
             // Not the computer's yet: it is shared once it is there.
-            case .artifact, .sidebarProposal, .sentFile: break
+            case .artifact, .sidebarProposal, .sentFile, .genUI: break
             }
         }
         shared.add(media: media, texts: texts)
@@ -126,6 +126,8 @@ public struct Shared: Equatable, Sendable {
                 case .toolCall(let id, _, _, let presentation, _, _, _, _):
                     guard let presentation, presentation.type == "media" else { continue }
                     media += (presentation.items ?? []).enumerated().map { .tool(HappyCore.Media(toolCallId: id, index: $0.offset, item: $0.element)) }
+                case .file(let file):
+                    media.append(.tool(HappyCore.Media(file: file)))
                 case .reasoning, .compaction, .unknown:
                     continue
                 }

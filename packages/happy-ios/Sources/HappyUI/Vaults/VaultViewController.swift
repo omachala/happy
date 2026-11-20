@@ -8,14 +8,12 @@ import UltraView
 /// A vault Surface, as Finder: one screen per folder, pushed as the person
 /// goes in, its name in the bar over the path it is at (whose ancestors
 /// the title's menu goes back to). Uploads under way sit over the folder's
-/// entries, folders first in the order the bar's menu picks. The bar's
-/// search looks through the whole vault, by names then contents. A tap
-/// opens a folder or previews a file; a hold offers what can be done to an
+/// entries, folders first in the order the bar's menu picks. A tap opens a folder or previews a file; a hold offers what can be done to an
 /// entry, a swipe moves it to the Trash. The "+" makes folders and uploads
 /// from Files and Photos; the "…" holds the order, the Trash, the vault's
 /// settings and its zip. What the library hears from the computer shows
 /// as it happens; there is nothing to refresh.
-final class VaultViewController: UIViewController, UISearchResultsUpdating {
+final class VaultViewController: UIViewController {
     private let session: Session
     let surfaceId: String
     private let vaultName: String
@@ -24,12 +22,9 @@ final class VaultViewController: UIViewController, UISearchResultsUpdating {
     private let library: VaultLibrary
     private lazy var actions = VaultActions(session: session, surfaceId: surfaceId, vaultName: vaultName, host: self)
     let list = CardListView()
-    private(set) lazy var searchController = UISearchController(searchResultsController: nil)
     private var pipeline: ApplyPipeline<VaultListInput, Applied, Output>?
     private var following: Task<Void, Never>?
     private var followingFolder: Task<Void, Never>?
-    private var searching: Task<Void, Never>?
-    private var followingChanges: Task<Void, Never>?
     private var locating: Task<Void, Never>?
     /// The folders over this one, outermost first.
     private var ancestors: [VaultLocation.Ancestor] = []
@@ -40,7 +35,6 @@ final class VaultViewController: UIViewController, UISearchResultsUpdating {
 
     enum Row: Equatable, Sendable {
         case entry(VaultEntry)
-        case result(VaultSearchResult)
         case upload(VaultUploadState)
     }
 
@@ -78,8 +72,6 @@ final class VaultViewController: UIViewController, UISearchResultsUpdating {
     deinit {
         following?.cancel()
         followingFolder?.cancel()
-        searching?.cancel()
-        followingChanges?.cancel()
         locating?.cancel()
         pipeline?.cancel()
     }
@@ -96,6 +88,7 @@ final class VaultViewController: UIViewController, UISearchResultsUpdating {
         list.swipeActions = { [weak self] id in self?.swipeActions(id) ?? [] }
         list.accessibilityActions = { [weak self] id in self?.accessibilityActions(id) ?? [] }
         setUpBar()
+        accessWatch = session.watchAccess { [weak self] in self?.updateBarItems(); self?.updateInput() }
 
         let pipeline = ApplyPipeline<VaultListInput, Applied, Output>(
             input: currentInput(),
@@ -111,13 +104,6 @@ final class VaultViewController: UIViewController, UISearchResultsUpdating {
                 guard input.state != state else { return false }
                 input.state = state
                 return true
-            }
-        }
-        // A search on screen is asked again as the vault changes.
-        followingChanges = Task { [weak self] in
-            for await _ in await library.changes(surfaceId) {
-                guard let self else { return }
-                if self.searchController.isActive, !(self.searchController.searchBar.text ?? "").isEmpty { self.search(after: .milliseconds(600)) }
             }
         }
         if let folder {
@@ -159,17 +145,17 @@ final class VaultViewController: UIViewController, UISearchResultsUpdating {
         }
     }
 
+    private var accessWatch: Watch?
+    /// What the person's role may do here (`VaultAccess`, `RoleGate`): on a
+    /// cloud server, read-only until both are read.
+    private var access: VaultAccess { session.vaultAccess(surfaceId) }
+    private var writable: Bool { access.canWrite(session.gate) }
+    /// The Policy vault's own folders and documents, never moved, renamed
+    /// or deleted.
+    private func isProtected(_ entry: VaultEntry) -> Bool { access.isProtected(entry, in: folder) }
+
     private func setUpBar() {
         HeaderBar.edge(list.edge, in: self)
-        searchController.searchResultsUpdater = self
-        searchController.obscuresBackgroundDuringPresentation = false
-        searchController.searchBar.placeholder = Strings.Vaults.search
-        searchController.searchBar.searchTextField.accessibilityIdentifier = "vault-search-field"
-        navigationItem.searchController = searchController
-        navigationItem.hidesSearchBarWhenScrolling = false
-        navigationItem.preferredSearchBarPlacement = .integratedButton
-        if #available(iOS 26.0, *) { navigationItem.searchBarPlacementAllowsToolbarIntegration = false }
-        definesPresentationContext = true
         updateBarItems()
         navigationItem.titleMenuProvider = { [weak self] _ in self?.pathMenu() }
     }
@@ -179,7 +165,7 @@ final class VaultViewController: UIViewController, UISearchResultsUpdating {
         let more = UIBarButtonItem(image: UIImage(systemName: "ellipsis"), menu: UIMenu(children: [UIDeferredMenuElement.uncached { [weak self] done in done(self?.moreItems() ?? []) }]))
         more.accessibilityLabel = Strings.Vaults.more
         more.accessibilityIdentifier = "vault-more"
-        guard !state.inTrash, state.status != .missing else {
+        guard !state.inTrash, state.status != .missing, writable else {
             navigationItem.rightBarButtonItems = [more]
             return
         }
@@ -223,8 +209,9 @@ final class VaultViewController: UIViewController, UISearchResultsUpdating {
             ]),
             UIMenu(options: .displayInline, children: [
                 UIAction(title: Strings.Vaults.trash, image: Glyphs.image("trash-outline", size: 20)) { [weak self] _ in self?.openTrash() },
+            ] + (access.canEditSettings(session.gate) ? [
                 UIAction(title: Strings.Vaults.settings, image: Glyphs.image("settings-outline", size: 20)) { [weak self] _ in self?.openSettings() },
-            ]),
+            ] : [])),
         ]
     }
 
@@ -299,6 +286,7 @@ final class VaultViewController: UIViewController, UISearchResultsUpdating {
         input.displayScale = traitCollection.displayScale > 0 ? traitCollection.displayScale : 2
         input.dark = traitCollection.userInterfaceStyle == .dark
         input.now = Date()
+        input.writable = writable
         return input
     }
 
@@ -313,6 +301,7 @@ final class VaultViewController: UIViewController, UISearchResultsUpdating {
             input.dark = next.dark
             input.now = next.now
             input.words = next.words
+            input.writable = next.writable
         }
     }
 
@@ -326,12 +315,8 @@ final class VaultViewController: UIViewController, UISearchResultsUpdating {
         let moved = order != applied.order || items.contains { applied.items[$0.id]?.revision != $0.revision }
         guard moved || applied.state != input.state else { return nil }
         var rows: [String: Row] = [:]
-        if let search = input.search {
-            for (index, result) in search.results.enumerated() { rows[VaultListItems.resultID(index)] = .result(result) }
-        } else {
-            for entry in input.state.entries { rows[VaultListItems.entryID(entry.id)] = .entry(entry) }
-            for upload in input.state.uploads { rows[VaultListItems.uploadID(upload.id)] = .upload(upload) }
-        }
+        for entry in input.state.entries { rows[VaultListItems.entryID(entry.id)] = .entry(entry) }
+        for upload in input.state.uploads { rows[VaultListItems.uploadID(upload.id)] = .upload(upload) }
         let next = Applied(items: Dictionary(items.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first }), order: order, counter: counter, state: input.state)
         let replan: @Sendable (CGFloat) -> [CardItem] = { width in
             var input = input
@@ -351,41 +336,11 @@ final class VaultViewController: UIViewController, UISearchResultsUpdating {
         return true
     }
 
-    // MARK: Search
-
-    func updateSearchResults(for searchController: UISearchController) { search(after: .milliseconds(250)) }
-
-    /// Asks the computer once typing (or a burst of changes) pauses.
-    private func search(after pause: Duration) {
-        let query = (searchController.searchBar.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        searching?.cancel()
-        guard searchController.isActive, !query.isEmpty else {
-            pipeline?.update { $0.search = nil }
-            return
-        }
-        pipeline?.update { input in
-            var search = input.search ?? VaultSearchState()
-            if search.query != query { search.searching = true }
-            input.search = search
-        }
-        let library = library, surfaceId = surfaceId
-        searching = Task { [weak self] in
-            try? await Task.sleep(for: pause)
-            guard !Task.isCancelled else { return }
-            let found = try? await library.search(surfaceId, query: query)
-            guard !Task.isCancelled, let self else { return }
-            self.pipeline?.update { input in
-                input.search = VaultSearchState(query: query, results: found?.results ?? [], truncated: found?.truncated ?? false, searching: false)
-            }
-        }
-    }
-
     // MARK: Acts
 
     private func entry(_ id: String) -> VaultEntry? {
         switch rows[id] {
         case .entry(let entry): entry
-        case .result(let result): result.entry
         default: nil
         }
     }
@@ -393,26 +348,20 @@ final class VaultViewController: UIViewController, UISearchResultsUpdating {
     private func open(_ id: String) {
         switch rows[id] {
         case .upload(let upload): uploadFailed(upload, from: id)
-        case .result(let result):
-            if result.entry.isFolder {
-                push(result.entry, ancestors: nil)
-            } else {
-                preview(result.entry)
-            }
         case .entry(let entry):
             if entry.isFolder { push(entry, ancestors: (folder.map { ancestors + [.init(id: $0.id, name: $0.name)] }) ?? []) } else { preview(entry) }
         case nil: break
         }
     }
 
-    /// Into `entry`; with no path known it is read.
-    private func push(_ entry: VaultEntry, ancestors: [VaultLocation.Ancestor]?) {
-        let screen = VaultViewController(session: session, surfaceId: surfaceId, vaultName: vaultName, folder: entry, ancestors: ancestors ?? [])
+    /// Into `entry`, under the folders over it.
+    private func push(_ entry: VaultEntry, ancestors: [VaultLocation.Ancestor]) {
+        let screen = VaultViewController(session: session, surfaceId: surfaceId, vaultName: vaultName, folder: entry, ancestors: ancestors)
         navigationController?.pushViewController(screen, animated: true)
     }
 
     private func preview(_ entry: VaultEntry, version: Int? = nil) {
-        navigationController?.pushViewController(VaultPreviewViewController(session: session, surfaceId: surfaceId, vaultName: vaultName, entry: entry, version: version), animated: true)
+        navigationController?.pushViewController(VaultPreviewViewController(session: session, surfaceId: surfaceId, vaultName: vaultName, entry: entry, version: version, parent: .some(folder)), animated: true)
     }
 
     private func uploadFailed(_ upload: VaultUploadState, from id: String) {
@@ -464,8 +413,9 @@ final class VaultViewController: UIViewController, UISearchResultsUpdating {
         if !entry.isFolder {
             open.append(UIAction(title: Strings.Vaults.history, image: Glyphs.image("time-outline", size: 20)) { [weak self] _ in self?.openHistory(entry) })
         }
-        guard changeable(entry) else { return UIMenu(children: open) }
-        var edits: [UIMenuElement] = [
+        guard changeable(entry), writable else { return UIMenu(children: open) }
+        let fixed = isProtected(entry)
+        var edits: [UIMenuElement] = fixed ? [] : [
             UIAction(title: Strings.Vaults.rename, image: Glyphs.image("create-outline", size: 20)) { [weak self] _ in self?.actions.rename(entry) },
             UIAction(title: Strings.Vaults.move, image: Glyphs.image("folder-outline", size: 20)) { [weak self] _ in self?.actions.move(entry) },
         ]
@@ -475,14 +425,15 @@ final class VaultViewController: UIViewController, UISearchResultsUpdating {
         return UIMenu(children: [
             UIMenu(options: .displayInline, children: open),
             UIMenu(options: .displayInline, children: edits),
+        ] + (fixed ? [] : [
             UIMenu(options: .displayInline, children: [
                 UIAction(title: Strings.Vaults.delete, image: Glyphs.image("trash-outline", size: 20), attributes: .destructive) { [weak self] _ in self?.actions.delete(entry) },
             ]),
-        ])
+        ]))
     }
 
     private func swipeActions(_ id: String) -> [ListSwipeAction] {
-        guard let entry = entry(id), changeable(entry) else { return [] }
+        guard let entry = entry(id), changeable(entry), writable, !isProtected(entry) else { return [] }
         return [
             ListSwipeAction(title: Strings.Vaults.delete, image: .icon(.ionicons("trash-outline"), size: 20), color: UIColor(Palette.statusError), isDestructive: true) { [weak self] in
                 self?.actions.delete(entry)
@@ -501,7 +452,7 @@ final class VaultViewController: UIViewController, UISearchResultsUpdating {
         if !entry.isFolder {
             items.append(UIAccessibilityCustomAction(name: Strings.Vaults.history) { [weak self] _ in self?.openHistory(entry); return true })
         }
-        guard changeable(entry) else { return items }
+        guard changeable(entry), writable, !isProtected(entry) else { return items }
         items.append(UIAccessibilityCustomAction(name: Strings.Vaults.rename) { [weak self] _ in self?.actions.rename(entry); return true })
         items.append(UIAccessibilityCustomAction(name: Strings.Vaults.move) { [weak self] _ in self?.actions.move(entry); return true })
         items.append(UIAccessibilityCustomAction(name: Strings.Vaults.delete) { [weak self] _ in self?.actions.delete(entry); return true })

@@ -1,13 +1,21 @@
 package com.slopus.happy.conversation
 
+import com.slopus.happy.analytics.AnalyticsEvent
+import com.slopus.happy.analytics.Effort
+import com.slopus.happy.analytics.ErrorArea
+import com.slopus.happy.analytics.ErrorCode
+import com.slopus.happy.analytics.MessageSource
 import com.slopus.happy.connection.AgentConnectionException
 import com.slopus.happy.connection.TransportResponse
+import com.slopus.happy.pipelines.PipelineRunNotice
+import com.slopus.happy.pipelines.PipelineRunState
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.advanceUntilIdle
@@ -50,9 +58,39 @@ private class FakeAgent {
     var commandStatus = 202
     /** A send writes half its body, then waits for this before writing the rest and answering. */
     var halfway: CompletableDeferred<Unit>? = null
+    /** Happy Cloud attachments uploaded (`PUT /v0/agents/:id/attachments?name=`): name, type and bytes; null answers 404, a server without the route. */
+    var attachments: ArrayList<Triple<String, String, ByteArray>>? = ArrayList()
+    /** A computer's attachments routes (`…/attachments/:sha256`); null answers them 404, as an older computer does. */
+    var daemon: FakeAttachments? = null
+    /** Runs as a send arrives, before it is answered: a test's way to expire an upload. */
+    var beforeSend: () -> Unit = {}
+    /** Runs as a workspace file write arrives. */
+    var beforeWrite: () -> Unit = {}
+    /** Sends to [attachments]' route, and to [daemon]'s. */
+    val fileRequest: AgentFileRequest = { method, path, body, headers ->
+        requests += Triple(method, path, null)
+        val uploads = attachments
+        val contentType = headers["Content-Type"].orEmpty()
+        val chunked = daemon
+        when {
+            chunked != null && "/attachments/" in path -> chunked.request(method, path, body, headers)
+            method != "PUT" || !path.substringBefore('?').endsWith("/attachments") -> TransportResponse(404, body = "{}".toByteArray())
+            uploads == null -> TransportResponse(404, body = """{"error":"Not found.","code":"not_found"}""".toByteArray())
+            else -> {
+                val name = java.net.URLDecoder.decode(path.substringAfter("name="), "UTF-8")
+                uploads += Triple(name, contentType, body)
+                val id = java.security.MessageDigest.getInstance("SHA-256").digest(body).joinToString("") { "%02x".format(it) }
+                TransportResponse(201, body = """{"attachment":{"id":"$id","name":"$name","mimeType":"$contentType","size":${body.size}}}""".toByteArray())
+            }
+        }
+    }
     /** What `GET /v0/config` answers. */
     var config = CONFIG
     var commandsAfter = """[{"name":"compact","hasArguments":false,"description":"Summarize.","kind":"compaction"}]"""
+    /** `GET /v0/skills`'s pages by `pageCursor`, null the first; with none it answers 404, a computer without skills. */
+    var skillPages: Map<String?, String> = emptyMap()
+    /** The next reads of a later skills page answer 409: the catalog changed under them. */
+    var skillConflicts = 0
 
     val request: AgentRequest = { method, path, body, _ ->
         requests += Triple(method, path, body as? JsonObject)
@@ -64,6 +102,7 @@ private class FakeAgent {
             route == "/v0/tasks" -> ok("""{"task":{"id":${(body as JsonObject)["id"]},"agent":{"id":"${(body as JsonObject)["agentId"]!!.toString().trim('"')}","workspaceId":"w","status":"idle"}},"membership":{}}""")
             route.endsWith("/bootstrap") -> { beforeBootstrap(); ok(bootstrap) }
             method == "PUT" && route.startsWith("/v0/workspaces/") && route.endsWith("/file") -> {
+                beforeWrite()
                 val o = body as JsonObject
                 val key = route.removePrefix("/v0/workspaces/").removeSuffix("/file") + ":" + o["path"]!!.toString().trim('"')
                 val bytes = java.util.Base64.getDecoder().decode(o["content"]!!.toString().trim('"'))
@@ -78,6 +117,9 @@ private class FakeAgent {
             route.endsWith("/messages") && failOlder && "before=" in path -> TransportResponse(503, body = "{}".toByteArray())
             route.endsWith("/messages") && "after=" in path && afterPage != null -> ok(afterPage!!)
             route.endsWith("/messages") -> ok(page)
+            route.endsWith("/send") && daemon != null && run { beforeSend(); true } &&
+                (body as JsonObject)["content"]?.jsonArray.orEmpty().any { it.jsonObject["type"]?.jsonPrimitive?.content == "file" && it.jsonObject["attachment"]!!.jsonPrimitive.content !in daemon!!.stored } ->
+                TransportResponse(400, body = """{"error":"No such attachment.","code":"attachment_not_found"}""".toByteArray())
             route.endsWith("/send") && halfway != null -> {
                 val bytes = body.toString().toByteArray()
                 val progress = kotlinx.coroutines.currentCoroutineContext()[com.slopus.happy.connection.BodyProgress]
@@ -95,6 +137,13 @@ private class FakeAgent {
                 TransportResponse(commandStatus, body = """{"error":"The daemon's own words.","code":"conflict"}""".toByteArray())
             }
             route == "/v0/config" -> ok(config)
+            route == "/v0/skills" -> {
+                val cursor = path.substringAfter("pageCursor=", "").takeIf { it.isNotEmpty() }
+                when {
+                    cursor != null && skillConflicts > 0 -> { skillConflicts--; TransportResponse(409, body = """{"error":"Changed.","code":"conflict"}""".toByteArray()) }
+                    else -> skillPages[cursor]?.let(::ok) ?: TransportResponse(404, body = """{"error":"Not found.","code":"not_found"}""".toByteArray())
+                }
+            }
             route.endsWith("/draft") -> ok("""{"draft":${(body as JsonObject).let { """{"value":${it["draft"]},"updatedAt":${it["updatedAt"]}}""" }}}""")
             else -> ok("{}")
         }
@@ -125,6 +174,8 @@ private class FakeAgent {
 class ConversationTest {
     private val signals = MutableSharedFlow<ConversationSignal>(extraBufferCapacity = 64)
     private val jobs = ArrayList<Job>()
+    /** What the conversations record for analytics, `error_shown` included. */
+    private val recorded = ArrayList<AnalyticsEvent>()
 
     @After fun cancel() = jobs.forEach { it.cancel() }
 
@@ -136,9 +187,14 @@ class ConversationTest {
         typesetter: RowTypesetter? = null,
         preferences: kotlinx.coroutines.flow.StateFlow<ModelPreferences>? = null,
         started: (Mode) -> Unit = {},
+        cloudFiles: Boolean = false,
+        // An older computer unless a test says otherwise: pictures inline, files in the workspace.
+        route: AttachmentRoute = AttachmentRoute().apply { markMissing() },
+        kept: MutableMap<String, java.io.File> = HashMap(),
+        grouped: MutableStateFlow<Boolean>? = null,
         created: (JsonObject) -> Unit = {},
     ) = Conversation(
-        api = ConversationApi(agent.request),
+        api = ConversationApi(null, agent.request, fileRequest = agent.fileRequest),
         signals = signals,
         // Not backgroundScope: advanceUntilIdle leaves its work alone. Cancelled after each test.
         scope = CoroutineScope(StandardTestDispatcher(testScheduler) + SupervisorJob().also { jobs += it }),
@@ -155,6 +211,12 @@ class ConversationTest {
         typesetter = typesetter,
         preferences = preferences,
         onStarted = started,
+        record = { recorded += it },
+        errorShown = { area, code -> recorded += AnalyticsEvent.ErrorShown(area, code) },
+        cloudFiles = cloudFiles,
+        attachmentRoute = route,
+        keepAttachment = { id, file -> kept[id] = file },
+        grouped = grouped,
     ).also { it.start() }
 
     private fun event(type: String, payload: String) = ConversationSignal.Event(type, Json.parseToJsonElement(payload).jsonObject)
@@ -233,6 +295,95 @@ class ConversationTest {
         advanceUntilIdle()
         assertFalse(chat.state.value.syncing)
         assertTrue(chat.state.value.error != null)
+    }
+
+    /** The call reads the rows the chat draws, newest first, as turns oldest first: each answer with its own question. */
+    @Test fun `a call reads a conversation's turns each with its own message`() = runTest {
+        val agent = FakeAgent()
+        agent.page = """{"runs":[
+          {"id":"r1","status":"completed","startedAt":1,"endedAt":3,"messages":[
+            {"id":"u1","role":"user","createdAt":1,"content":[{"type":"text","text":"First question"}],"metadata":{}},
+            {"id":"a1","role":"agent","createdAt":2,"content":[{"type":"text","text":"First answer"}],"metadata":{}}]},
+          {"id":"r2","status":"completed","startedAt":4,"endedAt":6,"messages":[
+            {"id":"u2","role":"user","createdAt":4,"content":[{"type":"text","text":"Second question"}],"metadata":{}},
+            {"id":"a2","role":"agent","createdAt":5,"content":[{"type":"text","text":"Second answer"}],"metadata":{}}]}
+        ],"hasMore":false}"""
+        val chat = conversation(agent)
+        advanceUntilIdle()
+        val target = com.slopus.happy.call.CallTarget("a1", "Fix it", com.slopus.happy.call.CallTarget.Kind.Task, com.slopus.happy.call.CallTarget.Status.Idle)
+        val read = com.slopus.happy.call.CallTargetState.from(chat.state.value, target)
+        assertEquals(
+            listOf(
+                com.slopus.happy.call.CallTurn("r1", "First question", "First answer", endedAt = 3),
+                com.slopus.happy.call.CallTurn("r2", "Second question", "Second answer", endedAt = 6),
+            ),
+            read.turns,
+        )
+        assertNull(read.unanswered)
+        assertEquals(listOf("First question", "First answer", "Second question", "Second answer"), read.messages.map { it.text })
+        assertEquals(listOf(null, "r1", null, "r2"), read.messages.map { it.turn })
+        // The person's next message, taken but not answered yet, is the one waiting.
+        agent.bootstrap = agent.bootstrap.replace("\"pending\":[]", """"pending":[{"id":"u3","role":"user","status":"pending","createdAt":7,"content":[{"type":"text","text":"Third question"}],"metadata":{}}]""")
+        val waiting = conversation(agent)
+        advanceUntilIdle()
+        val later = com.slopus.happy.call.CallTargetState.from(waiting.state.value, target)
+        assertEquals(listOf("First question", "Second question"), later.turns.map { it.user })
+        assertEquals("Third question", later.unanswered?.text)
+    }
+
+    /**
+     * The call reads the conversation as exchanges (iOS `CallReadTests`): each run's last words are its answer, tool
+     * calls after them or not, never its earlier words; a steered run and the agent's own run go on with the exchange
+     * before them; the person's message still being answered is the one waiting.
+     */
+    @Test fun `a call reads a conversation as exchanges of the person's message and the last words`() = runTest {
+        fun run(id: String, user: String?, reason: String?, vararg content: String): String {
+            val blocks = content.mapIndexed { index, part ->
+                if (part.startsWith("call:")) """{"type":"tool_call","id":"$id-$index","name":"exec_command","status":"completed"}"""
+                else """{"type":"text","text":"$part"}"""
+            }
+            val messages = listOfNotNull(
+                user?.let { """{"id":"u-$id","role":"user","createdAt":1,"content":[{"type":"text","text":"$it"}],"metadata":{}}""" },
+                """{"id":"m-$id","role":"agent","createdAt":2,"content":[${blocks.joinToString(",")}],"metadata":{}}""",
+            )
+            val status = when (reason) { null -> "running"; "steering" -> "aborted"; "error" -> "failed"; else -> "completed" }
+            val ended = reason?.let { ""","reason":"$it","endedAt":2""" }.orEmpty()
+            return """{"id":"$id","status":"$status","startedAt":1$ended,"messages":[${messages.joinToString(",")}]}"""
+        }
+        val agent = FakeAgent()
+        agent.page = """{"runs":[${listOf(
+            run("r1", "Fix the build", "completed", "Looking.", "call:", "Fixed it.", "call:"),
+            run("r2", "Why did it fail?", "steering", "Checking the logs.", "call:"),
+            run("r3", "And add a test", "completed", "The lockfile changed; the test is in.", "call:"),
+            run("r4", null, "completed", "The subagent's checks are green.", "call:"),
+            run("r5", "Ship it", "completed", "Shipped."),
+            run("r6", "Now the docs", null, "Writing"),
+        ).joinToString(",")}],"hasMore":false}"""
+        val chat = conversation(agent)
+        advanceUntilIdle()
+        val target = com.slopus.happy.call.CallTarget("a1", "Fix it", com.slopus.happy.call.CallTarget.Kind.Task, com.slopus.happy.call.CallTarget.Status.Idle)
+        val read = com.slopus.happy.call.CallTargetState.from(chat.state.value, target)
+        assertEquals(listOf("r1", "r2", "r5"), read.exchanges.map { it.id })
+        assertEquals(listOf("Fix the build", "Why did it fail?", "Ship it"), read.exchanges.map { it.user })
+        assertEquals(listOf("Fixed it.", "The subagent's checks are green.", "Shipped."), read.exchanges.map { it.reply })
+        assertEquals("Now the docs", read.unanswered?.text)
+    }
+
+    @Test fun `grouping tool calls keeps a text-only history visible`() = runTest {
+        val agent = FakeAgent().apply {
+            page = """{"runs":[{"id":"r1","status":"completed","startedAt":1,"endedAt":3,"messages":[
+                {"id":"m1","role":"user","createdAt":1,"content":[{"type":"text","text":"Hi"}]},
+                {"id":"m2","role":"agent","createdAt":2,"content":[{"type":"text","text":"Done"}]}
+            ]}],"hasMore":false}"""
+        }
+        val chat = conversation(agent, grouped = MutableStateFlow(true))
+        advanceUntilIdle()
+
+        val state = chat.state.value
+        assertTrue(state.synced)
+        assertEquals(listOf("Done"), state.rows.filterIsInstance<ConversationRow.Text>().map { it.text })
+        assertEquals(listOf("Hi"), state.rows.filterIsInstance<ConversationRow.User>().map { it.text })
+        assertEquals(listOf("r1"), state.rows.filterIsInstance<ConversationRow.TurnEnd>().map { it.turn })
     }
 
     @Test fun `reads history and pending messages in run order`() = runTest {
@@ -458,13 +609,13 @@ class ConversationTest {
         // A task unless a bot is picked, unnamed, and the keyboard up in the composer.
         assertEquals(NewWork(WorkChoice(WorkKind.Task, "")), chat.state.value.newWork)
         assertEquals(ComposerFocus(1, 0), chat.state.value.composerFocus)
-        // Only the picker's models are read.
-        assertEquals(listOf("/v0/config"), agent.paths("GET"))
+        // Only the picker's models and the computer's skills are read.
+        assertEquals(setOf("/v0/config", "/v0/skills"), agent.paths("GET").toSet())
         assertTrue(agent.paths("POST").isEmpty())
         chat.setDraft("typed")
         advanceUntilIdle()
         // Nothing is saved for an agent that doesn't exist yet.
-        assertEquals(listOf("/v0/config"), agent.requests.map { it.second })
+        assertEquals(setOf("/v0/config", "/v0/skills"), agent.requests.map { it.second.substringBefore('?') }.toSet())
         // Both are drawn at once and go once the task is made (iOS c344a0cb3).
         assertTrue(chat.send("First"))
         assertTrue(chat.send("Second"))
@@ -598,6 +749,55 @@ class ConversationTest {
         assertEquals(listOf("Hello"), chat.state.value.rows.map { (it as ConversationRow.User).text })
     }
 
+    @Test fun `a message is counted once as it is sent, with its mode then, whether or not the computer takes it`() = runTest {
+        val agent = FakeAgent()
+        val chat = conversation(agent)
+        advanceUntilIdle()
+        val gate = CompletableDeferred<Unit>()
+        agent.gate = gate
+        agent.failSends = 3
+        assertTrue(chat.send("Hello"))
+        advanceUntilIdle()
+        chat.setMode(Mode("claude", "anthropic/opus-5", "high", null, "auto"))
+        advanceUntilIdle()
+        val sent = recorded.filterIsInstance<AnalyticsEvent.MessageSent>().single()
+        assertEquals("before it reaches the computer, with the mode it was sent with", "openai/gpt-5.6-sol", sent.model)
+        assertEquals(Effort.Medium, sent.effort)
+        assertEquals(MessageSource.Chat, sent.source)
+        assertFalse(sent.isSteering)
+
+        gate.complete(Unit)
+        advanceUntilIdle()
+        val row = chat.state.value.rows.single() as ConversationRow.User
+        assertTrue(row.delivery is Delivery.Failed)
+        assertEquals(listOf(AnalyticsEvent.ErrorShown(ErrorArea.MessageSend, ErrorCode.ServerError)), recorded.filterIsInstance<AnalyticsEvent.ErrorShown>())
+        chat.retrySend(row.messageId)
+        advanceUntilIdle()
+        assertEquals(4, agent.paths("POST").count { it.endsWith("/send") })
+        assertEquals("not again on a retry", 1, recorded.count { it is AnalyticsEvent.MessageSent })
+    }
+
+    @Test fun `a refused new work is counted as the create that failed, not as the send's error too`() = runTest {
+        val agent = FakeAgent()
+        agent.refuseCreate = 409
+        val chat = conversation(agent, NewTask("t1", "w1", "a9", "m1"), WorkChoice(WorkKind.Bot, "Taken"))
+        advanceUntilIdle()
+        assertTrue(chat.send("Hello"))
+        advanceUntilIdle()
+        assertEquals(1, recorded.count { it is AnalyticsEvent.BotCreated && it.errorCode != null })
+        assertEquals(MessageSource.NewSession, recorded.filterIsInstance<AnalyticsEvent.MessageSent>().single().source)
+        assertEquals(emptyList<AnalyticsEvent>(), recorded.filter { it is AnalyticsEvent.ErrorShown || it is AnalyticsEvent.ConversationCreated })
+
+        agent.refuseCreate = null
+        chat.retrySend((chat.state.value.rows.single() as ConversationRow.User).messageId)
+        advanceUntilIdle()
+        assertTrue(chat.state.value.created)
+        assertEquals(listOf(AnalyticsEvent.BotCreated(null)), recorded.filter { it is AnalyticsEvent.BotCreated && it.errorCode == null })
+        assertEquals(1, recorded.count { it is AnalyticsEvent.ConversationCreated })
+        assertEquals(1, recorded.count { it is AnalyticsEvent.MessageSent })
+        assertTrue(recorded.none { it is AnalyticsEvent.ErrorShown })
+    }
+
     @Test fun `while new work is being made its choice is fixed`() = runTest {
         val agent = FakeAgent()
         val gate = CompletableDeferred<Unit>()
@@ -628,6 +828,22 @@ class ConversationTest {
         advanceUntilIdle()
         assertTrue(chat.state.value.created)
         assertEquals(0, agent.requests.count { it.second == "/v0/bots" })
+    }
+
+    /** A voice call's send into new work is its first message, as the composer's is: it makes the bot chosen, and the draft stays. */
+    @Test fun `a call's send makes new work and leaves the composer's draft`() = runTest {
+        val agent = FakeAgent()
+        val chat = conversation(agent, newTask = NewTask("t1", "w1", "a9", "m1"), choice = WorkChoice(WorkKind.Bot, "Researcher"))
+        advanceUntilIdle()
+        chat.setDraft("half typed")
+        assertTrue(chat.sendAs("voice-1", "Find papers on caching"))
+        advanceUntilIdle()
+        assertTrue(chat.state.value.created)
+        assertEquals(1, agent.requests.count { it.second == "/v0/bots" })
+        assertEquals(0, agent.requests.count { it.second == "/v0/tasks" })
+        assertEquals(listOf("Find papers on caching"), chat.state.value.rows.filterIsInstance<ConversationRow.User>().map { it.text })
+        assertEquals("half typed", chat.state.value.draft)
+        assertFalse("the same id again is the same send", chat.sendAs("voice-1", "Find papers on caching"))
     }
 
     @Test fun `a prefix goes above the agent's draft once, unsaved, with the cursor after it`() = runTest {
@@ -863,6 +1079,32 @@ class ConversationTest {
         assertEquals(MediaRef("c", 0, MediaItem("image", "a.png", "image/png")), (ConversationRowBuilder.build(media, "a1", null, false).single() as ConversationRow.Media).items.single())
     }
 
+    @Test fun `what an agent sent itself is never the person's words`() {
+        fun message(status: String = "accepted", metadata: String) =
+            Message.parse(Json.parseToJsonElement("""{"id":"m","role":"user","status":"$status","createdAt":1,"content":[{"type":"text","text":"Pipeline Deploy (version 3) run r1 ended: failed."}],"metadata":$metadata}"""))!!
+        fun row(message: Message) = ConversationRowBuilder.build(message, "a1", "p", false)
+        val run = """{"runId":"r1","pipelineId":"p1","pipelineName":"Deploy","state":"failed","summary":"build: exception; test: timeout","version":3}"""
+        val notice = message(metadata = """{"senderAgentId":"a1","senderAgentExplanation":"Pipeline Deploy failed","pipelineRun":$run}""")
+        val described = row(notice).single() as ConversationRow.SelfNote
+        assertEquals("Pipeline Deploy failed", described.label)
+        assertEquals(PipelineRunNotice("r1", "p1", "Deploy", 3, PipelineRunState.Failed, "build: exception; test: timeout"), described.pipeline)
+        assertEquals("kept as the cluster sent it", notice, Message.parse(KeptConversation.messageJson(notice)))
+        // A cluster that doesn't describe the run yet, a goal's continuation: the plain row, its words behind a tap.
+        val plain = row(message(metadata = """{"senderAgentId":"a1","senderAgentExplanation":"Pipeline Deploy failed"}""")).single() as ConversationRow.SelfNote
+        assertNull(plain.pipeline)
+        assertEquals("Pipeline Deploy (version 3) run r1 ended: failed.", plain.text)
+        assertNull("no explanation: the row says whose it is", (row(message(metadata = """{"senderAgentId":"a1"}""")).single() as ConversationRow.SelfNote).label)
+        assertNull("a state this app doesn't know reads plain", (row(message(metadata = """{"senderAgentId":"a1","pipelineRun":${run.replace("failed", "exploded")}}""")).single() as ConversationRow.SelfNote).pipeline)
+        // A run's result waiting for its turn may be withdrawn: nothing shows. A continuation waiting does.
+        assertEquals(emptyList<ConversationRow>(), row(message("pending", """{"senderAgentId":"a1","pipelineRun":$run}""")))
+        assertTrue(row(message("pending", """{"senderAgentId":"a1"}""")).single() is ConversationRow.SelfNote)
+        // The person's, the manager's and another agent's messages draw as before; so do the agent's own words.
+        assertTrue(row(message(metadata = "{}")).single() is ConversationRow.User)
+        assertTrue(row(message(metadata = """{"senderAgentId":"x9"}""")).single() is ConversationRow.Collaborator)
+        val own = Message("m", "agent", 1, listOf(Block.Text("Done.")), senderAgentId = "a1")
+        assertTrue(row(own).single() is ConversationRow.Text)
+    }
+
     @Test fun `the catalog lists enabled models of enabled providers`() {
         val catalog = ModeCatalog.parse(Json.parseToJsonElement(FakeAgent.CONFIG).jsonObject)
         assertEquals(
@@ -1023,6 +1265,257 @@ class ConversationTest {
         assertEquals(1, (send.third!!["content"] as kotlinx.serialization.json.JsonArray).size)
         val row = chat.state.value.rows.filterIsInstance<ConversationRow.User>().first()
         assertTrue(row.text.contains("./.happy-uploads/$id/1-clip.mp4"))
+    }
+
+    @Test fun `on Happy Cloud files go as the agent's attachments beside the words`() = runTest {
+        val agent = FakeAgent()
+        val chat = conversation(agent, cloudFiles = true)
+        advanceUntilIdle()
+        val dir = kotlin.io.path.createTempDirectory("uploads").toFile()
+        val doc = java.io.File(dir, "notes.pdf").apply { writeBytes(byteArrayOf(4, 5)) }
+        assertTrue(chat.send("Look", listOf(preview(doc.toURI().toString(), "application/pdf", 2, name = "notes.pdf"))) { emptyList() })
+        advanceUntilIdle()
+        // No folder write: the bytes go to the agent, as their type.
+        assertTrue(agent.written.isEmpty())
+        val (name, type, bytes) = agent.attachments!!.single()
+        assertEquals("notes.pdf" to "application/pdf", name to type)
+        assertTrue(bytes.contentEquals(byteArrayOf(4, 5)))
+        val send = agent.requests.single { it.second.endsWith("/send") }.third!!
+        assertEquals("Look", send["text"]!!.toString().trim('"'))
+        val file = (send["content"] as kotlinx.serialization.json.JsonArray).single() as JsonObject
+        assertEquals(setOf("type", "attachment", "name"), file.keys)
+        assertEquals("\"file\"", file["type"].toString())
+        assertEquals("\"notes.pdf\"", file["name"].toString())
+        // Its bubble lists it by name until the agent's copy comes.
+        assertEquals("Look\n\nAttached file:\n- notes.pdf", chat.state.value.rows.filterIsInstance<ConversationRow.User>().single().text)
+    }
+
+    @Test fun `on Happy Cloud a file past 25 MB or a server without attachments says so and nothing goes`() = runTest {
+        val agent = FakeAgent().apply { attachments = null }
+        val chat = conversation(agent, cloudFiles = true)
+        advanceUntilIdle()
+        val dir = kotlin.io.path.createTempDirectory("uploads").toFile()
+        val doc = java.io.File(dir, "notes.pdf").apply { writeBytes(byteArrayOf(4, 5)) }
+        assertTrue(chat.send("Look", listOf(preview(doc.toURI().toString(), "application/pdf", 2, name = "notes.pdf"))) { emptyList() })
+        advanceUntilIdle()
+        assertTrue(agent.requests.none { it.second.endsWith("/send") })
+        assertEquals(Delivery.Failed(Problem.FilesUnavailable), chat.state.value.rows.filterIsInstance<ConversationRow.User>().single().delivery)
+        assertEquals(Problem.FilesUnavailable, chat.state.value.alert)
+        agent.attachments = ArrayList()
+        val big = java.io.File(dir, "film.mov").apply { writeBytes(byteArrayOf(1)) }
+        assertTrue(chat.send("", listOf(preview(big.toURI().toString(), "video/quicktime", 26L * 1024 * 1024, name = "film.mov"))) { emptyList() })
+        advanceUntilIdle()
+        assertTrue(agent.attachments!!.isEmpty())
+        assertEquals(Delivery.Failed(Problem.FileTooLarge("film.mov")), chat.state.value.rows.filterIsInstance<ConversationRow.User>().single { it.text.contains("film.mov") }.delivery)
+        assertEquals(Problem.FileTooLarge("film.mov"), chat.state.value.alert)
+        // Pictures alone still go inline.
+        assertTrue(chat.send("Just a picture", listOf(preview("a.jpg", "image/jpeg", 10))) { list -> list.map { Block.Image("image/jpeg", it.name) } })
+        advanceUntilIdle()
+        assertEquals(1, agent.requests.count { it.second.endsWith("/send") })
+    }
+
+    @Test fun `a sent message's attachments read as media under its words`() {
+        val message = Message.parse(Json.parseToJsonElement("""{"id":"m1","role":"user","status":"completed","createdAt":1,"content":[{"type":"text","text":"Look"},{"type":"file","attachment":"abc","name":"notes.pdf","mimeType":"application/pdf","size":2},{"type":"file","attachment":"def","name":"IMG.jpg","mimeType":"image/jpeg","size":2000000,"kind":"image","width":4032,"height":3024,"thumbhash":"1QcSHQRnh493V4dIh4eXh1h4kJUI"},{"type":"file","attachment":"fed","name":"a.bin","mimeType":"application/octet-stream","size":1,"kind":"hologram"}]}"""))!!
+        assertEquals(Block.File("abc", "notes.pdf", "application/pdf", 2), message.content[1])
+        assertEquals(Block.File("def", "IMG.jpg", "image/jpeg", 2000000, "image", 4032.0, 3024.0, "1QcSHQRnh493V4dIh4eXh1h4kJUI"), message.content[2])
+        val row = ConversationRowBuilder().rows(message, "a1", null, false).single() as ConversationRow.User
+        assertEquals("Look", row.text)
+        assertEquals(listOf("abc", "def", "fed"), row.files.map { it.attachment })
+        assertEquals(listOf("m1/1", "m1/2", "m1/3"), row.files.map { it.key })
+        // Happy Cloud's older files have no kind: a file. An unknown kind is a file too.
+        assertEquals(listOf("file", "image", "file"), row.files.map { it.item.kind })
+        assertEquals(MediaItem("image", "IMG.jpg", "image/jpeg", 4032.0, 3024.0, null, "1QcSHQRnh493V4dIh4eXh1h4kJUI", 2000000.0), row.files[1].item)
+        assertEquals("/v0/agents/a1/attachments/def", ConversationApi.mediaPath("a1", row.files[1]))
+        // The viewer pages through its picture, not its files.
+        assertEquals(listOf(row.files[1]), ConversationViewing.entries(listOf(row), "Picture", "Video").map { it.presented })
+        assertEquals(message, Message.parse(KeptConversation.messageJson(message)))
+    }
+
+    @Test fun `to a computer that takes attachments pictures and files go as file blocks, the pictures kept here`() = runTest {
+        val agent = FakeAgent().apply { daemon = FakeAttachments() }
+        val kept = HashMap<String, java.io.File>()
+        val route = AttachmentRoute()
+        val chat = conversation(agent, route = route, kept = kept)
+        advanceUntilIdle()
+        val dir = kotlin.io.path.createTempDirectory("uploads").toFile()
+        val photo = java.io.File(dir, "IMG_0042.jpg").apply { writeBytes(ByteArray(3000) { it.toByte() }) }
+        val doc = java.io.File(dir, "notes.pdf").apply { writeBytes(byteArrayOf(4, 5)) }
+        val attachments = listOf(
+            preview(photo.toURI().toString(), "image/jpeg", 3000, name = "IMG_0042.jpg"),
+            preview(doc.toURI().toString(), "application/pdf", 2, name = "notes.pdf"),
+        )
+        assertTrue(chat.send("", attachments) { list -> list.map { Block.Image("image/jpeg", it.name) } })
+        advanceUntilIdle()
+        val photoId = FakeAttachments.hex(photo.readBytes())
+        val docId = FakeAttachments.hex(doc.readBytes())
+        assertEquals(setOf(photoId, docId), agent.daemon!!.stored.keys)
+        assertTrue("no workspace writes", agent.written.isEmpty())
+        val send = agent.requests.single { it.second.endsWith("/send") }.third!!
+        assertEquals(
+            """[{"type":"file","attachment":"$photoId","name":"IMG_0042.jpg"},{"type":"file","attachment":"$docId","name":"notes.pdf"}]""",
+            send["content"].toString(),
+        )
+        assertEquals("\"Attached files.\"", send["text"].toString())
+        // The sender's own bytes are where its tiles read them.
+        assertEquals(mapOf(photoId to photo, docId to doc), kept)
+        val id = send["id"]!!.jsonPrimitive.content
+        assertEquals(UploadPhase.Done, chat.uploads.phase(UploadBoard.pictureKey(id, 0)))
+        assertFalse(route.missing)
+    }
+
+    @Test fun `Retry after the computer let an unsent upload go asks after it and uploads it again under the same message`() = runTest {
+        val daemon = FakeAttachments()
+        val agent = FakeAgent().apply { this.daemon = daemon; sendStatus = 400 }
+        val chat = conversation(agent, route = AttachmentRoute())
+        advanceUntilIdle()
+        val dir = kotlin.io.path.createTempDirectory("uploads").toFile()
+        val doc = java.io.File(dir, "notes.pdf").apply { writeBytes(byteArrayOf(4, 5)) }
+        assertTrue(chat.send("Look", listOf(preview(doc.toURI().toString(), "application/pdf", 2, name = "notes.pdf"))) { emptyList() })
+        advanceUntilIdle()
+        val row = chat.state.value.rows.filterIsInstance<ConversationRow.User>().single()
+        assertTrue(row.delivery is Delivery.Failed)
+        // A day later: the unsent upload expired.
+        daemon.stored.clear()
+        daemon.requests.clear()
+        agent.sendStatus = 202
+        chat.retrySend(row.messageId)
+        advanceUntilIdle()
+        val id = FakeAttachments.hex(doc.readBytes())
+        assertEquals(listOf("PUT" to "bytes */2", "PUT" to "bytes 0-1/2"), daemon.requests)
+        assertTrue(daemon.stored.containsKey(id))
+        val sends = agent.requests.filter { it.second.endsWith("/send") }.map { it.third!!["id"]!!.jsonPrimitive.content }
+        assertEquals(listOf(row.messageId, row.messageId), sends.takeLast(2))
+        assertEquals(Delivery.Pending, chat.state.value.rows.filterIsInstance<ConversationRow.User>().single().delivery)
+    }
+
+    @Test fun `a send refused for an attachment gone meanwhile uploads it again once`() = runTest {
+        val daemon = FakeAttachments()
+        var expired = 0
+        val agent = FakeAgent().apply { this.daemon = daemon; beforeSend = { if (expired++ == 0) daemon.stored.clear() } }
+        val chat = conversation(agent, route = AttachmentRoute())
+        advanceUntilIdle()
+        val dir = kotlin.io.path.createTempDirectory("uploads").toFile()
+        val doc = java.io.File(dir, "notes.pdf").apply { writeBytes(byteArrayOf(4, 5)) }
+        assertTrue(chat.send("Look", listOf(preview(doc.toURI().toString(), "application/pdf", 2, name = "notes.pdf"))) { emptyList() })
+        advanceUntilIdle()
+        assertEquals(listOf("PUT" to null, "PUT" to "bytes */2", "PUT" to "bytes 0-1/2"), daemon.requests)
+        assertEquals(2, agent.requests.filter { it.second.endsWith("/send") }.map { it.third!!["id"] }.also { assertEquals(1, it.distinct().size) }.size)
+        assertEquals(Delivery.Pending, chat.state.value.rows.filterIsInstance<ConversationRow.User>().single().delivery)
+        // Gone again: once is all; the message fails with Retry.
+        agent.beforeSend = { daemon.stored.clear() }
+        assertTrue(chat.send("Again", listOf(preview(doc.toURI().toString(), "application/pdf", 2, name = "notes.pdf"))) { emptyList() })
+        advanceUntilIdle()
+        assertTrue(chat.state.value.rows.filterIsInstance<ConversationRow.User>().first { it.text.startsWith("Again") }.delivery is Delivery.Failed)
+    }
+
+    @Test fun `a send that went the old way names its files though the route's memory runs out on the way`() = runTest {
+        var now = 0L
+        val route = AttachmentRoute { now }.apply { markMissing() }
+        val agent = FakeAgent().apply { daemon = FakeAttachments(); beforeWrite = { now = AttachmentRoute.FORGET_MILLIS } }
+        val chat = conversation(agent, route = route)
+        advanceUntilIdle()
+        val dir = kotlin.io.path.createTempDirectory("uploads").toFile()
+        val doc = java.io.File(dir, "notes.pdf").apply { writeBytes(byteArrayOf(4, 5)) }
+        assertTrue(chat.send("", listOf(preview(doc.toURI().toString(), "application/pdf", 2, name = "notes.pdf"))) { emptyList() })
+        advanceUntilIdle()
+        assertFalse("forgotten during the write", route.missing)
+        val send = agent.requests.single { it.second.endsWith("/send") }.third!!
+        val id = send["id"]!!.jsonPrimitive.content
+        assertEquals("Attached file:\n- ./.happy-uploads/$id/0-notes.pdf", send["text"]!!.jsonPrimitive.content)
+        assertNull(send["content"])
+        assertTrue(agent.daemon!!.requests.isEmpty())
+    }
+
+    @Test fun `a computer found without the route is asked again after ten minutes`() {
+        var now = 0L
+        val route = AttachmentRoute { now }
+        assertFalse(route.missing)
+        route.markMissing()
+        now = AttachmentRoute.FORGET_MILLIS - 1
+        assertTrue(route.missing)
+        now = AttachmentRoute.FORGET_MILLIS
+        assertFalse(route.missing)
+    }
+
+    @Test fun `pictures alone go as attachments captioned as images`() = runTest {
+        val agent = FakeAgent().apply { daemon = FakeAttachments() }
+        val chat = conversation(agent, route = AttachmentRoute())
+        advanceUntilIdle()
+        val dir = kotlin.io.path.createTempDirectory("uploads").toFile()
+        val photo = java.io.File(dir, "a.jpg").apply { writeBytes(byteArrayOf(1, 2, 3)) }
+        assertTrue(chat.send("", listOf(preview(photo.toURI().toString(), "image/jpeg", 3))) { list -> list.map { Block.Image("image/jpeg", it.name) } })
+        advanceUntilIdle()
+        val send = agent.requests.single { it.second.endsWith("/send") }.third!!
+        assertEquals("\"Attached image.\"", send["text"].toString())
+        assertTrue(sentImages(agent).single().isEmpty())
+    }
+
+    @Test fun `a computer without attachments is found out once and gets pictures inline and files in the workspace`() = runTest {
+        val agent = FakeAgent().apply { daemon = FakeAttachments().apply { missing = true } }
+        val route = AttachmentRoute()
+        val chat = conversation(agent, route = route)
+        advanceUntilIdle()
+        val dir = kotlin.io.path.createTempDirectory("uploads").toFile()
+        val photo = java.io.File(dir, "a.jpg").apply { writeBytes(byteArrayOf(1, 2, 3)) }
+        val doc = java.io.File(dir, "notes.pdf").apply { writeBytes(byteArrayOf(4, 5)) }
+        val attachments = listOf(preview(photo.toURI().toString(), "image/jpeg", 3), preview(doc.toURI().toString(), "application/pdf", 2, name = "notes.pdf"))
+        assertTrue(chat.send("Look", attachments) { list -> list.map { Block.Image("image/jpeg", it.name) } })
+        advanceUntilIdle()
+        assertTrue(route.missing)
+        assertEquals(1, agent.daemon!!.requests.size)
+        val send = agent.requests.single { it.second.endsWith("/send") }.third!!
+        val id = send["id"]!!.jsonPrimitive.content
+        assertEquals("""[{"type":"image","mimeType":"image/jpeg","data":"a.jpg"}]""", send["content"].toString())
+        assertEquals("Look\n\nAttached file:\n- ./.happy-uploads/$id/1-notes.pdf", send["text"]!!.jsonPrimitive.content)
+        assertEquals(listOf("w1:.happy-uploads/$id/1-notes.pdf"), agent.written.keys.toList())
+        // Remembered: the next send doesn't ask again.
+        assertTrue(chat.send("Again", listOf(preview(photo.toURI().toString(), "image/jpeg", 3))) { list -> list.map { Block.Image("image/jpeg", it.name) } })
+        advanceUntilIdle()
+        assertEquals(1, agent.daemon!!.requests.size)
+        assertEquals(2, sentImages(agent).count { it.isNotEmpty() })
+    }
+
+    @Test fun `bytes that don't match their name fail the send, and Retry sends it again`() = runTest {
+        val daemon = FakeAttachments().apply { corrupt = true }
+        val agent = FakeAgent().apply { this.daemon = daemon }
+        val chat = conversation(agent, route = AttachmentRoute())
+        advanceUntilIdle()
+        val dir = kotlin.io.path.createTempDirectory("uploads").toFile()
+        val doc = java.io.File(dir, "notes.pdf").apply { writeBytes(byteArrayOf(4, 5)) }
+        val other = java.io.File(dir, "plan.pdf").apply { writeBytes(byteArrayOf(6)) }
+        val attachments = listOf(preview(other.toURI().toString(), "application/pdf", 1, name = "plan.pdf"), preview(doc.toURI().toString(), "application/pdf", 2, name = "notes.pdf"))
+        assertTrue(chat.send("Look", attachments) { emptyList() })
+        advanceUntilIdle()
+        val row = chat.state.value.rows.filterIsInstance<ConversationRow.User>().single()
+        assertTrue(row.delivery is Delivery.Failed)
+        assertTrue(agent.requests.none { it.second.endsWith("/send") })
+        daemon.corrupt = false
+        chat.retrySend(row.messageId)
+        advanceUntilIdle()
+        assertEquals(1, agent.requests.count { it.second.endsWith("/send") })
+        assertEquals(Delivery.Pending, chat.state.value.rows.filterIsInstance<ConversationRow.User>().single().delivery)
+    }
+
+    @Test fun `retrying a Happy Cloud send keeps the uploaded attachment and message id`() = runTest {
+        val agent = FakeAgent().apply { sendStatus = 400 }
+        val chat = conversation(agent, cloudFiles = true)
+        advanceUntilIdle()
+        val dir = kotlin.io.path.createTempDirectory("uploads").toFile()
+        val doc = java.io.File(dir, "notes.pdf").apply { writeBytes(byteArrayOf(4, 5)) }
+        assertTrue(chat.send("", listOf(preview(doc.toURI().toString(), "application/pdf", 2, name = "notes & plans.pdf"))) { emptyList() })
+        advanceUntilIdle()
+        val row = chat.state.value.rows.filterIsInstance<ConversationRow.User>().single()
+        assertTrue(row.delivery is Delivery.Failed)
+        assertEquals("notes & plans.pdf", agent.attachments!!.single().first)
+        agent.sendStatus = 202
+        chat.retrySend(row.messageId)
+        advanceUntilIdle()
+        assertEquals(1, agent.attachments!!.size)
+        val sends = agent.requests.filter { it.second.endsWith("/send") }.map { it.third!! }
+        assertEquals(2, sends.size)
+        assertEquals(sends.first(), sends.last())
+        assertEquals("\"Attached file.\"", sends.last()["text"].toString())
+        assertEquals(Delivery.Pending, chat.state.value.rows.filterIsInstance<ConversationRow.User>().single().delivery)
     }
 
     private fun TestScope.held() = HeldConversations(CoroutineScope(StandardTestDispatcher(testScheduler) + SupervisorJob().also { jobs += it }))
@@ -1360,7 +1853,7 @@ class ConversationTest {
         """{"id":"$id","status":"$status","startedAt":1,"messages":[${messages.joinToString(",")}]}"""
 
     private fun kept(hasMore: Boolean, vararg runs: String): JsonObject =
-        Json.parseToJsonElement("""{"version":1,"hasMore":$hasMore,"pending":[],"runs":[${runs.joinToString(",")}]}""").jsonObject
+        Json.parseToJsonElement("""{"version":3,"hasMore":$hasMore,"pending":[],"runs":[${runs.joinToString(",")}]}""").jsonObject
 
     private val keptTwoRuns get() = kept(
         true,
@@ -1437,7 +1930,10 @@ class ConversationTest {
                 Run(
                     "r1", "completed", 5,
                     listOf(
-                        Message("m1", "user", 1, listOf(Block.Text("Hi"), Block.Image("image/png", "AAAA"))),
+                        Message(
+                            "m1", "user", 1,
+                            listOf(Block.Text("Hi"), Block.Image("image/png", "AAAA"), Block.File("def", "IMG.jpg", "image/jpeg", 2000000, "image", 4032.0, 3024.0, "th", 2.0)),
+                        ),
                         Message(
                             "m2", "agent", 2,
                             listOf(
@@ -1459,6 +1955,12 @@ class ConversationTest {
             mode = Mode("codex", "m", "low", null, "auto"),
         )
         assertEquals(kept, KeptConversation.parse(Json.parseToJsonElement(kept.json().toString()).jsonObject))
+    }
+
+    @Test fun `history kept before file blocks kept their kind is read again`() {
+        // Version 1 wrote a picture's file block as a name only, so it would stay a file card.
+        val old = """{"version":1,"hasMore":false,"pending":[],"runs":[${run("r1", "completed", """{"id":"m1","role":"user","createdAt":1,"content":[{"type":"file","attachment":"def","name":"IMG.jpg","mimeType":"image/jpeg","size":2}],"metadata":{}}""")}]}"""
+        assertNull(KeptConversation.parse(Json.parseToJsonElement(old).jsonObject))
     }
 
     private val catalog = """[{"name":"compact","hasArguments":false,"description":"Summarize older messages to free context space.","kind":"compaction"},""" +
@@ -1602,6 +2104,128 @@ class ConversationTest {
         assertEquals(listOf("compact", "code-review"), second.state.value.commands.map { it.name })
     }
 
+    private fun skillPage(skills: String, next: String? = null) =
+        """{"skills":[$skills],"nextPageCursor":${next?.let { "\"$it\"" } ?: "null"},"cursor":"c0"}"""
+
+    private fun skill(name: String, enabled: Boolean = true, status: String = "ready") =
+        """{"id":"s-$name","path":"$name","name":"$name","description":"$name it.","enabled":$enabled,"status":"$status","error":null}"""
+
+    /** A computer offering /code-review, a made agent offering it too, and its bootstrap. */
+    private fun FakeAgent.withSkill(offered: Boolean = true) = apply {
+        skillPages = mapOf(null to skillPage(skill("code-review")))
+        val commands = if (offered) ""","slashCommands":[{"name":"code-review","hasArguments":true,"description":"Review.","kind":"skill"}]""" else ""
+        bootstrap = """{"agent":{"id":"a9","workspaceId":"w1","status":"idle"},"draft":{"value":null,"updatedAt":null},"pending":[]$commands}"""
+    }
+
+    @Test fun `a new chat offers the computer's enabled ready skills, read again when they change`() = runTest {
+        val agent = FakeAgent().apply {
+            skillPages = mapOf(
+                null to skillPage(skill("code-review") + "," + skill("off", enabled = false) + "," + skill("broken", status = "invalid"), next = "p2"),
+                // Two folders of one name: the agent offers it once, and so does the list.
+                "p2" to skillPage(skill("deploy") + "," + skill("code-review")),
+            )
+            // The catalog changed under its pages: read again from the start.
+            skillConflicts = 1
+        }
+        val chat = conversation(agent, NewTask("t1", "w1", "a9", "m1"))
+        advanceUntilIdle()
+        assertEquals(
+            listOf(SlashCommand("code-review", true, "code-review it.", "skill"), SlashCommand("deploy", true, "deploy it.", "skill")),
+            chat.state.value.commands,
+        )
+        assertEquals(
+            listOf("/v0/skills?limit=100", "/v0/skills?limit=100&pageCursor=p2", "/v0/skills?limit=100", "/v0/skills?limit=100&pageCursor=p2"),
+            agent.requests.map { it.second }.filter { it.startsWith("/v0/skills") },
+        )
+        agent.skillPages = mapOf(null to skillPage(skill("deploy", enabled = false)))
+        signals.emit(event("skills.updated", """{"skillIds":null,"paths":[]}"""))
+        advanceUntilIdle()
+        assertTrue(chat.state.value.commands.isEmpty())
+        // An agent's chat offers its own catalog, not these.
+        val existing = FakeAgent().apply { skillPages = agent.skillPages }
+        conversation(existing)
+        advanceUntilIdle()
+        assertTrue(existing.requests.none { it.second.startsWith("/v0/skills") })
+    }
+
+    @Test fun `a computer without skills offers a new chat none and says nothing`() = runTest {
+        val agent = FakeAgent()
+        val chat = conversation(agent, NewTask("t1", "w1", "a9", "m1"))
+        advanceUntilIdle()
+        assertEquals(1, agent.requests.count { it.second.startsWith("/v0/skills") })
+        assertTrue(chat.state.value.commands.isEmpty())
+        assertNull(chat.state.value.alert)
+        assertNull(chat.state.value.error)
+    }
+
+    @Test fun `a new chat's first skill makes the task, then goes into it as a skill's message under the composer's mode`() = runTest {
+        val agent = FakeAgent().withSkill()
+        agent.sendStatus = 202
+        val chat = conversation(agent, NewTask("t1", "w1", "a9", "m1"))
+        advanceUntilIdle()
+        val picked = Mode("codex", "openai/gpt-5.6-luna", "low", null, "read_only")
+        chat.setMode(picked)
+        assertTrue(chat.send("/code-review  focus on auth"))
+        advanceUntilIdle()
+        assertTrue(chat.state.value.created)
+        assertEquals(listOf("/v0/tasks", "/v0/agents/a9/send"), agent.paths("POST"))
+        val body = agent.requests.single { it.second.endsWith("/send") }.third!!
+        // As a chat sends a skill: the person's words, asking for read_skill first.
+        assertEquals("/code-review focus on auth", body["text"]!!.jsonPrimitive.content)
+        assertEquals(
+            Json.parseToJsonElement("""[{"type":"tool_call_request","name":"read_skill","arguments":{"name":"code-review"}}]"""),
+            body["content"],
+        )
+        assertEquals(picked, Mode.parse(body["mode"]))
+        val row = chat.state.value.rows.single() as ConversationRow.User
+        assertEquals("/code-review focus on auth", row.text)
+        assertEquals(row.messageId, body["id"]!!.jsonPrimitive.content)
+    }
+
+    @Test fun `a first skill the new agent doesn't offer goes as the words`() = runTest {
+        val agent = FakeAgent().withSkill(offered = false)
+        agent.sendStatus = 202
+        val chat = conversation(agent, NewTask("t1", "w1", "a9", "m1"))
+        advanceUntilIdle()
+        chat.send("/code-review focus on auth")
+        advanceUntilIdle()
+        val body = agent.requests.single { it.second.endsWith("/send") }.third!!
+        assertEquals("/code-review focus on auth", body["text"]!!.jsonPrimitive.content)
+        assertFalse("content" in body)
+    }
+
+    @Test fun `a first skill with a picture goes as a message`() = runTest {
+        val agent = FakeAgent().withSkill()
+        agent.sendStatus = 202
+        val chat = conversation(agent, NewTask("t1", "w1", "a9", "m1"))
+        advanceUntilIdle()
+        chat.send("/code-review this", listOf(Block.Image("image/jpeg", "AAAA")))
+        advanceUntilIdle()
+        val body = agent.requests.single { it.second.endsWith("/send") }.third!!
+        assertEquals("/code-review this", body["text"]!!.jsonPrimitive.content)
+        assertTrue(body["content"]!!.jsonArray.none { it.jsonObject["type"]!!.jsonPrimitive.content == "tool_call_request" })
+    }
+
+    @Test fun `a first skill refused stays failed and Retry sends the same message again`() = runTest {
+        val agent = FakeAgent().withSkill()
+        agent.sendStatus = 400
+        val chat = conversation(agent, NewTask("t1", "w1", "a9", "m1"))
+        advanceUntilIdle()
+        chat.send("/code-review")
+        advanceUntilIdle()
+        val row = chat.state.value.rows.single() as ConversationRow.User
+        assertEquals("/code-review", row.text)
+        assertEquals(Delivery.Failed(Problem.Said("Unknown model.")), row.delivery)
+        agent.sendStatus = 202
+        chat.retrySend(row.messageId)
+        advanceUntilIdle()
+        val sends = agent.requests.filter { it.second.endsWith("/send") }.map { it.third!! }
+        assertEquals(2, sends.size)
+        assertEquals(sends[0], sends[1])
+        assertEquals("read_skill", sends[1]["content"]!!.jsonArray.single().jsonObject["name"]!!.jsonPrimitive.content)
+        assertEquals(Delivery.Pending, (chat.state.value.rows.single() as ConversationRow.User).delivery)
+    }
+
 
     private val endedTurn = """{"runs":[{"id":"r1","status":"completed","startedAt":1000,"endedAt":13000,"reason":"completed","messages":[
         {"id":"m1","role":"user","createdAt":1,"content":[{"type":"text","text":"Fix it"}],"metadata":{}},
@@ -1621,7 +2245,7 @@ class ConversationTest {
         // Folded: the person's words, the file it edited, the control, the answer and how it ended.
         assertEquals(listOf("r1:status", "m2:3", "r1:trace", "m2:2", "m1:user"), chat.state.value.rows.map { it.key })
         val ended = chat.state.value.rows[0] as ConversationRow.TurnEnd
-        assertEquals(ConversationRow.TurnEnd("r1:status", "r1", "completed", 12_000, 2, "Done"), ended)
+        assertEquals(ConversationRow.TurnEnd("r1:status", "r1", "completed", 12_000, 2, "Done", endedAt = 13_000), ended)
         assertTrue(ended.complete)
         // Its copy is the turn's: the answer has none of its own.
         assertFalse((chat.state.value.rows[1] as ConversationRow.Text).copies)
@@ -1669,7 +2293,7 @@ class ConversationTest {
         signals.emit(event("run.finished", """{"agentId":"a1","run":{"id":"r2","status":"completed","startedAt":4000,"endedAt":9000,"reason":"error"}}"""))
         advanceUntilIdle()
         val failed = chat.state.value.rows[0] as ConversationRow.TurnEnd
-        assertEquals(ConversationRow.TurnEnd("r2:status", "r2", "error", 5_000, 0, "Again"), failed)
+        assertEquals(ConversationRow.TurnEnd("r2:status", "r2", "error", 5_000, 0, "Again", endedAt = 9_000), failed)
     }
 
     @Test fun `another agent's steering joins the run going and its turn stays one`() = runTest {

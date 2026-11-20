@@ -216,6 +216,141 @@ final class AgentConnectionsTests: XCTestCase {
         XCTAssertEqual(try JSONSerialization.jsonObject(with: sent[0]) as? [String: [String: String]], ["node": ["name": "Studio Mac"]])
     }
 
+    /// A signed-in server's session ending erases what this phone kept of
+    /// it, its tokens included, and shows only the way back in; another
+    /// server is untouched; signing in again starts afresh.
+    func testAnEndedSessionErasesThatServerOnly() async throws {
+        let transport = IdentityTransport()
+        let manager = AgentConnections(credentials: KeychainAgentConnectionCredentialStore(backend: AccountsKeychain()), directory: try directory(), makeTransport: { _ in transport })
+        await manager.setForeground(false)
+        let method = OAuthMethod(id: "jwt", name: "Happy Cloud", authorizationUrl: "https://auth.example/authorize", tokenUrl: "https://auth.example/token", clientId: "happy")
+        func record(_ refresh: String) -> ServerSignInRecord {
+            ServerSignInRecord(method: method, grant: OAuthGrant(refreshToken: refresh, clientId: "happy"), userId: "u1")
+        }
+        let access = OAuthAccess(token: "a", expiresAt: nil)
+        let ended = try await manager.addServer(try AgentOrigin("https://ended.example"), signIn: record("r-ended"), access: access, name: "ended")
+        let kept = try await manager.addServer(try AgentOrigin("https://kept.example"), signIn: record("r-kept"), access: access, name: "kept")
+        XCTAssertNotNil(manager.syncEngine(for: ended.id))
+        let folder = try XCTUnwrap(OfflineFile.directory(for: ended.id))
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        try Data("kept".utf8).write(to: folder.appendingPathComponent("direct.sqlite"))
+
+        let authorization = try XCTUnwrap(manager.credential(for: ended.id).map { manager.authorization($0, for: ended.id) })
+        await authorization.signInRequired()
+        for _ in 0..<200 where !manager.signedOut(ended.id) { try await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertTrue(manager.signedOut(ended.id))
+        XCTAssertNil(manager.credential(for: ended.id)?.signIn?.grant.refreshToken, "the refresh token was kept")
+        XCTAssertEqual(manager.credential(for: ended.id)?.publicUrl, "https://ended.example", "the way back in was lost")
+        XCTAssertNil(manager.syncEngine(for: ended.id), "a signed-out server still syncs")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: folder.path), "what was kept of it is still on the phone")
+        XCTAssertFalse(manager.signedOut(kept.id))
+        XCTAssertEqual(manager.credential(for: kept.id)?.signIn?.grant.refreshToken, "r-kept")
+        XCTAssertNotNil(manager.syncEngine(for: kept.id))
+
+        let again = try await manager.addServer(try AgentOrigin("https://ended.example"), signIn: record("r-new"), access: access, name: "ended")
+        XCTAssertEqual(again.id, ended.id, "signing in again made another account")
+        XCTAssertFalse(manager.signedOut(ended.id))
+        XCTAssertEqual(manager.credential(for: ended.id)?.signIn?.grant.refreshToken, "r-new")
+        XCTAssertNotNil(manager.syncEngine(for: ended.id))
+    }
+
+    /// A Happy Cloud server an earlier build signed in to, whose refresh
+    /// token the accounts service issued, is signed out at launch and its
+    /// data erased, with nothing sent; one the API issued, and a team's own
+    /// server, are untouched.
+    func testALaunchEndsCloudSessionsTheAPIDidNotIssue() async throws {
+        let store = InMemoryAgentConnectionCredentialStore()
+        let directory = try directory()
+        let manager = AgentConnections(credentials: store, directory: directory, makeTransport: { _ in IdentityTransport() })
+        await manager.setForeground(false)
+        let method = HappyCloud.method(server: HappyCloud.server(named: "acme"))
+        func record(_ refreshUrl: String) -> ServerSignInRecord {
+            ServerSignInRecord(method: method, grant: OAuthGrant(refreshToken: "r", refreshUrl: refreshUrl, clientId: "happy"), userId: "u1")
+        }
+        let access = OAuthAccess(token: "a", expiresAt: nil)
+        let old = try await manager.addServer(try AgentOrigin(HappyCloud.server(named: "acme")), signIn: record("https://auth.happy.engineering/token"), access: access, name: "Acme")
+        let current = try await manager.addServer(try AgentOrigin(HappyCloud.server(named: "globex")), signIn: record(HappyCloud.api + "/token"), access: access, name: "Globex")
+        let team = try await manager.addServer(try AgentOrigin("https://happy.acme.example"), signIn: record("https://auth.happy.engineering/token"), access: access, name: "Team")
+        let folder = try XCTUnwrap(OfflineFile.directory(for: old.id))
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        try Data("kept".utf8).write(to: folder.appendingPathComponent("direct.sqlite"))
+
+        let relaunched = AgentConnections(credentials: store, directory: directory, makeTransport: { _ in IdentityTransport() })
+        await relaunched.setForeground(false)
+        try await relaunched.restore()
+        XCTAssertTrue(relaunched.signedOut(old.id))
+        XCTAssertNil(relaunched.credential(for: old.id)?.signIn?.grant.refreshToken)
+        XCTAssertEqual(relaunched.credential(for: old.id)?.publicUrl, HappyCloud.server(named: "acme"), "the way back in was lost")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: folder.path), "an ended server's data is still on the phone")
+        XCTAssertFalse(relaunched.signedOut(current.id))
+        XCTAssertEqual(relaunched.credential(for: current.id)?.signIn?.grant.refreshToken, "r")
+        XCTAssertFalse(relaunched.signedOut(team.id), "a team's own server refreshes wherever it says")
+    }
+
+    /// A Happy Cloud server wears the placeholder its name picks, as
+    /// desktop's rail draws `@acme`; another server is picked by its origin.
+    func testACloudServerIsPickedByItsName() async throws {
+        let manager = AgentConnections(credentials: InMemoryAgentConnectionCredentialStore(), directory: nil, makeTransport: { _ in IdentityTransport() })
+        await manager.setForeground(false)
+        let method = OAuthMethod(id: "jwt", name: "Happy Cloud", authorizationUrl: "https://auth.example/authorize", tokenUrl: "https://auth.example/token", clientId: "happy")
+        let record = ServerSignInRecord(method: method, grant: OAuthGrant(refreshToken: "r", clientId: "happy"), userId: "u1")
+        let access = OAuthAccess(token: "a", expiresAt: nil)
+        let cloud = try await manager.addServer(try AgentOrigin(HappyCloud.server(named: "acme")), signIn: record, access: access, name: "Acme")
+        let other = try await manager.addServer(try AgentOrigin("https://happy.acme.example"), signIn: record, access: access, name: "Acme")
+        XCTAssertEqual(manager.placeholderSeed(for: cloud.id), "acme")
+        XCTAssertEqual(manager.placeholderSeed(for: other.id), "agent:https://happy.acme.example")
+    }
+
+    /// Signing out of a Happy Cloud server says its farewell (the app takes
+    /// its push registration off) while its session still works; a server
+    /// of the team's own says none.
+    func testSigningOutOfACloudServerSaysFarewellFirst() async throws {
+        actor Farewells {
+            var ids: [String] = []
+            func add(_ id: String) { ids.append(id) }
+        }
+        let manager = AgentConnections(credentials: InMemoryAgentConnectionCredentialStore(), directory: nil, makeTransport: { _ in IdentityTransport() })
+        await manager.setForeground(false)
+        let method = OAuthMethod(id: "jwt", name: "Happy Cloud", authorizationUrl: "https://auth.example/authorize", tokenUrl: "https://auth.example/token", clientId: "happy")
+        // No refresh token: nothing is revoked over the network here.
+        let record = ServerSignInRecord(method: method, grant: OAuthGrant(clientId: "happy"), userId: "u1")
+        let access = OAuthAccess(token: "a", expiresAt: nil)
+        let farewells = Farewells()
+        manager.cloudFarewell = { id, _ in await farewells.add(id) }
+        let acme = try await manager.addServer(try AgentOrigin(HappyCloud.server(named: "acme")), signIn: record, access: access, name: "Acme")
+        let globex = try await manager.addServer(try AgentOrigin(HappyCloud.server(named: "globex")), signIn: record, access: access, name: "Globex")
+        let own = try await manager.addServer(try AgentOrigin("https://happy.acme.example"), signIn: record, access: access, name: "Own")
+        try await manager.remove(acme.id)
+        let said = await farewells.ids
+        XCTAssertEqual(said, [acme.id], "remove waits for the farewell")
+        try await manager.remove(own.id)
+        _ = manager.forget(globex.id)
+        for _ in 0..<50 where await farewells.ids.count < 2 { try await Task.sleep(for: .milliseconds(20)) }
+        let all = await farewells.ids
+        XCTAssertEqual(all, [acme.id, globex.id])
+    }
+
+    /// Happy Cloud's list joins several servers before one is opened: one
+    /// added without selecting it leaves the open one open, here and on disk.
+    func testAServerCanBeAddedWithoutOpeningIt() async throws {
+        let store = InMemoryAgentConnectionCredentialStore()
+        let directory = try directory()
+        let manager = AgentConnections(credentials: store, directory: directory, makeTransport: { _ in IdentityTransport() })
+        await manager.setForeground(false)
+        let method = OAuthMethod(id: "jwt", name: "Happy Cloud", authorizationUrl: "https://auth.example/authorize", tokenUrl: "https://auth.example/token", clientId: "happy")
+        let record = ServerSignInRecord(method: method, grant: OAuthGrant(refreshToken: "r", clientId: "happy"), userId: "u1")
+        let access = OAuthAccess(token: "a", expiresAt: nil)
+        let open = try await manager.addServer(try AgentOrigin(HappyCloud.server(named: "acme")), signIn: record, access: access, name: "Acme")
+        let kept = try await manager.addServer(try AgentOrigin(HappyCloud.server(named: "globex")), signIn: record, access: access, name: "Globex", select: false)
+        XCTAssertEqual(manager.activeID, open.id)
+        XCTAssertEqual(manager.accounts.map(\.id), [open.id, kept.id])
+        let reloaded = AgentConnections(credentials: store, directory: directory, makeTransport: { _ in IdentityTransport() })
+        await reloaded.setForeground(false)
+        try await reloaded.restore()
+        XCTAssertEqual(reloaded.activeID, open.id)
+        XCTAssertEqual(Set(reloaded.accounts.map(\.id)), [open.id, kept.id])
+    }
+
     func testRevocationStopsRetryAndBackgroundPauses() async throws {
         let transport = IdentityTransport()
         let manager = AgentConnections(credentials: InMemoryAgentConnectionCredentialStore(), directory: nil, makeTransport: { _ in transport })
@@ -402,6 +537,44 @@ final class AgentConnectionsTests: XCTestCase {
         await manager.setForeground(false)
         XCTAssertTrue(manager.accounts.allSatisfy { $0.status == .paused })
     }
+    func testAnIdentityCheckClosesItsTransportUntilTheNext() async throws {
+        let transport = IdentityTransport()
+        let manager = AgentConnections(credentials: InMemoryAgentConnectionCredentialStore(), directory: nil, makeTransport: { _ in transport })
+        XCTAssertEqual(manager.refreshInterval, .seconds(600))
+        _ = try await manager.add(value("quiet"), name: "Mac")
+        for _ in 0..<100 where manager.accounts.first?.status != .connected { try await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertEqual(manager.accounts.first?.status, .connected)
+        // Its tunnels are gone while it waits ten minutes for the next check.
+        let closed = await transport.closed
+        XCTAssertTrue(closed)
+        let checks = await transport.paths().filter { $0 == "/v0/health" }.count
+        XCTAssertEqual(checks, 1)
+        await manager.setForeground(false)
+    }
+
+    /// While the open account's engine runs, its name and picture come
+    /// with the engine's bootstrap: no identity check of its own goes out,
+    /// and a rename goes over the engine's tunnels, with no transport (so
+    /// no Tailcat client) of its own.
+    func testTheRunningEngineIdentifiesItsAccount() async throws {
+        let transport = IdentityTransport()
+        let made = Counter()
+        let manager = AgentConnections(credentials: InMemoryAgentConnectionCredentialStore(), directory: nil, makeTransport: { _ in made.increment(); return transport })
+        manager.refreshInterval = .milliseconds(20)
+        let account = try await manager.add(value("shared"), name: "Mac")
+        let engine = try XCTUnwrap(manager.syncEngine(for: account.id))
+        func checks() async -> Int { await transport.paths().filter { $0 == "/v0/config" || $0 == "/v0/health" }.count }
+        try await Task.sleep(for: .milliseconds(100))
+        let before = (checks: await checks(), made: made.value)
+        try await Task.sleep(for: .milliseconds(200))
+        let after = await checks()
+        XCTAssertEqual(after, before.checks, "ten intervals went by")
+        try await manager.rename(account.id, to: "Studio Mac")
+        XCTAssertEqual(made.value, before.made)
+        await engine.stop()
+        try await manager.remove(account.id)
+    }
+
     func testPeriodicIdentityRefreshStopsInBackgroundAndAfterRemoval() async throws {
         let transport = IdentityTransport()
         let manager = AgentConnections(credentials: InMemoryAgentConnectionCredentialStore(), directory: nil, makeTransport: { _ in transport })
@@ -424,6 +597,13 @@ final class AgentConnectionsTests: XCTestCase {
     }
 }
 
+private final class Counter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+    var value: Int { lock.withLock { count } }
+    func increment() { lock.withLock { count += 1 } }
+}
+
 private final class FailingAgentCredentialStore: AgentConnectionCredentialStore, @unchecked Sendable {
     private let lock = NSLock()
     private let base = InMemoryAgentConnectionCredentialStore()
@@ -435,4 +615,24 @@ private final class FailingAgentCredentialStore: AgentConnectionCredentialStore,
         try base.save(credentials, id: id)
     }
     func remove(id: String) throws { try base.remove(id: id) }
+}
+/// A server whose member has no profile yet: connected, asked their name,
+/// never marked as needing to sign in again.
+final class ProfileRequiredIdentityTests: XCTestCase {
+    private actor Server: AgentTransport {
+        func request(method: String, path: String, credential: String, body: Data?, headers: [String: String]) throws -> HTTP1Response {
+            if path == "/v0/health" { return HTTP1Response(status: 200, body: Data(#"{"ready":true,"version":{"protocol":27}}"#.utf8)) }
+            return HTTP1Response(status: 403, headers: ["content-type": "application/json"], body: Data(#"{"error":"Name needed","code":"profile_required"}"#.utf8))
+        }
+        func browserConnection() async throws -> any BrowserStream { throw BrowserError.unavailable }
+        func close() {}
+    }
+
+    func testAMemberWithNoProfileStaysConnected() async throws {
+        let account = AgentConnection(id: "server", name: "Acme")
+        let read = try await AgentIdentity.refresh(account, transport: Server(), token: "t")
+        XCTAssertFalse(read.revoked)
+        XCTAssertEqual(read.status, .connected)
+        XCTAssertEqual(read.name, "Acme")
+    }
 }

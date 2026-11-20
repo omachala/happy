@@ -202,11 +202,9 @@ class ArtifactCatalogTest {
         // What was kept shows while the computer is read.
         assertEquals(listOf("old"), feed.state.value.items.map { it.id })
         assertTrue(feed.state.value.loaded)
-        assertTrue(feed.state.value.refreshing)
         fake.gate!!.complete(Unit)
         runCurrent()
         assertEquals(listOf("a1", "a2", "a3"), feed.state.value.items.map { it.id })
-        assertFalse(feed.state.value.refreshing)
         assertEquals(listOf(null, "p2"), fake.asked)
         assertEquals(listOf("a1", "a2", "a3"), ArtifactCatalog.fromKept(fake.kept!!).map { it.id })
     }
@@ -218,7 +216,8 @@ class ArtifactCatalogTest {
         val events = MutableSharedFlow<AgentEvent>()
         val io = StandardTestDispatcher(testScheduler)
         val feed = ArtifactCatalogFeed(backgroundScope, fake::fetch, { id -> Json.parseToJsonElement(fake.one.getValue(id)) as JsonObject }, { null }, { fake.kept = it }, io)
-        feed.start(events)
+        val verified = kotlinx.coroutines.flow.MutableStateFlow(true)
+        feed.start(events, verified)
         runCurrent()
         events.emit(AgentEvent("c1", "artifact.updated", obj("""{"artifactId":"a1","changes":{"title":"Renamed"}}""")))
         runCurrent()
@@ -227,8 +226,12 @@ class ArtifactCatalogTest {
         runCurrent()
         assertEquals(listOf("z", "a1"), feed.state.value.items.map { it.id })
         assertEquals(listOf("z", "a1"), ArtifactCatalog.fromKept(fake.kept!!).map { it.id })
-        // A reconnect reads the whole catalog again.
         events.emit(AgentEvent(null, AgentEvent.HELLO, obj("{}")))
+        runCurrent()
+        assertEquals(listOf<String?>(null), fake.asked)
+        verified.value = false
+        runCurrent()
+        verified.value = true
         runCurrent()
         assertEquals(listOf("a1"), feed.state.value.items.map { it.id })
         assertEquals(listOf<String?>(null, null), fake.asked)

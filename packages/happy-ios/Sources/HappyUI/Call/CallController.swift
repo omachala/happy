@@ -8,21 +8,26 @@ import UIKit
 /// shown as the bar across the window's top (`ShellViewController`), bound
 /// to the one connection it started on. It ends in the background, on an
 /// audio interruption or a lost route, and when the connection changes.
-/// Apart from the relay's `VoiceCoordinator`: one call at a time, the newer wins.
+/// What each call said is kept for the connection's next one
+/// (`CallHistory`), and a call that ends unasked plays `CallDropSound`.
 @MainActor
 final class CallController {
     static let shared = CallController()
+    /// Posted as `state` changes, for what shows it outside the bar: the
+    /// header's call button (`CallBarButtonItem`).
+    static let stateDidChange = Notification.Name("CallController.stateDidChange")
 
     private var session: CallSession?
     private var context: CallContext?
     private var targets: SessionCallTargets?
     private var directoryWatch: Watch?
     private var directorySettle: DirectorySettle?
-    private var directoryDrain: DirectoryDrain?
     private var connectionID: String?
     private weak var shell: ShellViewController?
     private var clock: Timer?
-    private var state: CallState = .idle
+    private(set) var state: CallState = .idle
+    /// A call has the microphone: dictation waits for it to end.
+    var holdsMicrophone: Bool { state.isLive }
     private var focus: String?
     private var observers: [NSObjectProtocol] = []
     #if DEBUG
@@ -34,34 +39,26 @@ final class CallController {
         CallAgent.hostedAgentId.map { PublicAgentCallGrants(agentId: $0) } ?? UnconfiguredCallGrants()
     }
 
-    /// 20 free minutes in 30 days, or the subscription's 5 hours a month.
+    /// 20 free minutes in 30 days, or the subscription's 2 hours a month.
     private let allowance = CallAllowance(period: { Offers.shared.month() })
     private let offers = Offers.shared
 
     private init() {
         let center = NotificationCenter.default
-        let stops: [Notification.Name] = [UIApplication.didEnterBackgroundNotification, AVAudioSession.mediaServicesWereResetNotification]
-        for name in stops {
+        let stops: [(Notification.Name, CallEnding)] = [(UIApplication.didEnterBackgroundNotification, .background),
+                                                        (AVAudioSession.mediaServicesWereResetNotification, .interrupted)]
+        for (name, ending) in stops {
             observers.append(center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
-                MainActor.assumeIsolated { self?.hangUp() }
+                MainActor.assumeIsolated { self?.hangUp(ending) }
             })
         }
         observers.append(center.addObserver(forName: AVAudioSession.interruptionNotification, object: nil, queue: .main) { [weak self] note in
             let began = (note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt) == AVAudioSession.InterruptionType.began.rawValue
-            MainActor.assumeIsolated { if began { self?.hangUp() } }
+            MainActor.assumeIsolated { if began { self?.hangUp(.interrupted) } }
         })
         observers.append(center.addObserver(forName: AVAudioSession.routeChangeNotification, object: nil, queue: .main) { [weak self] note in
             let lost = (note.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt) == AVAudioSession.RouteChangeReason.oldDeviceUnavailable.rawValue
-            MainActor.assumeIsolated { if lost { self?.hangUp() } }
-        })
-        // One call at a time: the relay's starting ends this one.
-        observers.append(center.addObserver(forName: .voiceStateChanged, object: nil, queue: .main) { [weak self] _ in
-            MainActor.assumeIsolated {
-                switch VoiceCoordinator.shared.state {
-                case .connecting, .active: if self?.state.isLive == true { self?.close() }
-                default: break
-                }
-            }
+            MainActor.assumeIsolated { if lost { self?.hangUp(.interrupted) } }
         })
     }
 
@@ -88,32 +85,45 @@ final class CallController {
         connectionID = account.accountID
         let targets = SessionCallTargets(session: account, shell: shell)
         let context = CallContext(targets: targets)
-        // The relay's call stops once this one really starts: a connection that can't call leaves it alone.
+        let history = CallHistory(store: account.offline.map { OfflineCallHistoryStore(offline: $0) })
         let call = CallSession(grants: Self.grants, allowance: allowance, permission: {
-            VoiceCoordinator.shared.stop()
-            return await AVAudioApplication.requestRecordPermission()
-        }) { grant, request, events in
+            await AVAudioApplication.requestRecordPermission()
+        }, history: history) { grant, request, events in
             try await ElevenLabsCallConnection.connect(grant: grant, request: request, events: events)
+        }
+        // Not the person's own end, nor the agent's goodbye: those were heard coming.
+        call.onEnded = { ending in if ending.isUnexpected { CallDropSound.play() } }
+        Task { [weak call] in
+            await context.onRestart {
+                await MainActor.run { call?.requestRestart() } ?? CallToolResult(text: #"{"ok":false,"reason":"The call has ended."}"#, isError: true)
+            }
+        }
+        // What a read's refresh found after the read answered: context, never a cue.
+        Task { [weak call] in
+            await context.onReading { line in
+                Task { @MainActor in call?.deliver(CallUpdate(context: [line])) }
+            }
         }
         self.targets = targets
         self.context = context
         session = call
-        directoryDrain = DirectoryDrain(context: context, session: call)
         call.onState = { [weak self, weak call] state in
             guard let self, let call, self.session === call else { return }
             // Ended, it hears from nothing more: only its bar stays, saying why.
             if case .ended = state { self.letGo() }
             self.show(state)
-            // Connected: whatever the directory still owes goes now.
-            if case .active = state { self.directoryDrain?.start() }
         }
         call.onOverflow = { [weak self, weak call] in
             Task {
                 let update = await context.resync()
                 guard let self, let call, self.session === call else { return }
                 self.deliver(update)
-                self.directoryDrain?.start()
             }
+        }
+        // The agent hung up: as if End were tapped, with no bar left.
+        call.onHangUp = { [weak self, weak call] in
+            guard let self, let call, self.session === call else { return }
+            self.close()
         }
         call.onLevel = { [weak self, weak call] level in
             guard let self, let call, self.session === call else { return }
@@ -129,14 +139,11 @@ final class CallController {
             }
         }
         // A change to the sidebar settles for a second from the first one,
-        // never longer, then goes as one update: as the sidebar is then.
+        // never longer, then goes as one update of what changed.
         let settle = DirectorySettle { [weak self, weak call] in
             guard let self, let call, self.session === call else { return }
-            let update = await context.flushDirectory()
-            guard self.session === call else { return }
-            self.deliver(update)
-            await Self.hold(await context.followed, in: targets)
-            self.directoryDrain?.start()
+            let update = await context.directoryUpdate()
+            if self.session === call { self.deliver(update) }
         }
         directorySettle = settle
         directoryWatch = targets.watchDirectory { [weak self, weak call, weak settle] rows in
@@ -148,10 +155,15 @@ final class CallController {
         }
         focus = targets.focusedNow
         call.start(language: nil, context: {
-            let initial = await context.initial()
+            let initial = await context.initial(previous: history.slots, person: await Self.person(account))
             await Self.hold(await context.followed, in: targets)
             return initial
-        }, tool: { call in await context.handle(call) })
+        }, tool: { call in
+            let result = await context.handle(call)
+            // A message makes where it went one the call hears from.
+            await Self.hold(await context.followed, in: targets)
+            return result
+        })
         // A call that can't start says so in the bar; one that can starts connecting there.
         show(call.state)
     }
@@ -172,6 +184,16 @@ final class CallController {
         }
     }
 
+    /// Who the call talks to, in a team: the person's name on this
+    /// computer; nil outside one, or while it can't be read.
+    private static func person(_ account: Session) async -> String? {
+        guard account.home.userId != nil else { return nil }
+        var name = account.profile.state.name
+        if name.isEmpty { name = (try? await account.client.profile())?.name ?? "" }
+        name = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        return name.isEmpty ? nil : name
+    }
+
     /// Exactly the conversations the call hears from stay read: one that
     /// dropped out of the last visited is let go.
     private static func hold(_ followed: [String], in targets: SessionCallTargets) async {
@@ -190,43 +212,44 @@ final class CallController {
         session?.deliver(update)
     }
 
-    /// End: the call, or the bar of one that ended.
-    func close() {
+    /// End: the call, or the bar of one that ended; `ending` says why, for
+    /// the call's history.
+    func close(_ ending: CallEnding = .hungUp) {
         #if DEBUG
         fixture?.cancel(); fixture = nil
         #endif
         let old = session
         session = nil
-        old?.stop()
+        old?.stop(ending)
         letGo()
         connectionID = nil
         show(.idle)
     }
 
-    /// What the call followed, let go of: its context, the conversations it
-    /// held and the directory's watch.
+    /// What the call followed, let go of: its context and the conversations it held.
     private func letGo() {
         let context = self.context
         self.context = nil
         Task { await context?.close() }
         targets?.close()
         targets = nil
+        directoryWatch?.invalidate()
         directoryWatch = nil
         directorySettle?.cancel()
         directorySettle = nil
-        directoryDrain?.cancel()
-        directoryDrain = nil
         focus = nil
     }
 
     /// The call stops for the system; one that was live leaves no bar.
-    private func hangUp() {
+    private func hangUp(_ ending: CallEnding) {
         guard state.isShown else { return }
-        close()
+        close(ending)
     }
 
     private func show(_ state: CallState) {
+        let changed = self.state != state
         self.state = state
+        if changed { NotificationCenter.default.post(name: Self.stateDidChange, object: self) }
         updateClock()
         guard let shell else { return }
         let bar = shell.callBar

@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="compute_title">Compute</string>
+    <string name="compute_permission">Using compute needs the compute.use permission.</string>
+    <string name="compute_action_failed">That didn\'t go through</string>
+    <string name="compute_requests_title">Join requests</string>
+    <string name="compute_requests_footer">Your agents are asking to join your private computers. An approved agent can use the computer until it leaves.</string>
+    <string name="compute_request_agent">An agent</string>
+    <string name="compute_request_line">Wants to join %1$s · %2$s</string>
+    <string name="compute_request_line_unnamed">Wants to join your computer · %1$s</string>
+    <string name="compute_approve">Approve</string>
+    <string name="compute_deny">Deny</string>
+    <string name="compute_empty_title">No compute yet</string>
+    <string name="compute_empty_manage">Add a computer so agents have somewhere to run.</string>
+    <string name="compute_empty_use">No computer has joined this server yet. You can add a private one of your own.</string>
+    <string name="compute_computers_title">Computers</string>
+    <string name="compute_computers_footer_manage">Agents choose a computer and join it. Any member\'s agents can use a shared computer; only its owner\'s can use a private one.</string>
+    <string name="compute_computers_footer_use">Agents choose a computer and join it. You can add a private computer of your own.</string>
+    <string name="compute_no_computers">No computer has joined yet.</string>
+    <string name="compute_add">Add computer</string>
+    <string name="compute_status_online">Online</string>
+    <string name="compute_status_full">Full</string>
+    <string name="compute_status_offline">Offline</string>
+    <string name="compute_status_draining">Draining</string>
+    <string name="compute_status_joining">Joining</string>
+    <string name="compute_access_title">Who can use it</string>
+    <string name="compute_access_shared">Shared</string>
+    <string name="compute_access_private">Private</string>
+    <string name="compute_access_shared_about">For your team. Any member\'s agents can work on it.</string>
+    <string name="compute_access_private_about">Just for you. Only your agents can join, and you approve each one.</string>
+    <string name="compute_access_member_footer">Shared computers need admin permission. You can add a private computer of your own.</string>
+    <string name="compute_yours">Yours</string>
+    <string name="compute_owner_named">%1$s\'s</string>
+    <string name="compute_owner_member">A member\'s</string>
+    <plurals name="compute_agents_count">
+        <item quantity="one">%1$d of %2$d agent</item>
+        <item quantity="other">%1$d of %2$d agents</item>
+    </plurals>
+    <string name="compute_no_agents">No agents are working here.</string>
+    <string name="compute_remove">Remove</string>
+    <string name="compute_remove_confirm">Remove %1$s?</string>
+    <string name="compute_remove_message">The agent stops working on this computer, and its place is freed.</string>
+    <string name="compute_boundary_title">Restricted commands can\'t run here</string>
+    <string name="compute_boundary_footer">Only full-access commands run on this computer.</string>
+    <string name="compute_concurrency_title">Agents at once</string>
+    <string name="compute_concurrency_footer">How many agents can work on this computer at the same time, from 1 to %1$d.</string>
+    <string name="compute_concurrency_fewer">Fewer agents</string>
+    <string name="compute_concurrency_more">More agents</string>
+    <string name="compute_gone">This computer is no longer listed.</string>
+    <string name="compute_add_title">Add a computer</string>
+    <string name="compute_create_failed">No install command</string>
+    <string name="compute_no_command">Happy Cloud didn\'t send an install command.</string>
+    <string name="compute_create">Create install command</string>
+    <string name="compute_install_shared">Run this on the computer your team\'s agents will use, as an administrator. It installs the Happy supervisor for the whole system and joins the computer as a shared one.</string>
+    <string name="compute_install_private">Run this on your own computer, signed in as yourself. It installs the Happy supervisor and joins the computer as yours.</string>
+    <string name="compute_command_note">The command works once and holds a secret, so keep it private.</string>
+    <string name="compute_expires">Expires at %1$s</string>
+    <string name="compute_expired">Command expired at %1$s</string>
+    <string name="compute_command_linux" translatable="false">Linux</string>
+    <string name="compute_command_macos" translatable="false">macOS</string>
+    <string name="compute_command_unix">macOS and Linux</string>
+    <string name="compute_command_windows" translatable="false">Windows (PowerShell)</string>
+    <string name="compute_server">Server</string>
+    <string name="compute_join_token">Join token</string>
+    <string name="compute_done">Done</string>
+</resources>

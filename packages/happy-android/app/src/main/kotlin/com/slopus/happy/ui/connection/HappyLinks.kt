@@ -13,6 +13,7 @@ import com.slopus.happy.AppGraph
 import com.slopus.happy.R
 import com.slopus.happy.agent.HappyLink
 import com.slopus.happy.agent.HappyReferenceKind
+import com.slopus.happy.agent.HappyShareLinks
 import com.slopus.happy.agent.HappyUrls
 import com.slopus.happy.agent.AgentFeedRow
 import com.slopus.happy.connection.AgentConnection
@@ -28,7 +29,8 @@ import com.slopus.happy.ui.files.openWorkspaceFile
 
 /**
  * Opens Happy URLs (edge SSO contract §7) in one account's back stack.
- * An external link, `happy://<instanceId>/…`, opens only on the
+ * An external link, `happy://<instanceId>/…`, or the link.happy.page share
+ * link that carries one ([HappyShareLinks]), opens only on the
  * connection whose installation that is, switching to it first, and never
  * on another: one no connection matches says so. An internal link means
  * the connection it was shown in.
@@ -39,6 +41,8 @@ class HappyLinks internal constructor(
     private val nav: NavHostController,
     /** The agent connection whose stack this is, if one is open. */
     private val openConnection: String?,
+    /** Opens a web page outside the app: a settings link's page in Happy Cloud's web app. */
+    private val openWeb: (String) -> Unit = {},
 ) {
     /** "Not connected" is up. */
     var unknownServer by mutableStateOf(false)
@@ -47,7 +51,7 @@ class HappyLinks internal constructor(
     /** A link [DeepLinks] handed over: an external one, or one waiting for its connection to open. */
     fun take(link: DeepLink) {
         when (link) {
-            is DeepLink.Instance -> open(link.instanceId, link.link)
+            is DeepLink.Instance -> open(link.instanceId, link.link, link.pushUserId)
             is DeepLink.OnConnection -> go(link.connectionId, link.link)
             else -> Unit
         }
@@ -55,10 +59,13 @@ class HappyLinks internal constructor(
 
     /**
      * [url] tapped in [connectionId]'s screens. True when it was a Happy
-     * URL, opened or not (a malformed one opens nothing); false for any
-     * other address, which is the caller's.
+     * URL or a link.happy.page share link carrying one, opened or not (a
+     * malformed Happy URL opens nothing); false for any other address,
+     * which is the caller's.
      */
     fun open(url: String, connectionId: String): Boolean {
+        // A share link opens as the instance link it carries, on that installation alone.
+        HappyShareLinks.parse(url)?.let { return open(it.url, connectionId) }
         if (!HappyUrls.owns(url)) return false
         val parsed = HappyUrls.parse(url) ?: return true
         val instanceId = parsed.instanceId
@@ -66,8 +73,22 @@ class HappyLinks internal constructor(
         return true
     }
 
-    private fun open(instanceId: String, link: HappyLink) {
-        val id = connectionFor(graph.agentConnections.accounts.value, instanceId, openConnection)
+    /**
+     * Whether [url], shown in [connectionId]'s screens, opens anything: false
+     * for one that isn't a Happy URL or is malformed, and for a settings page
+     * the phone has nowhere for on the connection it names.
+     */
+    fun opens(url: String, connectionId: String): Boolean {
+        val parsed = HappyUrls.parse(HappyShareLinks.parse(url)?.url ?: url) ?: return false
+        val settings = parsed.link as? HappyLink.Settings ?: return true
+        val instanceId = parsed.instanceId
+        val id = if (instanceId == null) connectionId else connectionFor(graph.agentConnections.accounts.value, instanceId, openConnection) ?: return true
+        return SettingsLinks.place(graph, id, settings.page) != null
+    }
+
+    private fun open(instanceId: String, link: HappyLink, pushUserId: String? = null) {
+        val id = if (pushUserId == null) connectionFor(graph.agentConnections.accounts.value, instanceId, openConnection)
+        else com.slopus.happy.push.cloudPushConnection(graph.agentConnections.accounts.value, instanceId, pushUserId, openConnection)?.id
         when (id) {
             null -> unknownServer = true
             openConnection -> go(id, link)
@@ -79,7 +100,9 @@ class HappyLinks internal constructor(
         }
     }
 
-    private fun go(connectionId: String, link: HappyLink) = nav.openHappyLink(connectionId, link)
+    private fun go(connectionId: String, link: HappyLink) {
+        if (link is HappyLink.Settings) nav.openSettingsLink(graph, connectionId, link.page, openWeb, link.query) else nav.openHappyLink(connectionId, link)
+    }
 
     companion object {
         /** The connection an external link for [instanceId] opens on: the open one if it is that installation, else the first that is; null if none. */
@@ -96,7 +119,11 @@ val LocalHappyLinks = staticCompositionLocalOf<HappyLinks?> { null }
 /** [HappyLinks] for [nav], the stack of [openConnection], and its "not connected" alert while it is up. */
 @Composable
 fun rememberHappyLinks(graph: AppGraph, nav: NavHostController, openConnection: String?): HappyLinks {
-    val links = remember(graph, nav, openConnection) { HappyLinks(graph, nav, openConnection) }
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val dark by androidx.compose.runtime.rememberUpdatedState(com.slopus.happy.ui.theme.HappyTheme.colors.dark)
+    val links = remember(graph, nav, openConnection, context) {
+        HappyLinks(graph, nav, openConnection) { url -> com.slopus.happy.ui.browser.openCustomTab(context, url, dark) }
+    }
     if (links.unknownServer) {
         HappyAlert(
             Alert(
@@ -124,6 +151,8 @@ fun NavHostController.openHappyLink(connectionId: String, link: HappyLink) {
             HappyReferenceKind.Surface -> navigate(com.slopus.happy.ui.surfaces.SurfaceRoute(connectionId, link.id))
             else -> popBackStack(HomeRoute, inclusive = false)
         }
+        // Settings need the app's graph: HappyLinks opens them (openSettingsLink).
+        is HappyLink.Settings -> Unit
         // The file itself, in the viewer at its first line (unit files' entry).
         is HappyLink.File -> when (val target = link.target) {
             is HappyLink.Target.Agent -> openWorkspaceFile(connectionId, link.path, agentId = target.agentId, line = link.lines?.first)

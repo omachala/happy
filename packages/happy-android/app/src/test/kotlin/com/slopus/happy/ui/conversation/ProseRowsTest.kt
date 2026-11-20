@@ -387,6 +387,15 @@ class ProseRowsTest {
         assertEquals(2, next.parts.size)
     }
 
+    @Test fun `a list that opens nested and goes back out is laid out from the margin`() {
+        // Production crashed here, reading bullets[-1] on the lane, and crashed again on every launch.
+        val text = "  - first\n- second"
+        val geometry = typesetter.geometry
+        val prose = typesetter.build(ProseSource("depth:0", ProseKind.Answer, text, parseMarkdown(text)), geometry)
+        val markers = prose.pieces.filterNot { it.reveals }.map { it.text.text to it.x }
+        assertEquals(listOf("◦" to geometry.px(16.dp), "•" to 0), markers)
+    }
+
     @Test fun `a new width draws the old layout scaled while the lane lays it out again, never on the main thread`() {
         val row = ConversationRow.Text("width:0", markdown, parseMarkdown(markdown))
         prepare(listOf(row))
@@ -444,7 +453,7 @@ class ProseRowsTest {
         prepare(rows)
         ProseThread.strict = true
         val before = ProseThread.mainBuilds.get()
-        rule.setHappyContent { ConversationScreen(ConversationState(created = true, loaded = true, rows = rows, agent = agent), null, ConversationScreenActions()) }
+        rule.setHappyContent { ConversationScreen(ConversationState(created = true, loaded = true, rows = rows, agent = agent), ConversationScreenActions()) }
         rule.node(ConversationScreenTags.LIST).performScrollToNode(hasTestTag(ConversationScreenTags.OLDER))
         rule.waitForIdle()
         rule.onNodeWithText("Question 0: why does the login page loop back to itself?").assertExists()
@@ -462,7 +471,7 @@ class ProseRowsTest {
         ProseThread.strict = true
         val before = ProseThread.mainBuilds.get()
         rule.setHappyContent {
-            ConversationScreen(ConversationState(created = true, loaded = true, rows = rows, agent = agent, working = true), null, ConversationScreenActions())
+            ConversationScreen(ConversationState(created = true, loaded = true, rows = rows, agent = agent, working = true), ConversationScreenActions())
         }
         rule.waitForIdle()
         repeat(12) { i ->

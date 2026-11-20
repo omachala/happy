@@ -1,4 +1,5 @@
 #if canImport(UIKit)
+import HappyAnalytics
 import HappyCore
 import HappyUI
 import HappyGuest
@@ -14,8 +15,12 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
         _ application: UIApplication,
         didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
     ) -> Bool {
+        // The open computer's tunnel first, beside everything else; not for a launch into the background (a push).
+        if application.applicationState != .background { CompositionRoot.startLink() }
         LegacyFonts.registerBundledFonts()
+        HappyCloud.keepStandIns()
         PushNotifications.shared.install()
+        Analytics.shared.reportCrashes()
         // The store's transactions are listened for from the first moment: renewals, approvals, refunds.
         Offers.launch()
         return true
@@ -60,9 +65,20 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         let coordinator = AppCoordinator(window: window, context: CompositionRoot.makeContext())
         self.window = window
         self.coordinator = coordinator
+        // Each computer that takes it is told this phone's time zone and language.
+        let installation = PushNotifications.installationID
+        let kind: UserEnvironment.DeviceKind = UIDevice.current.userInterfaceIdiom == .pad ? .tablet : .phone
+        coordinator.context.account.agentConnections.environment = UserEnvironmentSource(
+            deviceId: { (try? installation.read())?.lowercased() }, current: { .current(kind: kind) })
         coordinator.start()
+        // New work's pictures, read now off the main thread, are on screen in its first frame.
+        StateSceneView.preload([.magicWand, .robot])
         #if DEBUG || HAPPY_FIXTURES
         GymFrameMeter.installIfAsked(in: window)
+        ScreenFilm.startIfAsked()
+        #endif
+        #if DEBUG
+        DictationTrial.startIfAsked()
         #endif
         PushNotifications.shared.attach(context: coordinator.context, coordinator: coordinator)
         if let response = connectionOptions.notificationResponse {
@@ -82,9 +98,12 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
 
     func scene(_ scene: UIScene, continue userActivity: NSUserActivity) { open(userActivity) }
 
+    /// A universal link (Happy-Production.entitlements): a bot invitation on
+    /// app.happy.engineering, a Happy Cloud invite, or a link.happy.page
+    /// share link, which opens as the instance link it carries.
     private func open(_ activity: NSUserActivity) {
         guard activity.activityType == NSUserActivityTypeBrowsingWeb, let url = activity.webpageURL,
-              GuestInvitation(url: url) != nil else { return }
+              GuestInvitation(url: url) != nil || CloudInvite(url: url) != nil || HappyShareLink.parse(url.absoluteString) != nil else { return }
         open(url)
     }
 
@@ -105,12 +124,18 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
     }
 
     func sceneDidBecomeActive(_ scene: UIScene) {
+        Analytics.shared.appBecameActive()
         coordinator?.appStateChanged(active: true)
         activeGuest?.setActive(true)
         PushNotifications.shared.appBecameActive()
     }
 
     func sceneDidEnterBackground(_ scene: UIScene) {
+        // The last flush gets the time a background task gives it.
+        let task = UIApplication.shared.beginBackgroundTask(withName: "happy.analytics")
+        Analytics.shared.appEnteredBackground {
+            if task != .invalid { UIApplication.shared.endBackgroundTask(task) }
+        }
         coordinator?.appStateChanged(active: false)
         activeGuest?.setActive(false)
     }

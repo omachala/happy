@@ -28,8 +28,20 @@ private struct NoComputer: AgentTransport {
     func close() async {}
 }
 
+/// A computer that never answers, telling which tunnels were let go of.
+private final class MovingComputer: AgentTransport, @unchecked Sendable {
+    private let lock = NSLock()
+    private var heard: [RequestCategory] = []
+    var resets: [RequestCategory] { lock.withLock { heard } }
+    func request(method: String, path: String, credential: String, body: Data?, headers: [String: String]) async throws -> HTTP1Response { throw URLError(.cannotConnectToHost) }
+    func stream(path: String, credential: String, headers: [String: String]) async throws -> HTTP1Stream { throw URLError(.cannotConnectToHost) }
+    func reset() async {}
+    func reset(_ category: RequestCategory) async { lock.withLock { heard.append(category) } }
+    func close() async {}
+}
+
 /// Home's title through a link that goes and comes back, on both homes:
-/// offline, connecting, updating, live. At each step the title says what
+/// connecting, updating, live, never offline. At each step the title says what
 /// it should, the picture, the bar and its other items stay where they
 /// are, and mid-change both the name and the status are partly there.
 /// Stills (light and dark) and mid-change frames go to the repository's
@@ -284,8 +296,11 @@ final class HostedLinkTitleTests: XCTestCase {
         session.receive(status: .retrying)
         session.receive(home: snapshot)
         XCTAssertEqual(session.headerState, .connecting)
+        let blip = ContinuousClock.now
         for _ in 0..<6 {
             try await Task.sleep(for: .milliseconds(100))
+            // Only inside the 0.8 s: a slow machine's sleeps run long.
+            guard ContinuousClock.now - blip < .milliseconds(700) else { break }
             XCTAssertEqual(home.headerState, .online, "a blip showed")
         }
         snapshot.live = true
@@ -297,20 +312,57 @@ final class HostedLinkTitleTests: XCTestCase {
             XCTAssertNil(shows(switcher))
         }
 
-        // The network is fine but the computer did not answer: the list
-        // says so, and the title keeps the name rather than say it twice.
+        // The network is fine but the computer does not answer: never
+        // offline. It is asked again, so the title says connecting, and the
+        // list says nothing of it.
         snapshot.live = false
-        snapshot.error = ""
+        snapshot.reconnecting = true
         session.receive(status: .retrying)
         session.receive(home: snapshot)
         content.applyConnection(snapshot)
-        try await until("offline", 2) { home.headerState == .offline }
-        try await Task.sleep(for: .milliseconds(400))
-        XCTAssertNil(shows(switcher), "the title said connecting beside the notice")
-        XCTAssertEqual(sidebar.notice, Strings.unanswered)
-        XCTAssertEqual(switcher.accessibilityValue, "Studio Mac, offline")
-        try await captureBoth(window, "agent-6-computer-did-not-answer")
+        try await until("connecting", 2) { home.headerState == .connecting }
+        try await until("the status", 2) { self.shows(switcher) == "Connecting…" }
+        XCTAssertNil(sidebar.notice, "a notice said the computer is away")
+        XCTAssertEqual(switcher.accessibilityValue, "Connecting…, Studio Mac")
+        try await captureBoth(window, "agent-6-computer-did-not-answer-connecting")
         note("agent-frames", log)
+        try await account.agentConnections.remove(connection.id)
+    }
+
+    /// Off Wi-Fi onto cellular: the session lets go of the stream's
+    /// tunnel, which went out the old way, and opens it again at once
+    /// (the engine's part: `SyncEngineTests.testAMoveOpensTheStreamAgainAtOnce`).
+    func testAMoveOpensTheStreamAgain() async throws {
+        let transport = MovingComputer()
+        let account = AccountController(
+            serverConfig: ServerConfig(storage: InMemoryKeyValueStore()), clientID: "ios/test",
+            credentialStore: InMemoryCredentialStore(), storeDirectory: nil,
+            agentTransport: { _ in transport },
+            rnServerImport: { .confirmed(ServerConfig.defaultServerURL) },
+            transport: NoNetwork(), connector: ForeverConnecting()
+        )
+        await account.agentConnections.setForeground(false)
+        let connection = try await account.agentConnections.add(
+            JSONDecoder().decode(AgentConnectionCredentials.self, from: Data(#"{"address":"link-move","port":1,"deviceID":"\#(UUID().uuidString)","deviceToken":"token"}"#.utf8)),
+            name: "Studio Mac"
+        )
+        defer { Session.forget(connection.id) }
+        NetworkPath.shared.force(true)
+        let context = AppContext(account: account, variant: .preview, version: "test")
+        let session = try XCTUnwrap(Session.session(for: connection.id, context: context))
+        await session.engine.start()
+        try await Task.sleep(for: .milliseconds(100))
+
+        NetworkPath.shared.forceMove()
+        try await until("the stream's tunnel let go of") { transport.resets == [.realtime] }
+
+        // Gone, moved, and back before the main queue heard any of it: the
+        // move is heard with the way back, not lost to the first.
+        NetworkPath.shared.force(false)
+        NetworkPath.shared.forceMove()
+        NetworkPath.shared.force(true)
+        try await until("let go of again") { transport.resets == [.realtime, .realtime] }
+        await session.engine.stop()
         try await account.agentConnections.remove(connection.id)
     }
 
@@ -442,14 +494,12 @@ final class HostedLinkTitleTests: XCTestCase {
     }
 
     /// What VoiceOver hears as the title changes: the status as the title
-    /// says it, "Online" once back, nothing for an offline the list says.
+    /// says it, "Online" once back.
     func testVoiceOverHearsTheTitlesWords() {
         XCTAssertEqual(AccountSwitcher.announcement(for: .waitingForNetwork), "Waiting for network…")
         XCTAssertEqual(AccountSwitcher.announcement(for: .connecting), "Connecting…")
         XCTAssertEqual(AccountSwitcher.announcement(for: .syncing), "Updating…")
         XCTAssertEqual(AccountSwitcher.announcement(for: .online), "Online")
-        XCTAssertNil(AccountSwitcher.announcement(for: .offline))
-        XCTAssertNil(Strings.HeaderStatus.title(.offline))
         XCTAssertNil(Strings.HeaderStatus.title(.online))
     }
 

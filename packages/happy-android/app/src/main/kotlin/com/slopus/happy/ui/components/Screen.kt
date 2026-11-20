@@ -17,7 +17,9 @@ import androidx.compose.foundation.layout.union
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
@@ -28,12 +30,9 @@ import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.Dp
 import com.slopus.happy.ui.theme.HappyTheme
-import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.TopAppBar
-import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
@@ -75,27 +74,19 @@ fun Screen(
 
 /**
  * A pushed screen's header: back arrow and title. Start-aligned, it is the
- * Material top app bar every agent screen has (home's, its settings'): the
+ * [TopBar] every agent screen has (home's, its settings'): the
  * arrow in the navigation slot on the 16 keyline, the title in Material's
  * title large, [actions] at the end, held to the content width ([fullWidth]:
  * the window's, for a screen whose frame is the window's own). On a
  * [Screen] it is glass. [titleAlpha] is read while drawing, for a page
  * whose own large name fades the bar's title in as it scrolls under it.
  */
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun StackHeader(title: String, onBack: () -> Unit, titleAlpha: (() -> Float)? = null, fullWidth: Boolean = false, actions: @Composable RowScope.() -> Unit = {}) {
     val colors = HappyTheme.colors
     Box(Modifier.fillMaxWidth().then(if (LocalBarOnGlass.current) Modifier else Modifier.background(colors.grouped.background))) {
-        TopAppBar(
+        TopBar(
             modifier = (if (fullWidth) Modifier.fillMaxWidth() else Modifier.contentMaxWidth(LocalWindowLayout.current)).testTag(HeaderTags.BAR),
-            colors = TopAppBarDefaults.topAppBarColors(
-                containerColor = Color.Transparent,
-                scrolledContainerColor = Color.Transparent,
-                navigationIconContentColor = colors.text,
-                titleContentColor = colors.text,
-                actionIconContentColor = colors.text,
-            ),
             navigationIcon = {
                 // The tablet main panel's root has the sidebar's toggle here instead.
                 BackOrSidebarToggle {
@@ -138,6 +129,7 @@ fun HappyTextField(
     singleLine: Boolean = false,
     enabled: Boolean = true,
     keyboardOptions: KeyboardOptions = KeyboardOptions.Default,
+    keyboardActions: KeyboardActions = KeyboardActions.Default,
     /** Hides what is typed, for a value no one should read over a shoulder. */
     visualTransformation: VisualTransformation = VisualTransformation.None,
 ) {
@@ -156,10 +148,55 @@ fun HappyTextField(
         textStyle = style,
         cursorBrush = SolidColor(colors.text),
         keyboardOptions = keyboardOptions,
+        keyboardActions = keyboardActions,
         visualTransformation = visualTransformation,
         decorationBox = { inner ->
             Box(modifier = Modifier.padding(contentPadding)) {
-                if (value.isEmpty()) Text(text = placeholder, style = style.copy(color = colors.input.placeholder))
+                // A one-line field's placeholder stays on its line at any text size, cut short rather than wrapped.
+                if (value.isEmpty()) Text(text = placeholder, style = style.copy(color = colors.input.placeholder), maxLines = if (singleLine) 1 else Int.MAX_VALUE, overflow = TextOverflow.Ellipsis)
+                inner()
+            }
+        },
+    )
+}
+
+/** [HappyTextField] over a [TextFieldValue], for a field that places its own cursor (a prefilled one, at the end). */
+@Composable
+fun HappyTextField(
+    value: TextFieldValue,
+    onValueChange: (TextFieldValue) -> Unit,
+    placeholder: String,
+    textStyle: TextStyle,
+    contentPadding: PaddingValues,
+    minHeight: Dp,
+    cornerRadius: Dp,
+    modifier: Modifier = Modifier,
+    singleLine: Boolean = false,
+    enabled: Boolean = true,
+    keyboardOptions: KeyboardOptions = KeyboardOptions.Default,
+    keyboardActions: KeyboardActions = KeyboardActions.Default,
+    visualTransformation: VisualTransformation = VisualTransformation.None,
+) {
+    val colors = HappyTheme.colors
+    val style = textStyle.copy(color = colors.input.text)
+    BasicTextField(
+        value = value,
+        onValueChange = onValueChange,
+        modifier = modifier
+            .fillMaxWidth()
+            .defaultMinSize(minHeight = minHeight)
+            .clip(RoundedCornerShape(cornerRadius))
+            .background(colors.surfaceHigh),
+        enabled = enabled,
+        singleLine = singleLine,
+        textStyle = style,
+        cursorBrush = SolidColor(colors.text),
+        keyboardOptions = keyboardOptions,
+        keyboardActions = keyboardActions,
+        visualTransformation = visualTransformation,
+        decorationBox = { inner ->
+            Box(modifier = Modifier.padding(contentPadding)) {
+                if (value.text.isEmpty()) Text(text = placeholder, style = style.copy(color = colors.input.placeholder), maxLines = if (singleLine) 1 else Int.MAX_VALUE, overflow = TextOverflow.Ellipsis)
                 inner()
             }
         },

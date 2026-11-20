@@ -252,6 +252,8 @@ final class BrailleView: UIView {
 
     @objc private func animate() {
         for dot in dots { dot.removeAnimation(forKey: "wave") }
+        // It holds still with Reduce Motion only. In Low Power Mode it keeps
+        // moving, unlike a shimmer: it is the sign that work runs.
         guard running, window != nil, !backgrounded, !UIAccessibility.isReduceMotionEnabled else { return }
         let start = CACurrentMediaTime()
         let cycle = Braille.cycle / 1000
@@ -267,7 +269,9 @@ final class BrailleView: UIView {
             let lag = Double(phase) * Braille.frame / 1000
             wave.timeOffset = (cycle - lag).truncatingRemainder(dividingBy: cycle)
             wave.isRemovedOnCompletion = false
-            wave.preferredFrameRateRange = CAFrameRateRange(minimum: 60, maximum: 120, preferred: 120)
+            // Looping for as long as the agent works, at the shimmer's 30 Hz:
+            // its steps are 100 ms.
+            wave.preferredFrameRateRange = CAFrameRateRange(minimum: 15, maximum: 30, preferred: 30)
             dot.add(wave, forKey: "wave")
         }
     }

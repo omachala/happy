@@ -36,6 +36,8 @@ data class KeptConversation(
     val mode: Mode?,
     /** The agent's slash commands as last read; null when none were. */
     val slashCommands: List<SlashCommand>? = null,
+    /** When the computer's history was last read in full (ms since 1970); null if never, or kept before it was. */
+    val syncedAt: Long? = null,
 ) {
     fun json(): JsonObject = buildJsonObject {
         put("version", VERSION)
@@ -45,12 +47,17 @@ data class KeptConversation(
         agent?.let { put("agent", agentJson(it)) }
         mode?.let { put("mode", it.json()) }
         slashCommands?.let { put("slashCommands", SlashCommand.json(it)) }
+        syncedAt?.let { put("syncedAt", it) }
     }
 
     companion object {
         /** desktop's window on a conversation nobody reads (connectHappyAgent's `trimHistory`), as iOS keeps. */
         const val KEPT_RUNS = 100
-        private const val VERSION = 1
+        /**
+         * 2: file blocks keep their kind, size on screen and thumbhash; 3: a message keeps why an agent wrote it
+         * and a pipeline run's result. A phone that kept them without reads them again.
+         */
+        private const val VERSION = 3
 
         fun parse(value: JsonObject?): KeptConversation? {
             val o = value ?: return null
@@ -62,6 +69,7 @@ data class KeptConversation(
                 agent = AgentInfo.parse(o["agent"]),
                 mode = Mode.parse(o["mode"]),
                 slashCommands = SlashCommand.parseAll(o["slashCommands"]),
+                syncedAt = (o["syncedAt"] as? JsonPrimitive)?.content?.toLongOrNull(),
             )
         }
 
@@ -71,6 +79,7 @@ data class KeptConversation(
             run.startedAt?.let { put("startedAt", it) }
             run.endedAt?.let { put("endedAt", it) }
             run.reason?.let { put("reason", it) }
+            if (run.standalone) put("kind", "standalone")
             put("messages", JsonArray(run.messages.map(::messageJson)))
         }
 
@@ -81,7 +90,12 @@ data class KeptConversation(
             put("content", JsonArray(message.content.map(::blockJson)))
             message.status?.let { put("status", it) }
             message.runId?.let { put("runId", it) }
-            putJsonObject("metadata") { message.senderAgentId?.let { put("senderAgentId", it) } }
+            putJsonObject("metadata") {
+                message.senderAgentId?.let { put("senderAgentId", it) }
+                message.senderAgentExplanation?.let { put("senderAgentExplanation", it) }
+                message.pipelineRun?.let { put("pipelineRun", it) }
+                message.userId?.let { put("userId", it) }
+            }
             message.failure?.let { put("failure", it) }
             message.error?.let { put("error", it) }
         }
@@ -90,6 +104,18 @@ data class KeptConversation(
             is Block.Text -> buildJsonObject { put("type", "text"); put("text", block.text) }
             is Block.Reasoning -> buildJsonObject { put("type", "reasoning"); put("text", block.text) }
             is Block.Image -> buildJsonObject { put("type", "image"); put("mimeType", block.mimeType); put("data", block.data) }
+            is Block.File -> buildJsonObject {
+                put("type", "file")
+                put("attachment", block.attachment)
+                put("name", block.name)
+                block.mimeType?.let { put("mimeType", it) }
+                block.size?.let { put("size", it) }
+                block.kind?.let { put("kind", it) }
+                block.width?.let { put("width", it) }
+                block.height?.let { put("height", it) }
+                block.thumbhash?.let { put("thumbhash", it) }
+                block.scale?.let { put("scale", it) }
+            }
             is Block.ToolCall -> buildJsonObject {
                 put("type", "tool_call")
                 block.id?.let { put("id", it) }
@@ -154,6 +180,10 @@ data class KeptConversation(
                 put("type", "media")
                 put("items", JsonArray(presentation.items.map(::mediaJson)))
                 if (presentation.columns > 0) putJsonObject("layout") { put("type", "columns"); put("columns", presentation.columns) }
+            }
+            is Presentation.GenUi -> buildJsonObject {
+                put("type", "gen_ui")
+                presentation.document?.let { put("document", it) }
             }
             is Presentation.Artifact -> buildJsonObject {
                 put("type", "artifact")

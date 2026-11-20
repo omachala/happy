@@ -1,5 +1,6 @@
 #if canImport(UIKit)
 import Foundation
+import HappyAnalytics
 import HappyCore
 import HappyUI
 import UIKit
@@ -28,7 +29,27 @@ enum CompositionRoot {
                 }
             }
         )
-        return AppContext(account: account, variant: variant, version: version)
+        account.agentConnections.startup = startup
+        account.agentConnections.streamHold = { expired in
+            await MainActor.run { () -> (@Sendable () async -> Void)? in
+                let lease = EventStreamLease(expired: expired)
+                guard lease.acquired else { return nil }
+                return { await lease.end() }
+            }
+        }
+        startAnalytics(bundle: bundle, variant: variant, version: version)
+        let build = bundle.object(forInfoDictionaryKey: "CFBundleVersion") as? String
+        return AppContext(account: account, variant: variant, version: version, build: build)
+    }
+
+    private static func startAnalytics(bundle: Bundle, variant: AppVariant, version: String) {
+        #if DEBUG
+        let debug = true
+        #else
+        let debug = false
+        #endif
+        Analytics.shared.launch(bundle: bundle, debug: debug, variant: variant, appVersion: version,
+                                tablet: UIDevice.current.userInterfaceIdiom == .pad)
     }
 
     /// Application Support/Happy, as a path only: nothing touches the disk
@@ -36,11 +57,42 @@ enum CompositionRoot {
     /// it excluded from backups, off the main thread when it first reads or
     /// writes there (everything in it can be pulled again from the server,
     /// and the keys to read it are device-only anyway).
+    /// The open computer's tunnel, started at launch (`startLink`) and taken by its engine.
+    private static let startup = StartupLink()
+
+    /// Connects the computer that opens, beside the scene and the account's restore.
+    static func startLink() {
+        startup.start(directory: storeDirectory(), credentials: KeychainAgentConnectionCredentialStore(backend: SecurityKeychainBackend()))
+    }
+
     private static func storeDirectory() -> URL? {
         FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first?
             .appendingPathComponent("Happy", isDirectory: true)
     }
 }
+
+/// Background time for a held event stream. The engine closes it at its
+/// own deadline, before this runs out; if iOS ends the time first, the
+/// stream is told to close and the task ends at once, as iOS requires.
+@MainActor
+private final class EventStreamLease {
+    private var task: UIBackgroundTaskIdentifier = .invalid
+    var acquired: Bool { task != .invalid }
+
+    init(expired: @escaping @Sendable () -> Void) {
+        task = UIApplication.shared.beginBackgroundTask(withName: "happy.events") { [weak self] in
+            expired()
+            self?.end()
+        }
+    }
+
+    func end() {
+        guard task != .invalid else { return }
+        UIApplication.shared.endBackgroundTask(task)
+        task = .invalid
+    }
+}
+
 /// One background task for however many sends are in flight, so a send
 /// that started in the foreground can finish after the app is backgrounded.
 /// New sends don't start while backgrounded (`SyncEngine.setBackgrounded`).

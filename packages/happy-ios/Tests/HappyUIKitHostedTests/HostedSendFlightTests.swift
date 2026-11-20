@@ -66,7 +66,8 @@ private actor FlightComputer: AgentTransport {
 /// to two keeps its frame to the point, in both chats.
 ///
 /// With `HAPPY_FLIGHT_SLOW` set (a factor, 6 for six times), the flights
-/// run that much slower, for a screen recording. With `HAPPY_PREVIEW_DIR`
+/// run that much slower, for a screen recording; on a slow simulator they
+/// run `TestTime.scale` slower, so it draws as many of their frames. With `HAPPY_PREVIEW_DIR`
 /// set, each delivery state is kept there, light and dark.
 @MainActor
 final class HostedSendFlightTests: XCTestCase {
@@ -90,7 +91,7 @@ final class HostedSendFlightTests: XCTestCase {
     }
 
     private var slow: Float {
-        ProcessInfo.processInfo.environment["HAPPY_FLIGHT_SLOW"].flatMap(Float.init) ?? 1
+        ProcessInfo.processInfo.environment["HAPPY_FLIGHT_SLOW"].flatMap(Float.init) ?? Float(TestTime.scale)
     }
 
     // MARK: Opening the chats
@@ -116,7 +117,10 @@ final class HostedSendFlightTests: XCTestCase {
         let context = AppContext(account: controller, variant: .development, version: "test")
         let scene = try await hostedActiveScene()
         let hostWindow = scene.keyWindow
-        let chat = LegacyChatViewController(context: context, session: account, sessionId: FixtureScenarios.prefix + FixtureScenario.long.rawValue)
+        // A previous send's delayed reply must not stream into this test.
+        let sessionId = FixtureScenarios.prefix + FixtureScenario.long.rawValue + "/" + UUID().uuidString
+        XCTAssertEqual(FixtureScenarios.scenario(for: sessionId), .long)
+        let chat = LegacyChatViewController(context: context, session: account, sessionId: sessionId)
         let navigation = UINavigationController(rootViewController: UIViewController())
         navigation.pushViewController(chat, animated: false)
         let window = hostedKeyWindow(in: scene, root: navigation)
@@ -126,6 +130,7 @@ final class HostedSendFlightTests: XCTestCase {
             window.isHidden = true
             hostWindow?.makeKey()
             await controller.signOut()
+            await FixtureChatWorld.shared.reset(sessionId)
         }
         window.layoutIfNeeded()
         let constructed = try await until { chat.contentInstalled }

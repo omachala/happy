@@ -46,9 +46,9 @@ final class ChatPlanView: UIView {
     var onChunksPlaced: (() -> Void)?
     /// A chunk of a tall plan: touches go through it to the row's other chunks.
     private var passesTouches = false
-    /// The pictures, recordings and pages the plan shows now.
+    /// The pictures, recordings, pages and Gen UI the plan shows now.
     var mediaViews: [UIView] {
-        (media as [UIView] + pages as [UIView]).filter { !$0.isHidden }
+        (media as [UIView] + pages as [UIView] + genUIs as [UIView]).filter { !$0.isHidden }
             + chunkViews.keys.sorted().flatMap { chunkViews[$0]?.mediaViews ?? [] }
     }
     private var boxes: [UIView] = []
@@ -60,6 +60,7 @@ final class ChatPlanView: UIView {
     private var timers: [ChatElapsedLabel] = []
     private var pulses: [ChatPulseView] = []
     private var shimmers: [ChatShimmerView] = []
+    private var sheens: [ChatSheenView] = []
     private var diffs: [DiffChunkView] = []
     private var diffHeaders: [DiffFileHeaderView] = []
     private var scrollers: [ChatScrollerView] = []
@@ -69,7 +70,9 @@ final class ChatPlanView: UIView {
     private var media: [ChatMediaView] = []
     private var fileStatuses: [ChatFileStatusView] = []
     private var pages: [InlinePageView] = []
+    private var genUIs: [GenUIBlockView] = []
     private var deliveries: [ChatDeliveryView] = []
+    private var toolLines: [ChatToolLineView] = []
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -162,6 +165,7 @@ final class ChatPlanView: UIView {
         var timerIndex = 0
         var pulseIndex = 0
         var shimmerIndex = 0
+        var sheenIndex = 0
         var diffIndex = 0
         var diffHeaderIndex = 0
         var scrollerIndex = 0
@@ -171,7 +175,9 @@ final class ChatPlanView: UIView {
         var mediaIndex = 0
         var fileStatusIndex = 0
         var pageIndex = 0
+        var genUIIndex = 0
         var deliveryIndex = 0
+        var toolLineIndex = 0
         var order: [UIView] = []
         for item in items {
             switch item {
@@ -220,6 +226,11 @@ final class ChatPlanView: UIView {
                 let view = take(&shimmers, &shimmerIndex) { ChatShimmerView() }
                 view.setLayoutFrame(frame)
                 view.show(text)
+                order.append(view)
+            case .sheen(let copy, let frame, let run):
+                let view = take(&sheens, &sheenIndex) { ChatSheenView() }
+                view.setLayoutFrame(frame)
+                view.show(copy, run: run)
                 order.append(view)
             case .pulse(let box):
                 let view = take(&pulses, &pulseIndex) { ChatPulseView() }
@@ -299,10 +310,25 @@ final class ChatPlanView: UIView {
                 view.setLayoutFrame(frame)
                 view.apply(page)
                 order.append(view)
+            case .embed(.genUI(let embed), let frame):
+                let view = take(&genUIs, &genUIIndex) { GenUIBlockView() }
+                view.setLayoutFrame(frame)
+                view.apply(embed)
+                order.append(view)
+            case .embed(.genUIMessage(let embed), let frame):
+                let view = take(&genUIs, &genUIIndex) { GenUIBlockView() }
+                view.setLayoutFrame(frame)
+                view.apply(embed)
+                order.append(view)
             case .delivery(let mark, let frame):
                 let view = take(&deliveries, &deliveryIndex) { ChatDeliveryView() }
                 view.setLayoutFrame(frame)
                 view.apply(mark)
+                order.append(view)
+            case .toolLine(let line, let frame):
+                let view = take(&toolLines, &toolLineIndex) { ChatToolLineView() }
+                view.setLayoutFrame(frame)
+                view.apply(line)
                 order.append(view)
             }
         }
@@ -322,6 +348,10 @@ final class ChatPlanView: UIView {
             view.isHidden = true
         }
         for view in shimmers[shimmerIndex...] {
+            view.stop()
+            view.isHidden = true
+        }
+        for view in sheens[sheenIndex...] {
             view.stop()
             view.isHidden = true
         }
@@ -359,7 +389,12 @@ final class ChatPlanView: UIView {
             view.apply(nil)
             view.isHidden = true
         }
+        for view in genUIs[genUIIndex...] { view.isHidden = true }
         for view in deliveries[deliveryIndex...] {
+            view.apply(nil)
+            view.isHidden = true
+        }
+        for view in toolLines[toolLineIndex...] {
             view.apply(nil)
             view.isHidden = true
         }
@@ -442,9 +477,9 @@ extension ChatDrawItem {
     var markFrame: CGRect {
         switch self {
         case .box(let box), .pulse(let box): box.frame
-        case .text(_, let frame), .icon(_, _, let frame, _), .spinner(let frame, _, _), .shimmer(_, let frame), .elapsed(_, let frame, _),
+        case .text(_, let frame), .icon(_, _, let frame, _), .spinner(let frame, _, _), .shimmer(_, let frame), .sheen(_, let frame, _), .elapsed(_, let frame, _),
              .diff(_, let frame, _, _, _, _), .diffHeader(_, _, let frame), .scroller(_, let frame, _, _), .attachment(_, let frame),
-             .webImage(_, let frame, _), .mermaid(_, let frame), .media(_, let frame), .fileStatus(_, let frame), .embed(_, let frame), .delivery(_, let frame): frame
+             .webImage(_, let frame, _), .mermaid(_, let frame), .media(_, let frame), .fileStatus(_, let frame), .embed(_, let frame), .delivery(_, let frame), .toolLine(_, let frame): frame
         }
     }
 }
@@ -475,6 +510,14 @@ final class ChatScrollerView: UIScrollView {
         alwaysBounceVertical = false
         scrollsToTop = false
         contentInsetAdjustmentBehavior = .never
+        // iOS 26 shades a scroll view under the bar with an edge of its own,
+        // laid out where the bar met it. A strip in a row is carried by the
+        // list, not scrolled, so that shade stayed where the bar had been and
+        // veiled the table or code once it came back down into view. The
+        // list's own edge shades it under the bar.
+        if #available(iOS 26.0, *) {
+            for edge in [topEdgeEffect, leftEdgeEffect, bottomEdgeEffect, rightEdgeEffect] { edge.isHidden = true }
+        }
         addSubview(content)
     }
 

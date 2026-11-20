@@ -34,7 +34,7 @@ let package = Package(
         // The app itself. xtool expects this to be the product it packages.
         .library(name: "HappyApp", targets: ["HappyApp"]),
         // Everything the app is built from, for the XcodeGen app target.
-        .library(name: "HappyKit", targets: ["HappyCrypto", "HappyWire", "HappyStore", "HappyCore", "HappyLayout", "HappyIcons", "HappyUI"]),
+        .library(name: "HappyKit", targets: ["HappyCrypto", "HappyWire", "HappyStore", "HappyCore", "HappyAnalytics", "HappyLayout", "HappyIcons", "HappyUI"]),
         .library(name: "HappyGuestKit", targets: ["HappyGuest", "HappyGuestUI"]),
         // Native platform shells share services/models, never UI frameworks.
         .library(name: "HappyClientKit", targets: ["HappyCrypto", "HappyWire", "HappyStore", "HappyCore", "HappyLayout", "HappyIcons"]),
@@ -47,13 +47,16 @@ let package = Package(
         .package(url: "https://github.com/elevenlabs/elevenlabs-swift-sdk.git", exact: "3.4.0"),
         // Native Home and chat's optional renderer. Pin the pre-1.0 API used by
         // NodeRow and the custom keyframe scroller.
-        .package(url: "https://github.com/slopus/ultraview.git", revision: "c06ba489739fde00c56fb111f975a01758177fda"),
-        .package(url: "https://github.com/slopus/tailcat-swift.git", revision: "d6e59efe5b161478158cf172e9e8b8252f6c88e4"),
+        .package(url: "https://github.com/slopus/ultraview.git", revision: "f8ddf59370296aa764100049073eecdd67909ab5"),
+        .package(url: "https://github.com/slopus/tailcat-swift.git", revision: "98ab07701e7d420b9ee3e0bc452100b830dfb0ae"),
         // The state pictures (`StateSceneView`), desktop's Lottie scenes.
         // lottie-spm is Lottie's prebuilt xcframework, so it adds no source
         // build; scenes play on its Core Animation engine, off the main
         // thread's render loop.
         .package(url: "https://github.com/airbnb/lottie-spm.git", exact: "4.5.2"),
+        // Happy Cloud's Continue with Google: Google's own sign-in, whose ID
+        // token, bound to a nonce, the accounts service takes natively.
+        .package(url: "https://github.com/google/GoogleSignIn-iOS.git", exact: "10.1.0"),
     ],
     targets: [
         .target(name: "HappyGuest", dependencies: [cryptoBackend]),
@@ -73,13 +76,23 @@ let package = Package(
                 .product(name: "GRDB", package: "GRDB.swift"),
             ]
         ),
+        // zlib and Brotli for Linux; Apple's SDK has zlib and Compression.
+        .systemLibrary(name: "CDecoders", providers: [.apt(["zlib1g-dev", "libbrotli-dev"])]),
         .target(
             name: "HappyCore",
             dependencies: [
                 "HappyCrypto", "HappyWire", "HappyStore",
                 .product(name: "GRDB", package: "GRDB.swift"),
                 .product(name: "Tailcat", package: "tailcat-swift"),
+                .target(name: "CDecoders", condition: .when(platforms: [.linux])),
             ]
+        ),
+        .target(
+            // Product analytics (docs/analytics-catalog.json), on its own:
+            // HappyCore never imports it. Deleting this target and the
+            // facade's call sites in HappyUI and HappyApp removes it all.
+            name: "HappyAnalytics",
+            dependencies: ["HappyCore", "HappyWire", "HappyStore"]
         ),
         .target(
             // Foundation only, no UIKit: sizes in, frames out.
@@ -95,10 +108,11 @@ let package = Package(
         .target(
             name: "HappyUI",
             dependencies: [
-                "HappyCore", "HappyCrypto", "HappyWire", "HappyStore", "HappyLayout", "HappyIcons",
+                "HappyCore", "HappyAnalytics", "HappyCrypto", "HappyWire", "HappyStore", "HappyLayout", "HappyIcons",
                 .product(name: "ElevenLabs", package: "elevenlabs-swift-sdk", condition: .when(platforms: [.iOS])),
                 .product(name: "UltraView", package: "ultraview", condition: .when(platforms: [.iOS])),
                 .product(name: "Lottie", package: "lottie-spm", condition: .when(platforms: [.iOS])),
+                .product(name: "GoogleSignIn", package: "GoogleSignIn-iOS", condition: .when(platforms: [.iOS])),
             ],
             // Fonts and images live with the code that draws them, so
             // `Bundle.module` resolves the same way under xtool and Xcode.
@@ -106,7 +120,7 @@ let package = Package(
         ),
         .target(
             name: "HappyApp",
-            dependencies: ["HappyCore", "HappyStore", "HappyUI", "HappyGuestUI", "HappyGuest"]
+            dependencies: ["HappyCore", "HappyAnalytics", "HappyStore", "HappyUI", "HappyGuestUI", "HappyGuest"]
         ),
         .testTarget(
             name: "HappyCryptoTests",
@@ -125,6 +139,10 @@ let package = Package(
             name: "HappyCoreTests",
             dependencies: ["HappyCore", "HappyCrypto"],
             resources: [.copy("Fixtures")]
+        ),
+        .testTarget(
+            name: "HappyAnalyticsTests",
+            dependencies: ["HappyAnalytics", "HappyCore", "HappyStore"]
         ),
         .testTarget(
             name: "HappyLayoutTests",

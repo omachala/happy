@@ -87,6 +87,8 @@ final class HostedComposeTests: XCTestCase {
     override func setUp() {
         super.setUp()
         LegacyFonts.registerBundledFonts()
+        // No keyboard seen, whatever earlier tests' keyboards were.
+        MainActor.assumeIsolated { KeyboardReserve.shared.forget() }
     }
 
     override func tearDown() {
@@ -179,7 +181,6 @@ final class HostedComposeTests: XCTestCase {
                 metadataTransport: account.realtime,
                 saveInitialModes: { [sender = account.sender] in try await sender.saveInitialModes(sessionId: $0, patch: $1) },
                 refreshSessions: {},
-                paintBotFace: { _ in throw URLError(.cannotConnectToHost) },
                 attachmentPlan: { [sender = account.sender] message, sessionId in try await sender.attachmentPlan(for: message, sessionId: sessionId) },
                 spawnRequests: account.spawnRequests
             ))
@@ -328,14 +329,13 @@ final class HostedComposeTests: XCTestCase {
         let start = try XCTUnwrap(chat.composeStart)
         try await until { panel.folder.title.contains("happy") }
         XCTAssertEqual(start.kinds, [.session])
-        XCTAssertFalse(panel.kind.isHidden, "Session | Bot | Task always show")
-        XCTAssertEqual(start.enabledKinds, [.session], "Happy CLI alone makes sessions")
-        XCTAssertEqual((0..<3).map(panel.kind.isEnabledForSegment), [true, false, false], "Bot and Task show disabled")
+        XCTAssertEqual(start.shownKinds, [.session], "Happy CLI alone makes sessions")
+        XCTAssertTrue(panel.kind.isHidden, "no Session | Bot | Task without a Happy Agent")
         XCTAssertFalse(panel.machine.isHidden, "the computer shows, with whether it answers")
         XCTAssertFalse(panel.folder.isHidden)
         XCTAssertFalse(panel.harness.isHidden)
         XCTAssertGreaterThan(panel.harness.frame.minY, panel.folder.frame.maxY)
-        assertCentred(panel, in: chat)
+        assertPlaced(panel, in: chat)
         keep(window, "legacy-new-work-one-machine")
 
         XCTAssertNotNil(card.configuration.model?.menu, "the model must be pickable before a session exists")
@@ -390,7 +390,7 @@ final class HostedComposeTests: XCTestCase {
         try await until { panel.machine.title == "Harness Mac" }
         XCTAssertTrue(panel.folder.title.contains("happy"))
         XCTAssertLessThan(panel.machine.frame.maxY, panel.folder.frame.minY, "the computer is over its folder")
-        assertCentred(panel, in: chat)
+        assertPlaced(panel, in: chat)
         keep(window, "legacy-new-work-two-machines")
 
         let machines = Self.actions(start.machineMenuElements())
@@ -409,15 +409,6 @@ final class HostedComposeTests: XCTestCase {
         try await until { !chat.isComposing }
         XCTAssertEqual(log.spawned.map(\.machineId), [Self.studio], "it started on the other computer")
         XCTAssertEqual(log.spawned.map(\.directory), [Self.studioFolder])
-    }
-
-    /// Takes an alert down once it has finished coming up: one dismissed
-    /// mid-presentation stays.
-    private func dismissAlert(on chat: UIViewController) async throws {
-        try await until {
-            if let alert = chat.presentedViewController, !alert.isBeingPresented { alert.dismiss(animated: false) }
-            return chat.presentedViewController == nil
-        }
     }
 
     /// Picks a segment of the panel's Session | Bot | Task as a tap does.
@@ -444,7 +435,7 @@ final class HostedComposeTests: XCTestCase {
         XCTAssertEqual(panel.sessionKinds, [.session, .bot, .task])
         XCTAssertEqual(start.drafts.draft.agentType, .claude)
         XCTAssertFalse(panel.folder.isHidden)
-        assertCentred(panel, in: chat)
+        assertPlaced(panel, in: chat)
         keep(window, "legacy-new-work-kinds")
 
         try pick(.task, in: panel)
@@ -456,7 +447,9 @@ final class HostedComposeTests: XCTestCase {
         try await until { card.configuration.model?.menu?.selectedKey == "codex:gpt" }
         card.delegate?.agentInputCard(card, didSelect: "claude:opus", in: .model)
         try await until { card.configuration.model?.menu?.selectedKey == "claude:opus" }
-        assertCentred(panel, in: chat)
+        assertPlaced(panel, in: chat)
+        try await until { panel.art.isLoaded }
+        try await Task.sleep(for: .milliseconds(800))
         keep(window, "legacy-new-work-task")
 
         card.setText("Fix the login redirect", selection: NSRange(location: 22, length: 0))
@@ -476,10 +469,116 @@ final class HostedComposeTests: XCTestCase {
         try await until { panel.isHidden }
     }
 
+    /// Happy Agent's new work: a task asks no name, so it goes as a blank
+    /// name does, under the magic wand; a bot asks its name and says
+    /// what it is, under the robot. A task says what it is in the name's
+    /// place and keeps a bot's room, so Task | Bot moves nothing.
+    func testATaskAsksNoNameAndABotDoes() async throws {
+        let scene = try await hostedActiveScene()
+        let window = hostedKeyWindow(in: scene)
+        defer { window.isHidden = true }
+        let panel = NewWorkPanel(mode: .work)
+        let root = try XCTUnwrap(window.rootViewController?.view)
+        root.addSubview(panel)
+        var changes: [NewTask.Choice] = []
+        panel.onChange = { changes.append($0) }
+        func lay() { panel.place(panel.layout(width: root.bounds.width, top: 100, bottom: 700)) }
+        lay()
+        XCTAssertEqual(panel.choice.kind, .task)
+        XCTAssertTrue(panel.name.superview?.isHidden ?? false, "a task asks no name")
+        XCTAssertEqual(panel.artScene, .magicWand)
+        XCTAssertFalse(panel.art.isHidden)
+        XCTAssertEqual(panel.kind.frame.minY, NewWorkLayout.Metrics.art + NewWorkLayout.Metrics.artToKind)
+        XCTAssertGreaterThan(panel.frame.height, panel.kind.frame.maxY + NewWorkLayout.Metrics.rowHeight, "a bot's room, kept")
+        XCTAssertEqual(panel.note.text, Strings.newWorkTaskNote)
+        XCTAssertEqual(panel.note.frame.minY, panel.kind.frame.maxY + NewWorkLayout.Metrics.kindToRows, "in the name's place")
+        let task = [panel.frame, panel.art.frame, panel.kind.frame]
+
+        panel.kind.selectedSegmentIndex = 1
+        panel.kind.sendActions(for: .valueChanged)
+        lay()
+        XCTAssertFalse(panel.name.superview?.isHidden ?? true, "a bot asks its name")
+        XCTAssertEqual(panel.note.text, Strings.newWorkBotNote)
+        XCTAssertEqual(panel.note.frame.minY, panel.name.superview!.frame.maxY + NewWorkLayout.Metrics.rowsToNote)
+        XCTAssertEqual(panel.artScene, .robot)
+        XCTAssertEqual([panel.frame, panel.art.frame, panel.kind.frame], task, "Task to Bot moves nothing")
+
+        // Short of room (the keyboard up, the composer grown) the picture keeps its size, and the
+        // block stands on the composer, running up under the bar, alike for both.
+        func short() { panel.place(panel.layout(width: root.bounds.width, top: 100, bottom: 100 + 220)) }
+        short()
+        let bot = [panel.frame, panel.art.frame, panel.kind.frame]
+        XCTAssertEqual(panel.art.frame.width, NewWorkLayout.Metrics.art)
+        XCTAssertFalse(panel.art.isHidden, "the picture never goes")
+        XCTAssertEqual(panel.frame.maxY, 100 + 220 - NewWorkLayout.Metrics.margin, "on the composer")
+        XCTAssertLessThan(panel.frame.minY, 100, "under the bar")
+        panel.kind.selectedSegmentIndex = 0
+        panel.kind.sendActions(for: .valueChanged)
+        short()
+        XCTAssertEqual([panel.frame, panel.art.frame, panel.kind.frame], bot, "short of room, Bot to Task moves nothing")
+        panel.kind.selectedSegmentIndex = 1
+        panel.kind.sendActions(for: .valueChanged)
+        lay()
+        panel.name.text = "Newsletter"
+        panel.name.sendActions(for: .editingChanged)
+        XCTAssertEqual(changes.last, NewTask.Choice(kind: .bot, name: "Newsletter"))
+
+        // Back to a task: what was typed for the bot isn't its name.
+        panel.kind.selectedSegmentIndex = 0
+        panel.kind.sendActions(for: .valueChanged)
+        XCTAssertEqual(changes.last, NewTask.Choice(kind: .task, name: ""))
+        XCTAssertEqual(panel.choice, NewTask.Choice(kind: .task, name: ""))
+        panel.choice = NewTask.Choice(kind: .task, name: "Billing cleanup")
+        XCTAssertEqual(panel.choice.name, "", "a task is never named here")
+    }
+
+    /// Bot stands under the robot and Task under the magic wand, each
+    /// still as its kind is picked, and played only by a tap; a session
+    /// has none.
+    func testEachKindStandsUnderItsPicture() async throws {
+        let log = SpawnLog()
+        let (home, navigation, window, _, _) = try await legacyHome(happyAgent: true, log: log)
+        defer { window.isHidden = true }
+        home.compose()
+        try await settle(navigation)
+        let chat = try XCTUnwrap(navigation.topViewController as? LegacyChatViewController)
+        _ = try await composerCard(in: chat)
+        let panel = try XCTUnwrap(Self.subview(NewWorkPanel.self, in: chat.view))
+        let start = try XCTUnwrap(chat.composeStart)
+        try await until { start.kinds == [.session, .bot, .task] }
+        XCTAssertNil(panel.artScene, "a session has no picture")
+        XCTAssertTrue(panel.art.isHidden)
+        let moves = !UIAccessibility.isReduceMotionEnabled
+        var places: [HomeDockKind: [CGRect]] = [:]
+        for (kind, scene) in [(HomeDockKind.bot, StateScene.robot), (.session, nil), (.bot, .robot), (.task, .magicWand)] {
+            try pick(kind, in: panel)
+            try await until { panel.sessionKind == kind }
+            XCTAssertEqual(panel.artScene, scene, "\(kind)")
+            guard let scene else {
+                XCTAssertTrue(panel.art.isHidden, "\(kind)")
+                continue
+            }
+            XCTAssertEqual(panel.art.scene, scene)
+            XCTAssertTrue(panel.art.isLoaded && !panel.art.isHidden, "\(kind): drawn as soon as it is picked")
+            try await Task.sleep(for: .milliseconds(300))
+            XCTAssertFalse(panel.art.isAnimating, "\(kind): still until tapped")
+            XCTAssertEqual(panel.art.progress, scene.restsOnFirstFrame ? 0 : 1, accuracy: 0.001, "\(kind): at rest")
+            let art = try XCTUnwrap(panel.art.superview).convert(panel.art.frame, to: chat.view)
+            XCTAssertEqual(art.size, CGSize(width: NewWorkLayout.Metrics.givingWayArt, height: NewWorkLayout.Metrics.givingWayArt), "\(kind): never smaller")
+            XCTAssertEqual(art.midX, panel.convert(panel.kind.frame, to: chat.view).midX, accuracy: 0.5, "\(kind): over the kind")
+            XCTAssertEqual(panel.kind.frame.minY - panel.art.frame.maxY, NewWorkLayout.Metrics.artToKind, accuracy: 0.5)
+            places[kind] = [panel.frame, panel.art.frame, panel.kind.frame, panel.machine.frame]
+        }
+        // A task keeps a bot's name and note as empty room: Bot | Task moves nothing.
+        XCTAssertEqual(places[.task], places[.bot])
+        // A tap plays it, once.
+        panel.art.replay()
+        if moves { XCTAssertTrue(panel.art.isAnimating, "a tap plays it") }
+    }
+
     /// A bot needs its name: without one the name field asks for it in
     /// place (no alert), and the text stays;
-    /// named, it is made on Happy Agent, and a face that couldn't be
-    /// painted is offered again over the chat.
+    /// named, it is made on Happy Agent and opens, wearing no face.
     func testLegacyBotNeedsItsNameAndTakesTheFirstMessage() async throws {
         let log = SpawnLog()
         let (home, navigation, window, account, _) = try await legacyHome(happyAgent: true, log: log)
@@ -495,7 +594,9 @@ final class HostedComposeTests: XCTestCase {
         try await until { panel.sessionKind == .bot && start.drafts.draft.agentType == .rig }
         XCTAssertTrue(panel.folder.isHidden)
         XCTAssertEqual(panel.name.placeholder, "Name your bot")
-        assertCentred(panel, in: chat)
+        assertPlaced(panel, in: chat)
+        try await until { panel.art.isLoaded }
+        try await Task.sleep(for: .milliseconds(800))
         keep(window, "legacy-new-work-bot")
 
         card.setText("Plan the release", selection: NSRange(location: 16, length: 0))
@@ -516,17 +617,8 @@ final class HostedComposeTests: XCTestCase {
         let composerView = try XCTUnwrap(Self.subview(SessionComposerView.self, in: chat.view))
         try await until { !composerView.sending }
         card.delegate?.agentInputCardDidPressSend(card)
-        try await until { chat.presentedViewController is UIAlertController }
-        let offer = try XCTUnwrap(chat.presentedViewController as? UIAlertController)
-        XCTAssertEqual(offer.title, "Picture not set")
-        // Not now. `UIAlertAction` keeps its handler private; a test
-        // reaches it by key.
-        typealias Handler = @convention(block) (UIAlertAction) -> Void
-        let notNow = try XCTUnwrap(offer.actions.first { $0.style == .cancel })
-        let handler = unsafeBitCast(try XCTUnwrap(notNow.value(forKey: "handler") as AnyObject?), to: Handler.self)
-        try await dismissAlert(on: chat)
-        handler(notNow)
         try await until { !chat.isComposing }
+        XCTAssertNil(chat.presentedViewController, "no face to offer again")
         XCTAssertEqual(log.spawned.map(\.machineId), [Self.happyAgent])
         XCTAssertEqual(log.spawned.map(\.happyAgentTarget), [.object(["kind": .string("bot"), "name": .string("Release Captain")])])
         let store = account.store
@@ -537,15 +629,22 @@ final class HostedComposeTests: XCTestCase {
         XCTAssertEqual(start.drafts.botName, "")
     }
 
-    /// The panel's middle is the middle of the room between the bar and
-    /// the composer.
-    private func assertCentred(_ panel: NewWorkPanel, in chat: LegacyChatViewController, line: UInt = #line) {
+    /// The panel is centred between the bar and the composer when it fits;
+    /// short of room its first control stops at the bar's foot and the rest
+    /// stays clear of the composer.
+    private func assertPlaced(_ panel: NewWorkPanel, in chat: LegacyChatViewController, line: UInt = #line) {
         chat.view.layoutIfNeeded()
         let bar = chat.navigationController?.navigationBar.frame.maxY ?? chat.view.safeAreaInsets.top
         let composer = Self.subview(AgentInputCardView.self, in: chat.view)?.convert(CGPoint.zero, to: chat.view).y ?? chat.view.bounds.maxY
-        XCTAssertGreaterThan(panel.frame.minY, bar, line: line)
-        XCTAssertLessThan(panel.frame.maxY, composer, line: line)
-        XCTAssertEqual(panel.frame.midY, (bar + composer) / 2, accuracy: 30, "\(panel.frame) between \(bar) and \(composer)", line: line)
+        let controls: [UIView] = [panel.kind, panel.machine, panel.folder, panel.harness, panel.name.superview].compactMap { $0 }
+        let frames = controls.filter { !$0.isHidden && $0.superview === panel }.map { panel.convert($0.frame, to: chat.view) }
+        let top = frames.map(\.minY).min() ?? panel.frame.minY
+        let bottom = frames.map(\.maxY).max() ?? panel.frame.maxY
+        XCTAssertGreaterThanOrEqual(top, bar - 0.5, "\(frames) clear the bar at \(bar)", line: line)
+        XCTAssertLessThan(bottom, composer, "the rows clear the composer", line: line)
+        if panel.frame.minY > bar {
+            XCTAssertEqual(panel.frame.midY, (bar + composer) / 2, accuracy: 30, "\(panel.frame) between \(bar) and \(composer)", line: line)
+        }
     }
 
     private static func actions(_ elements: [UIMenuElement]) -> [UIAction] {
@@ -585,7 +684,8 @@ final class HostedComposeTests: XCTestCase {
         window.layoutIfNeeded()
         XCTAssertNil(Self.subview(AgentInputCardView.self, in: home.view), "home has no composer")
         XCTAssertNil(Self.subview(UITextView.self, in: home.view), "nothing is typed on home")
-        XCTAssertEqual(home.navigationItem.rightBarButtonItems?.compactMap(\.accessibilityIdentifier), ["settings"])
+        // The bar lists right to left: Settings, then the call.
+        XCTAssertEqual(home.navigationItem.rightBarButtonItems?.compactMap(\.accessibilityIdentifier), ["settings", "voice-call"])
         XCTAssertTrue(home.toolbarItems?.contains { $0.accessibilityIdentifier == "compose" } == true)
         XCTAssertFalse(navigation.isToolbarHidden)
         // iOS 26 moves the field into its floating toolbar; the owning
@@ -620,6 +720,7 @@ final class HostedComposeTests: XCTestCase {
         try await until { Self.subview(AgentInputCardView.self, in: newWork.view)?.textView.isFirstResponder == true }
         try await Task.sleep(for: .milliseconds(400))
         keep(window, "main-new-work")
+
 
         // Compose on new work standing empty: it is the one, so it stays.
         newWork.compose()

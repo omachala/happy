@@ -69,16 +69,22 @@ final class MediaLoader: NSObject, ChatMediaSource {
         }
     }
 
-    /// What the conversation shows now, by the keys its plans draw.
+    /// Each row's making already registered (`ChatItem.revision`).
+    private var registered: [String: UInt64] = [:]
+
+    /// What the conversation shows now, by the keys its plans draw: each
+    /// row once per making of it.
     func register(_ items: [ChatItem]) {
         for item in items {
+            if item.revision != 0, registered[item.id] == item.revision { continue }
+            registered[item.id] = item.revision
             for piece in item.pieces {
                 switch piece {
                 case .picture(let id, _, let data): sent[Self.sentKey(id)] = data
                 case .sentFile(let file): local[Self.sentKey(file.id)] = file
                 case .gallery(let media, _), .tree(let media, _): for one in media { tools[one.key] = one }
                 case .file(let one): tools[one.key] = one
-                case .text, .artifact, .sidebarProposal: break
+                case .text, .artifact, .sidebarProposal, .genUI: break
                 }
             }
         }
@@ -92,16 +98,22 @@ final class MediaLoader: NSObject, ChatMediaSource {
     // MARK: Kept files
 
     /// The file's ID in the library: a tool call's media is never another's.
-    func resourceID(_ media: Media) -> String { "tool/\(agentId)/\(media.toolCallId)/\(media.index)" }
+    /// One the person sent is kept there as it went (`deliverMessage`).
+    func resourceID(_ media: Media) -> String {
+        media.attachment.map { Media.attachmentResource(agentId: agentId, id: $0) } ?? "tool/\(agentId)/\(media.toolCallId)/\(media.index)"
+    }
 
-    /// Where its bytes come from: the computer's media route, a range at a time.
+    /// Where its bytes come from: the computer's media or attachment
+    /// route, a range at a time. A 404 is a file no longer there.
     func source(_ media: Media) -> MediaSource {
         let client = client
         let agentId = agentId
-        let (toolCallId, index) = (media.toolCallId, media.index)
+        let (toolCallId, index, attachment) = (media.toolCallId, media.index, media.attachment)
         return MediaSource(length: media.item.size.map { Int($0) }) { range in
             do {
-                let response = try await client.media(agentId, toolCallId: toolCallId, index: index, range: range.lowerBound...(range.upperBound - 1))
+                let bytes = range.lowerBound...(range.upperBound - 1)
+                let response = if let attachment { try await client.attachment(agentId, id: attachment, range: bytes) }
+                    else { try await client.media(agentId, toolCallId: toolCallId, index: index, range: bytes) }
                 return try MediaPiece.http(status: response.status, headers: response.headers, body: response.body)
             } catch AgentClientError.status(let status, _, _) where (400..<500).contains(status) && status != 408 && status != 429 {
                 throw MediaError.status(status)
@@ -184,7 +196,9 @@ final class MediaLoader: NSObject, ChatMediaSource {
         let id = resourceID(media)
         let source = source(media)
         guard let library else {
-            guard let response = try? await client.media(agentId, toolCallId: media.toolCallId, index: media.index) else { return nil }
+            let read = if let attachment = media.attachment { try? await client.attachment(agentId, id: attachment) }
+                else { try? await client.media(agentId, toolCallId: media.toolCallId, index: media.index) }
+            guard let response = read else { return nil }
             return await Task.detached(priority: .userInitiated) { Images.decode(response.body, maxPixels: pixels) }.value
         }
         let allowed = requested.contains(media.key) || rules.allows(.photos, size: media.item.size.map { Int($0) })

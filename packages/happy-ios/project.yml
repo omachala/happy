@@ -19,7 +19,7 @@ configs:
   Debug: debug
   Preview: release
   Release: release
-# HAPPY_CALL_AGENT_ID and HAPPY_REVENUE_CAT_APPLE_KEY, from an ignored
+# HAPPY_CALL_AGENT_V3_ID and HAPPY_REVENUE_CAT_APPLE_KEY, from an ignored
 # Config/Call.local.xcconfig or the environment.
 configFiles:
   Debug: Config/Call.xcconfig
@@ -28,7 +28,7 @@ configFiles:
 settings:
   base:
     SWIFT_VERSION: "6.0"
-    MARKETING_VERSION: "2.0.0"
+    MARKETING_VERSION: "2026.11.1"
     CURRENT_PROJECT_VERSION: "1"
     IPHONEOS_DEPLOYMENT_TARGET: "26.0"
     ENABLE_USER_SCRIPT_SANDBOXING: YES
@@ -44,11 +44,40 @@ targets:
       - path: Sources/HappyApp
       - path: App/Assets.xcassets
       - path: App/PrivacyInfo.xcprivacy
+      # Gen UI's compiled examples, for Settings › Gen UI fixtures (developer mode).
+      - path: Tests/HappyCoreTests/Fixtures/GenUI
+        type: folder
+        buildPhase: resources
     dependencies:
       - package: HappyIOS
         product: HappyKit
       - package: HappyIOS
         product: HappyGuestKit
+    # A store build without the voice agent ships a voice button that only
+    # says voice isn't set up: Preview and Release need HAPPY_CALL_AGENT_V3_ID
+    # (an ElevenLabs agent ID, as CallAgent.id reads it). Checked in the built
+    # Info.plist, what the app reads, whichever way the setting came. A build
+    # that ships nowhere says so with HAPPY_RELEASE_WITHOUT_CALL_AGENT=1.
+    # Debug never needs it.
+    postBuildScripts:
+      - name: Require the voice agent
+        basedOnDependencyAnalysis: false
+        inputFiles:
+          - $(TARGET_BUILD_DIR)/$(INFOPLIST_PATH)
+        script: |
+          case "$CONFIGURATION" in Preview|Release) ;; *) exit 0 ;; esac
+          id=$(/usr/libexec/PlistBuddy -c "Print :HappyCallAgentID" "$SCRIPT_INPUT_FILE_0" 2>/dev/null || true)
+          if printf '%s' "$id" | grep -Eqx 'agent_[A-Za-z0-9_]+'; then exit 0; fi
+          if [ "${HAPPY_RELEASE_WITHOUT_CALL_AGENT:-}" = 1 ]; then
+            echo "warning: HAPPY_RELEASE_WITHOUT_CALL_AGENT=1: this $CONFIGURATION build has no voice agent; voice says it isn't set up."
+            exit 0
+          fi
+          if [ -z "$id" ]; then
+            echo "error: A $CONFIGURATION build needs the voice agent: set HAPPY_CALL_AGENT_V3_ID (Config/Call.local.xcconfig, the xcodebuild command line or the environment) to the v3 agent's ID. The old HAPPY_CALL_AGENT_ID is ignored. See docs/agent-voice-call.md"
+          else
+            echo "error: A $CONFIGURATION build needs the voice agent, and HAPPY_CALL_AGENT_V3_ID isn't an ElevenLabs agent ID (agent_…)."
+          fi
+          exit 1
     settings:
       base:
         PRODUCT_NAME: Happy
@@ -62,20 +91,27 @@ targets:
         # Every variant has aps-environment "development", as the RN app's
         # expo-notifications plugin writes it; signing for distribution
         # replaces it with the profile's "production". The fork has no
-        # universal links, so production has no associated domain.
+        # universal links, so no variant has an associated domain.
+        #
+        # HAPPY_GOOGLE_CLIENT is the variant's own iOS OAuth client for
+        # Continue with Google (public, not a secret): the Info.plists make
+        # GIDClientID and its reversed URL scheme from it.
       configs:
         Debug:
           PRODUCT_BUNDLE_IDENTIFIER: com.omachala.happy.dev
           INFOPLIST_FILE: App/Info-Development.plist
           CODE_SIGN_ENTITLEMENTS: App/Happy.entitlements
+          HAPPY_GOOGLE_CLIENT: 902947412706-3563t62iimaknc7lq6fdhgcgna7eff1l
         Preview:
           PRODUCT_BUNDLE_IDENTIFIER: com.omachala.happy.preview
           INFOPLIST_FILE: App/Info-Preview.plist
           CODE_SIGN_ENTITLEMENTS: App/Happy.entitlements
+          HAPPY_GOOGLE_CLIENT: 902947412706-0s9bb1000luv6d9vkdbau31h2i69gad0
         Release:
           PRODUCT_BUNDLE_IDENTIFIER: com.omachala.happy
           INFOPLIST_FILE: App/Info-Production.plist
           CODE_SIGN_ENTITLEMENTS: App/Happy-Production.entitlements
+          HAPPY_GOOGLE_CLIENT: 902947412706-3a9fl74rsj3566r0a9i2310mgeu1qd09
           CURRENT_PROJECT_VERSION: "44"
   HappyMac:
     # Genuine AppKit/macOS SDK target. No UIKit, Catalyst or iPad binary.
@@ -141,6 +177,10 @@ targets:
     platform: iOS
     sources:
       - path: Tests/HappyUIKitTests
+      # Gen UI's compiled examples, laid out in GenUIRenderTests.
+      - path: Tests/HappyCoreTests/Fixtures/GenUI
+        type: folder
+        buildPhase: resources
     dependencies:
       - package: HappyIOS
         product: HappyKit
@@ -170,6 +210,12 @@ targets:
     platform: iOS
     sources:
       - path: Tests/HappyUIKitHostedTests
+      # The time scale both UIKit bundles read.
+      - path: Tests/HappyUIKitTests/TestTime.swift
+      # Gen UI's compiled examples, served as gen_ui artifacts.
+      - path: Tests/HappyCoreTests/Fixtures/GenUI
+        type: folder
+        buildPhase: resources
     dependencies:
       - target: HappyUIKitTestHost
       - package: HappyIOS
@@ -189,6 +235,10 @@ targets:
       - path: Harness
         excludes:
           - Info.plist
+      # Gen UI's render documents and their images, as one folder (-genui).
+      - path: Tests/HappyCoreTests/Fixtures/GenUI
+        type: folder
+        buildPhase: resources
     dependencies:
       - package: HappyIOS
         product: HappyKit

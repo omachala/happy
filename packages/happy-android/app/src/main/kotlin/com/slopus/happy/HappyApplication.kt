@@ -1,14 +1,20 @@
 package com.slopus.happy
 
 import android.app.Application
+import com.slopus.happy.agent.StartupLink
 import com.slopus.happy.data.DiskThread
 import com.slopus.happy.diagnostics.traced
 import com.slopus.happy.push.PushServices
+import com.slopus.happy.ui.components.StateArt
+import com.slopus.happy.ui.components.StateCompositions
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Deferred
 import kotlin.concurrent.thread
 
 class HappyApplication : Application() {
+    /** The open agent connection's tunnel, started in [onCreate] when the process starts for the window. */
+    private val startupLink = StartupLink()
+
     /** Built on first use. The main thread never asks for it: it waits for [graphReady]. */
     val graph: AppGraph by lazy {
         traced("AppGraph") {
@@ -16,6 +22,7 @@ class HappyApplication : Application() {
                 context = this,
                 clientId = "android/${BuildConfig.VERSION_NAME}",
                 defaultServerUrl = BuildConfig.DEFAULT_SERVER_URL,
+                startup = startupLink,
             ).also { PushServices.unregisterOnLogout(this, it) }
         }
     }
@@ -35,6 +42,8 @@ class HappyApplication : Application() {
                 // What the first screens would otherwise read on the main thread: the push preferences, the glass switch.
                 traced("PushServices") { PushServices.get(this) }
                 com.slopus.happy.ui.components.glassBlurEnabled(this)
+                // New work's robot and magic wand, there in its first frame.
+                traced("StateCompositions") { StateCompositions.preload(this, listOf(StateArt.Action, StateArt.Ready)) }
             } catch (e: Throwable) {
                 built.completeExceptionally(e)
             }
@@ -45,5 +54,17 @@ class HappyApplication : Application() {
     override fun onCreate() {
         super.onCreate()
         if (BuildConfig.DEBUG) DiskThread.watch()
+        // Connecting needs neither the graph nor the window: it runs beside them (StartupLink).
+        if (StartupLink.forWindow(this)) startupLink.start(this)
+    }
+
+    private val terminated = mutableListOf<() -> Unit>()
+
+    /** [action] when the application ends: never on a phone, after each test under Robolectric. */
+    fun whenTerminated(action: () -> Unit) = synchronized(terminated) { terminated += action }
+
+    override fun onTerminate() {
+        synchronized(terminated) { terminated.toList().also { terminated.clear() } }.forEach { it() }
+        super.onTerminate()
     }
 }

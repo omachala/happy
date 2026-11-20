@@ -28,8 +28,11 @@ public enum SidebarLayout {
         public var foldClosed: Bool
         public var lineChangesWidth: CGFloat
         public var trailingInk: CGRect?
+        /// A line under the title, as a search result's snippet: in a
+        /// grouped list, the row is `detailRowHeight` tall.
+        public var hasDetail: Bool
 
-        public init(kind: Kind, depth: Int = 0, hasMark: Bool = true, hasTrailing: Bool = false, hasWorkingSignal: Bool = false, hasFold: Bool = false, foldClosed: Bool = false, lineChangesWidth: CGFloat = 0, trailingInk: CGRect? = nil) {
+        public init(kind: Kind, depth: Int = 0, hasMark: Bool = true, hasTrailing: Bool = false, hasWorkingSignal: Bool = false, hasFold: Bool = false, foldClosed: Bool = false, lineChangesWidth: CGFloat = 0, trailingInk: CGRect? = nil, hasDetail: Bool = false) {
             self.kind = kind
             self.depth = depth
             self.hasMark = hasMark
@@ -39,6 +42,7 @@ public enum SidebarLayout {
             self.foldClosed = foldClosed
             self.lineChangesWidth = lineChangesWidth
             self.trailingInk = trailingInk
+            self.hasDetail = hasDetail
         }
     }
 
@@ -66,6 +70,8 @@ public enum SidebarLayout {
         /// list, and for a heading or a separator.
         public var cell: Cell?
         public var lineChanges: CGRect?
+        /// The line under the title, for a row that has one.
+        public var detail: CGRect?
 
         public init(box: CGRect, mark: CGRect? = nil, label: CGRect = .zero, trailing: CGRect? = nil, chevron: CGRect? = nil, chevronGlyph: CGRect? = nil, rule: CGRect? = nil, corner: CGRect? = nil, cell: Cell? = nil) {
             self.box = box
@@ -177,30 +183,45 @@ public enum SidebarLayout {
 
     /// Counts take their measured width before the activity/fold lanes.
     /// Only the title yields space; no count update changes a row's height.
+    /// The working signal, a question, a clock or a new row's dot stands in
+    /// one `statusSlot` square ending at `activityRight`, its ink centred
+    /// there, so every row's mark lines up in one column. The title's box,
+    /// where its fade ends, and the counts stop `statusGap` before that
+    /// square; the title stops the row's gap (`trailingGap`) before counts.
     static func reserveLineChanges(_ row: Row, frame: inout Frame, activityRight: CGFloat, scale: CGFloat) {
-        let ink = workingInk(scale: scale)
+        let slot = statusSlot(box: frame.box, activityRight: activityRight)
+        var slotted = false
         if var corner = frame.corner, !row.hasFold {
-            corner.origin.x = activityRight - ink.maxX
-            corner.origin.y = frame.box.midY - ink.midY
+            let ink = workingInk(scale: scale)
+            corner.origin.x = slot.midX - ink.midX
+            corner.origin.y = slot.midY - ink.midY
             frame.corner = corner
-            frame.label.size.width = max(0, corner.minX + ink.minX - 6 - frame.label.minX)
+            slotted = true
         }
         if var trailing = frame.trailing, let statusInk = row.trailingInk, !row.hasFold {
-            trailing.origin.x = activityRight - statusInk.maxX
-            trailing.origin.y = frame.box.midY - statusInk.midY
+            trailing.origin.x = slot.midX - statusInk.midX
+            trailing.origin.y = slot.midY - statusInk.midY
             frame.trailing = trailing
-            frame.label.size.width = max(0, trailing.minX + statusInk.minX - 6 - frame.label.minX)
+            slotted = true
         }
+        if slotted { frame.label.size.width = max(0, slot.minX - Metrics.statusGap - frame.label.minX) }
         guard row.kind == .row, row.lineChangesWidth > 0 else { return }
         let right: CGFloat
-        if let corner = frame.corner {
-            right = corner.minX + ink.minX - 6
+        if slotted {
+            right = slot.minX - Metrics.statusGap
         } else {
             right = !row.hasTrailing && !row.hasFold ? activityRight : frame.label.maxX
         }
         let width = min(row.lineChangesWidth, max(0, right - frame.label.minX))
         frame.lineChanges = CGRect(x: right - width, y: frame.box.minY, width: width, height: frame.box.height)
-        frame.label.size.width = max(0, right - width - 8 - frame.label.minX)
+        frame.label.size.width = max(0, right - width - Metrics.trailingGap - frame.label.minX)
+    }
+
+    /// The status column's square on a row: `statusSlot` wide and tall,
+    /// ending at `activityRight`, on the row's middle.
+    public static func statusSlot(box: CGRect, activityRight: CGFloat) -> CGRect {
+        let side = Metrics.statusSlot
+        return CGRect(x: activityRight - side, y: box.midY - side / 2, width: side, height: side)
     }
 
     static func workingInk(scale: CGFloat) -> CGRect {

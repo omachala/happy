@@ -85,7 +85,7 @@ final class HostedLiveAvatarTests: XCTestCase {
         XCTAssertEqual(live.metalLayer.drawableSize.width, (48 * window.screen.scale).rounded(.up))
         // It keeps drawing: frames come at about 20 a second.
         let presented = renderer.presented
-        try await Task.sleep(for: .milliseconds(500))
+        try await Task.sleep(for: .milliseconds(Int(TestTime.budget(500))))
         XCTAssertGreaterThan(renderer.presented - presented, 4, "it isn't moving")
         XCTAssertNotNil(avatar.glyph.image, "the still picture stays under it")
 
@@ -95,6 +95,8 @@ final class HostedLiveAvatarTests: XCTestCase {
         XCTAssertEqual(live.index, AvatarPlaceholder.index(seed: "session-2"))
         XCTAssertTrue(live.monochrome)
         try await until { live.drawn && !live.isHidden }
+        // Its first frame is drawn at once; its still picture decodes after.
+        try await until { avatar.glyph.image != nil }
 
         LiveAvatars.isEnabled = false
         XCTAssertNil(Self.live(in: avatar))

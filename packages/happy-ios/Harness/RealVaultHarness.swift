@@ -52,7 +52,10 @@ final class RealVaultHarness {
             AppCoordinator.applyAppearance(to: navigation.navigationBar)
             window.rootViewController = navigation
             if arguments.contains("-dark") { window.overrideUserInterfaceStyle = .dark }
-            await script.run(session: session, navigation: navigation, surfaceId: vault, name: Self.value("-name", arguments) ?? "Demo vault")
+            await script.run(session: session, navigation: navigation, surfaceId: vault, name: Self.value("-name", arguments) ?? "Demo vault",
+                             searchOnly: arguments.contains("-searchOnly"),
+                             queries: Self.value("-searchQueries", arguments).map { $0.split(separator: ",").map(String.init) } ?? [],
+                             opens: Self.value("-searchOpens", arguments).map { $0.split(separator: ",").map { $0.split(separator: "=", maxSplits: 1).map(String.init) } } ?? [])
         } catch {
             script.fail("\(error)")
         }
@@ -119,6 +122,16 @@ private final class RealVaultScript {
         await sleep(2.5)
     }
 
+    /// The screen as it is this moment, with no pause first: the device's
+    /// own capture would come too late.
+    private func snap(_ name: String) {
+        let image = UIGraphicsImageRenderer(bounds: window.bounds).image { _ in
+            window.drawHierarchy(in: window.bounds, afterScreenUpdates: true)
+        }
+        try? image.pngData()?.write(to: folder.appendingPathComponent("\(name).png"))
+        print("REAL_VAULT SNAP \(name)")
+    }
+
     private func until(_ seconds: Double, _ condition: () -> Bool) async -> Bool {
         let deadline = Date().addingTimeInterval(seconds)
         while Date() < deadline {
@@ -136,7 +149,6 @@ private final class RealVaultScript {
     private func entry(_ name: String, in screen: VaultViewController? = nil) -> (id: String, entry: VaultEntry)? {
         for (id, row) in (screen ?? browser)?.rows ?? [:] {
             if case .entry(let entry) = row, entry.name == name { return (id, entry) }
-            if case .result(let result) = row, result.entry.name == name { return (id, result.entry) }
         }
         return nil
     }
@@ -217,13 +229,23 @@ private final class RealVaultScript {
 
     // MARK: The walk
 
-    func run(session: Session, navigation: UINavigationController, surfaceId: String, name: String) async {
+    func run(session: Session, navigation: UINavigationController, surfaceId: String, name: String, searchOnly: Bool = false, queries: [String] = [], opens: [[String]] = []) async {
         self.session = session
         self.navigation = navigation
         self.surfaceId = surfaceId
         self.name = name
         await sleep(6)
         await shoot("01-home")
+        if !opens.isEmpty {
+            await searchOpens(opens.filter { $0.count == 2 }.map { ($0[0], $0[1]) })
+            return note("DONE")
+        }
+        if !queries.isEmpty {
+            await searchShots(queries)
+            return note("DONE")
+        }
+        await homeSearch()
+        if searchOnly { return note("DONE") }
 
         // The Surface list's row opens the vault's browser.
         navigation.pushViewController(SurfaceScreens.make(session: session, surface: AgentWire.Surface(id: surfaceId, type: "vault", name: name)), animated: true)
@@ -234,7 +256,6 @@ private final class RealVaultScript {
         check("the root lists its folders first", await until(10) { foldersFirst(root) }, names(root).joined(separator: " | "))
         await shoot("02-vault-root")
         await browse(root)
-        await search(root)
         await changes(root)
         await uploads(root)
         await history(root)
@@ -243,6 +264,167 @@ private final class RealVaultScript {
         await live(root)
         await tidy(root)
         note("DONE")
+    }
+
+    /// Home's search, typed into the bar's field: the phone's own results
+    /// at once, the computer's fused in (`POST /v0/search`), a file's
+    /// matched words under its name, a found file opening in its vault,
+    /// and a found message in its conversation.
+    private func homeSearch() async {
+        guard let agentHome = navigation.viewControllers.first as? AgentHomeViewController,
+              let home = agentHome.children.compactMap({ $0 as? HomeViewController }).first else {
+            check("home search", false, "no home")
+            return
+        }
+        let rows = { home.resultsView.list.rows }
+        let labels = { rows().map { $0.label + ($0.detail.map { " [\($0)]" } ?? "") }.joined(separator: " | ") }
+        // Kinds only the computer finds: the phone holds none of them.
+        let remote = { rows().contains { row in ["vault_file", "vault_folder", "message", "todo", "calendar_event"].contains { row.id.hasPrefix("found:\($0):") } } }
+        let bar = agentHome.search
+        // As a person types: the field takes the words, and UIKit tells search.
+        func type(_ query: String) async {
+            // The field opens, and its results fade in, before the typing.
+            if !bar.isActive {
+                bar.begin()
+                await sleep(1.5)
+            }
+            bar.bar.searchTextField.text = ""
+            bar.bar.searchTextField.insertText(query)
+        }
+        await type("plan")
+        // Well inside the 120 ms pause before the computer is asked.
+        await sleep(0.03)
+        snap("00a-search-local")
+        check("home search shows what the phone holds before the computer is asked",
+              rows().contains { $0.label.lowercased().contains("plan") } && !remote(), labels())
+        check("the field shows what was typed", bar.bar.searchTextField.text == "plan", bar.bar.searchTextField.text ?? "nil")
+        check("a conversation the phone holds draws as a result, a chat bubble before it",
+              rows().contains { $0.id.hasPrefix("found:agent:") && $0.kind == .result && $0.mark == .glyph("chatbubbles-outline") }, labels())
+        check("and the computer's, fused in, with the words a file matched under its name",
+              await until(15) { rows().contains { $0.id.hasPrefix("found:vault_file:") && $0.detail != nil } }, labels())
+        await shoot("00b-search-fused")
+        await type("launch")
+        check("a vault app shows without .artifact", await until(15) { rows().contains { $0.id.hasPrefix("found:vault_file:") } } && !rows().contains { $0.label.hasSuffix(".artifact") }, labels())
+        await type("revenue")
+        check("a word only in a file's content finds it, with its line", await until(15) { rows().contains { $0.id.hasPrefix("found:vault_file:") && $0.detail?.lowercased().contains("revenue") == true } },
+              labels())
+        await shoot("00c-search-content")
+        if let row = rows().first(where: { $0.id.hasPrefix("found:vault_file:") }) {
+            home.resultsView.list.onSelect?(row)
+            check("a found file opens in its vault", await until(15) { top is VaultPreviewViewController }, String(describing: top))
+            await sleep(2)
+            await shoot("00d-search-opened")
+            navigation.popToRootViewController(animated: false)
+            await sleep(0.5)
+        }
+        await type("launch")
+        if await until(15, { rows().contains { $0.id.hasPrefix("found:message:") } }), let row = rows().first(where: { $0.id.hasPrefix("found:message:") }) {
+            await shoot("00e-search-message")
+            home.resultsView.list.onSelect?(row)
+            check("a found message opens its conversation", await until(15) { top is ChatViewController }, String(describing: top))
+            await sleep(2)
+            await shoot("00f-search-message-opened")
+            navigation.popToRootViewController(animated: false)
+            await sleep(0.5)
+        } else {
+            note("no message says launch: \(labels())")
+        }
+        bar.end()
+        await sleep(0.5)
+    }
+
+    /// Home's search for each of `queries`, typed into the bar's field: once
+    /// the computer has answered, the results are listed and shot as
+    /// `search-<query>`, then the first found row of each kind is opened.
+    private func searchShots(_ queries: [String]) async {
+        guard let agentHome = navigation.viewControllers.first as? AgentHomeViewController,
+              let home = agentHome.children.compactMap({ $0 as? HomeViewController }).first else {
+            check("home search", false, "no home")
+            return
+        }
+        let rows = { home.resultsView.list.rows }
+        let bar = agentHome.search
+        let remote = { rows().contains { row in ["vault_file", "vault_folder", "message", "todo", "calendar_event", "document"].contains { row.id.hasPrefix("found:\($0):") } } }
+        for query in queries {
+            if !bar.isActive {
+                bar.begin()
+                await sleep(1.5)
+            }
+            bar.bar.searchTextField.text = ""
+            bar.bar.searchTextField.insertText(query)
+            check("\(query): the computer's results come in", await until(15) { remote() })
+            await sleep(0.5)
+            for row in rows() { note("\(query) ROW \(row.kind == .section ? "## " : "")\(row.label)\(row.detail.map { " — \($0)" } ?? "")  [\(row.id)]") }
+            check("\(query): at most twelve found", rows().filter { $0.id.hasPrefix("found:") }.count <= HappyCore.Search.foundLimit)
+            await shoot("search-\(query)")
+        }
+        for kind in ["vault_file", "message", "calendar_event"] {
+            guard let query = queries.first else { break }
+            bar.bar.searchTextField.text = ""
+            bar.bar.searchTextField.insertText(kind == "vault_file" ? query : queries.last ?? query)
+            guard await until(15, { rows().contains { $0.id.hasPrefix("found:\(kind):") } }), let row = rows().first(where: { $0.id.hasPrefix("found:\(kind):") }) else {
+                note("no \(kind) found")
+                continue
+            }
+            home.resultsView.list.onSelect?(row)
+            check("a found \(kind) opens", await until(15) { navigation.viewControllers.count > 1 }, String(describing: top))
+            await sleep(2)
+            await shoot("search-opened-\(kind)")
+            navigation.popToRootViewController(animated: false)
+            await sleep(0.8)
+        }
+        bar.end()
+        await sleep(0.5)
+    }
+
+    /// Each `(query, title)`: the result called `title` found for `query`,
+    /// opened from search, as desktop opens it. A Surface (or a vault item's
+    /// vault) the sidebar didn't hold is in it once opened; a task opens
+    /// without joining, so the sidebar is as it was. Shot as
+    /// `opened-<n>` on the screen it opened and `home-<n>` after.
+    private func searchOpens(_ opens: [(query: String, title: String)]) async {
+        guard let agentHome = navigation.viewControllers.first as? AgentHomeViewController,
+              let home = agentHome.children.compactMap({ $0 as? HomeViewController }).first else {
+            check("home search", false, "no home")
+            return
+        }
+        let results = { home.resultsView.list.rows }
+        let listed = { (title: String) in home.sidebar.rows.contains { $0.label == title } }
+        let bar = agentHome.search
+        for (index, open) in opens.enumerated() {
+            if !bar.isActive {
+                bar.begin()
+                await sleep(1.5)
+            }
+            bar.bar.searchTextField.text = ""
+            bar.bar.searchTextField.insertText(open.query)
+            guard await until(15, { results().contains { $0.label == open.title } }), let row = results().first(where: { $0.label == open.title }) else {
+                check("\(open.query): finds \(open.title)", false, results().map(\.label).joined(separator: " | "))
+                continue
+            }
+            for row in results() { note("\(open.query) ROW \(row.label)\(row.detail.map { " — \($0)" } ?? "")  [\(row.id)]") }
+            await shoot("open-\(index)-results")
+            let surface = ["document", "surface", "todo", "calendar_event", "vault_file", "vault_folder"].contains { row.id.hasPrefix("found:\($0):") }
+            let item = row.id.hasPrefix("found:vault_file:") || row.id.hasPrefix("found:vault_folder:")
+            // What the sidebar is to hold once it's open: the Surface itself, or a vault item's vault.
+            let place = item ? row.detail.flatMap { $0.components(separatedBy: " · ").first } ?? "" : surface && row.id.hasPrefix("found:todo:") ? row.detail ?? "" : open.title
+            let before = listed(place)
+            note("\(open.title) [\(row.id)] — the sidebar held \(place): \(before)")
+            home.resultsView.list.onSelect?(row)
+            check("\(open.title) opens", await until(15) { navigation.viewControllers.count > 1 }, String(describing: top))
+            await sleep(2.5)
+            await shoot("opened-\(index)")
+            navigation.popToRootViewController(animated: false)
+            bar.end()
+            await sleep(0.5)
+            if surface {
+                check("\(place) is in the sidebar once opened", await until(15) { listed(place) }, home.sidebar.rows.map(\.label).joined(separator: " | "))
+            } else {
+                await sleep(3)
+                check("\(open.title) opened without joining: the sidebar is as it was", listed(place) == before, home.sidebar.rows.map(\.label).joined(separator: " | "))
+            }
+            await shoot("home-\(index)")
+        }
     }
 
     private func browse(_ root: VaultViewController?) async {
@@ -296,29 +478,6 @@ private final class RealVaultScript {
         check("folders stay first in another order", foldersFirst(root), names(root).joined(separator: " | "))
         await shoot("12-sorted-by-date")
         root?.setSort(.name)
-    }
-
-    private func search(_ root: VaultViewController?) async {
-        guard let root else { return }
-        await reset(root)
-        let search = root.searchController
-        search.isActive = true
-        await sleep(1)
-        search.searchBar.text = "summary"
-        root.updateSearchResults(for: search)
-        check("a name search finds the file", await until(15) { entry("Q3 summary.txt", in: root) != nil })
-        await shoot("13-search-name")
-        search.searchBar.text = "launch"
-        root.updateSearchResults(for: search)
-        await sleep(3)
-        let found = (root.list.items).map(\.accessibilityLabel)
-        check("a search shows names and contents", found.contains("Names") || found.contains("Contents"), found.joined(separator: " | "))
-        check("and apps there without .artifact", found.contains("launch") && !found.contains { $0.hasSuffix(".artifact") }, found.joined(separator: " | "))
-        await shoot("14-search-names-contents")
-        search.searchBar.text = ""
-        search.isActive = false
-        root.updateSearchResults(for: search)
-        await sleep(1)
     }
 
     private func changes(_ root: VaultViewController?) async {

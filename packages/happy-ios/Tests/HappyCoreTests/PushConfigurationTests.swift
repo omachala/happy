@@ -24,10 +24,14 @@ final class PushConfigurationTests: XCTestCase {
     }
 
     func testEntitlementsAskForAPNsLikeTheRNApp() throws {
-        XCTAssertEqual(try plist("App/Happy.entitlements") as NSDictionary, ["aps-environment": "development"] as NSDictionary)
+        // Development and preview also sign in to Happy Cloud with Apple.
+        // The fork has no universal links, so no variant has associated domains.
+        XCTAssertEqual(try plist("App/Happy.entitlements") as NSDictionary,
+                       ["aps-environment": "development", "com.apple.developer.applesignin": ["Default"]] as NSDictionary)
         let production = try plist("App/Happy-Production.entitlements")
         XCTAssertEqual(production["aps-environment"] as? String, "development")
-        // The fork has no universal links (no app.happy.engineering).
+        // The fork has no universal links (no app.happy.engineering,
+        // join.happy.engineering or link.happy.page).
         XCTAssertNil(production["com.apple.developer.associated-domains"])
     }
 

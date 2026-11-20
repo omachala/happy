@@ -6,7 +6,7 @@ import UIKit
 /// Home's left bar item, alone there on both homes: the active account's
 /// picture and name on one line, and a chevron. A tap opens the native
 /// menu: every account and agent connection (the active one ticked; another
-/// switches to it), then Add (`AccountAdding`) and Manage Accounts. Adding
+/// switches to it), then Add (`AccountAdding`) and Connect to Happy Cloud. Adding
 /// or a failed switch leaves the active account as it was.
 ///
 /// Every kind of account is one row in the menu: a legacy account, one made
@@ -96,14 +96,12 @@ final class AccountSwitcher: NSObject {
     }
 
     /// The status first while it stands in the name's place: "Connecting…,
-    /// Steve". A computer that did not answer says so in home's list, and
-    /// the name stands, but VoiceOver hears "offline" after it.
+    /// Steve".
     private func describe() {
         guard let active = current(in: context.account.accounts) else { return }
         button.accessibilityLabel = Strings.AccountSwitcher.switcher
         let status = Strings.HeaderStatus.title(link)
-        let after = link == .offline ? Strings.HeaderStatus.text(.offline) : nil
-        button.accessibilityValue = [status, name(active), after].compactMap { $0 }.joined(separator: ", ")
+        button.accessibilityValue = [status, name(active)].compactMap { $0 }.joined(separator: ", ")
     }
 
     /// Says the change aloud once it has stood half a second, and only
@@ -122,7 +120,7 @@ final class AccountSwitcher: NSObject {
     }
 
     /// What VoiceOver hears for a change: the status, or that the account
-    /// is online again. Offline is said by the notice that explains it.
+    /// is online again.
     static func announcement(for link: LinkState) -> String? {
         if let title = Strings.HeaderStatus.title(link) { return title }
         guard link == .online else { return nil }
@@ -193,9 +191,26 @@ final class AccountSwitcher: NSObject {
             AccountAdding.begin(context: context, from: controller)
         }
         add.accessibilityIdentifier = "account-add"
+        let cloud = UIAction(title: Strings.ServerSignIn.cloudAction, image: UIImage(systemName: "cloud")) { [weak self] _ in
+            guard let self, let controller else { return }
+            AccountAdding.connectToCloud(context: context, from: controller)
+        }
+        cloud.accessibilityIdentifier = "account-cloud"
+        // Only while the account's session is held; it ends the session
+        // (revoked at the API), and the servers stay.
+        let cloudSignOut = UIDeferredMenuElement.uncached { completion in
+            MainActor.assumeIsolated {
+                guard CloudScreens.account?.isLive() == true else { return completion([]) }
+                let signOut = UIAction(title: Strings.HappyCloud.signOut, image: UIImage(systemName: "rectangle.portrait.and.arrow.right")) { _ in
+                    CloudScreens.account = nil
+                }
+                signOut.accessibilityIdentifier = "account-cloud-sign-out"
+                completion([signOut])
+            }
+        }
         return [
             UIMenu(options: .displayInline, children: choices),
-            UIMenu(options: .displayInline, children: [add]),
+            UIMenu(options: .displayInline, children: HappyCloud.isOffered(in: context.variant) ? [add, cloud, cloudSignOut] : [add]),
         ]
     }
 

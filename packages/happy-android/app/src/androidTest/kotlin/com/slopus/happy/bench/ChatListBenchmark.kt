@@ -307,6 +307,7 @@ class ChatListBenchmark {
         val gfx = shell("dumpsys gfxinfo ${app.packageName}")
         val keep = listOf("Total frames rendered", "Janky frames", "50th percentile", "90th percentile", "99th percentile")
         report("  prose laid out on the main thread: ${ProseThread.mainBuilds.get() - builds}")
+        memory()
         report("  gfxinfo: " + gfx.lines().map { it.trim() }.filter { l -> keep.any { l.startsWith(it) } }.distinct().take(5).joinToString("; "))
         return frames
     }
@@ -338,6 +339,15 @@ class ChatListBenchmark {
         report(FrameSummary(first).line("$name open/first"))
         report(FrameSummary(all).line("$name open/all"))
         report("  open main cpu ms: ${cpu.map { String.format(java.util.Locale.US, "%.0f", it) }} median ${String.format(java.util.Locale.US, "%.0f", cpu.sorted()[cpu.size / 2])}")
+        memory()
+    }
+
+    /** What the process holds once a case has run: what a cache window of composed rows would add to. */
+    private fun memory() {
+        val info = Debug.MemoryInfo()
+        Debug.getMemoryInfo(info)
+        fun mb(stat: String) = (info.getMemoryStat(stat)?.toDoubleOrNull() ?: 0.0) / 1024
+        report(String.format(java.util.Locale.US, "  memory: pss %.1f MB, java heap %.1f MB, native heap %.1f MB, graphics %.1f MB", info.totalPss / 1024.0, mb("summary.java-heap"), mb("summary.native-heap"), mb("summary.graphics")))
     }
 
     /** A hard fling (UiAutomator's 6 steps, about 30 ms over 55% of the screen); [settle] for it to run out. */
@@ -388,13 +398,13 @@ class ChatListBenchmark {
 
     @Test fun conversation_open() {
         val state = conversation()
-        content { ConversationScreen(state, null, actions) }
+        content { ConversationScreen(state, actions) }
         opens("conversation $chat")
     }
 
     @Test fun conversation_scroll() {
         val state = conversation()
-        content { ConversationScreen(state, null, actions) }
+        content { ConversationScreen(state, actions) }
         flings("conversation $chat", reverse = true, count = 8)
     }
 
@@ -406,7 +416,7 @@ class ChatListBenchmark {
             created = true, loaded = true, agent = agent, working = true, activity = Activity.Working,
             rows = builder.rows(live("Starting"), "fx-agent", null, true).asReversed() + history,
         )
-        content { ConversationScreen(state, null, actions) }
+        content { ConversationScreen(state, actions) }
         // About 20 updates a second, a few words each, as an answer streams in; markdown appears as it goes.
         // As Conversation applies a delta: on its own lane, to the streaming block's LiveText alone.
         streams("conversation $chat") { text -> withContext(lane) { check(builder.grow(live(text), 0)) } }
@@ -415,7 +425,7 @@ class ChatListBenchmark {
     /** The agent working with nothing streaming, for 5 s: what the bar's shimmering title, status and pulsing dot cost alone. */
     @Test fun conversation_working() {
         val state = conversation().copy(working = true, activity = Activity.Working)
-        content { ConversationScreen(state, null, actions) }
+        content { ConversationScreen(state, actions) }
         SystemClock.sleep(1_000)
         record("conversation $chat working") { SystemClock.sleep(5_000) }
     }
@@ -439,7 +449,7 @@ class ChatListBenchmark {
             }
             true
         })
-        content { ConversationScreen(state, null, actions) }
+        content { ConversationScreen(state, actions) }
         val recorder = FrameRecorder(activity.window)
         main { recorder.start() }
         if (InstrumentationRegistry.getArguments().getString("drive") == "on") {
@@ -476,7 +486,7 @@ class ChatListBenchmark {
         var state by mutableStateOf(pages[0])
         var asked = 0
         val actions = ConversationScreenActions(loadMedia = { pictureBytes }, onLoadOlder = { asked++ })
-        content { ConversationScreen(state, null, actions) }
+        content { ConversationScreen(state, actions) }
         for (page in 1 until pages.size) {
             // Into history until the list asks for more, then rest there.
             val wanted = asked + 1
@@ -496,7 +506,7 @@ class ChatListBenchmark {
 
     @Test fun conversation_ime() {
         val state = conversation(focus = true)
-        content { ConversationScreen(state, null, actions) }
+        content { ConversationScreen(state, actions) }
         fun imeVisible(): Boolean {
             var visible = false
             main { visible = ViewCompat.getRootWindowInsets(activity.window.decorView)?.isVisible(WindowInsetsCompat.Type.ime()) == true }
@@ -541,7 +551,7 @@ class ChatListBenchmark {
      */
     @Test fun glass_steps() {
         val state = conversation()
-        content { ConversationScreen(state, null, actions) }
+        content { ConversationScreen(state, actions) }
         val density = app.resources.displayMetrics.density
         var status = 0
         main { status = ViewCompat.getRootWindowInsets(activity.window.decorView)?.getInsets(WindowInsetsCompat.Type.statusBars())?.top ?: 0 }

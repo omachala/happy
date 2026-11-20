@@ -22,9 +22,6 @@ public enum Warmth {
         public static let released = 16
         /// Low Data Mode, Low Power Mode or a hot phone: only the top few.
         public static let constrained = 3
-        /// `PRELOAD_DELAY_MS`: after the sidebar lands, so its first paint
-        /// and an open go first.
-        public static let delay: Duration = .milliseconds(1_500)
         /// `PRELOAD_BUSY_WAIT_MS`: how often a read-ahead looks again while
         /// a conversation someone opened is still loading.
         public static let busyWait: Duration = .milliseconds(100)
@@ -117,7 +114,7 @@ public enum Warmth {
         let left = kept.filter { $0.left != nil && !$0.held }.sorted { $0.left! > $1.left! }.map(\.agentId)
         var seen = Set<String>()
         var order: [String] = []
-        for id in reached + left.prefix(1) + ranked + left where known.contains(id) && seen.insert(id).inserted {
+        for id in reached + Array(left.prefix(1)) + ranked + left where known.contains(id) && seen.insert(id).inserted {
             if kept.first(where: { $0.agentId == id })?.held == true { continue }
             order.append(id)
         }

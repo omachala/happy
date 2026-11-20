@@ -38,9 +38,6 @@
     <string name="settings_agents_effort">推理強度</string>
     <string name="settings_agents_custom_codex_title">自訂 Codex 模型</string>
     <string name="settings_agents_custom_codex_message">輸入確切的模型 ID。是否可用取決於你的 Codex 帳號或 API 設定。</string>
-    <string name="settings_connect_claude_title">連線到 Claude</string>
-    <string name="settings_connect_claude">連線 Claude</string>
-    <string name="settings_connect_claude_run">在終端機中執行以下指令：</string>
     <string name="settings_commit">提交</string>
     <string name="settings_commit_at">提交 %1$s</string>
     <string name="settings_manage_subscriptions">管理訂閱</string>
@@ -55,4 +52,6 @@
     <string name="agent_settings_default_access">預設存取模式</string>
     <string name="agent_settings_default_access_description">新工作階段無需詢問即可執行的操作。儲存在你的帳號中，因此在你的所有裝置上都生效。</string>
     <string name="agent_settings_new_sessions_unreadable">無法讀取模型。請檢查連線後重新開啟此頁面。</string>
+    <string name="settings_analytics_not_saved">分析暫時已關閉，但無法儲存此設定。下次啟動 Happy 時將重新開啟。</string>
+    <string name="settings_analytics_not_turned_on">無法開啟分析。請稍後再試。</string>
 </resources>

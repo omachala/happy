@@ -140,6 +140,16 @@ public final class AccountController {
         return registry.entries.first { $0.id == id }?.origin != .madeForComputer
     }
 
+    /// The Happy account a computer's code goes to when it doesn't ask for
+    /// a new one: the one in use, else the one used last (the registry's
+    /// active one, kept while an agent connection is shown), else the one
+    /// added last. Nil with none signed in, or none whose server is
+    /// confirmed: then a computer's code makes one.
+    public var accountForComputer: AccountSummary? {
+        let ready = accounts.filter { !$0.isAgentConnection && $0.serverConfirmed }
+        return ready.first(where: \.isActive) ?? ready.first { $0.id == registry.activeID } ?? ready.last
+    }
+
     public var accounts: [AccountSummary] {
         let legacy = registry.entries.sorted { $0.addedOrder < $1.addedOrder }.map { entry in
             let display = entry.display
@@ -239,6 +249,35 @@ public final class AccountController {
             }
             if let lookupError { throw lookupError }
             return nil
+        }.value
+    }
+
+    /// Each signed-in Happy account's stored `analyticsOptOut` setting, the
+    /// open one from its store and the rest from their files. One whose settings
+    /// can't be read counts as opted out; one with no store yet has none.
+    public func analyticsOptOuts() async -> [AccountSummary.ID: Bool] {
+        let activeStore = session?.store
+        let activeID = session?.keys.anonID
+        let ids = registry.entries.map(\.id)
+        let memoryStores = self.memoryStores
+        let directory = storageDirectory
+        return await Task.detached {
+            var out: [AccountSummary.ID: Bool] = [:]
+            for id in ids {
+                let snapshot: SettingsSnapshot?
+                if id == activeID, let activeStore {
+                    snapshot = try? activeStore.settingsSnapshot()
+                } else if let store = memoryStores[id] {
+                    snapshot = try? store.settingsSnapshot()
+                } else if let url = directory.map({ AccountSession.accountDirectory(directory: $0, id: id).appendingPathComponent("store.sqlite") }) {
+                    guard FileManager.default.fileExists(atPath: url.path) else { out[id] = false; continue }
+                    snapshot = try? await LocalStore.settingsSnapshot(at: url)
+                } else {
+                    snapshot = SettingsSnapshot()
+                }
+                out[id] = snapshot.map { AccountSettings($0).analyticsOptOut } ?? true
+            }
+            return out
         }.value
     }
 
@@ -346,6 +385,8 @@ public final class AccountController {
                 return
             }
         } catch { }
+        // A Happy account opens, not the connection the launch's tunnel was for.
+        agentConnections.startup?.keep(nil)
         await restoreLegacy()
         // Nothing chosen opens: a paired computer does.
         if fallsBackToAgentConnection, showsAgentConnections, case .signedOut = state, pendingServerConfirmation == nil, let computer = agentConnections.accounts.first(where: { !$0.revoked }) ?? agentConnections.accounts.first {
@@ -1036,14 +1077,19 @@ public final class AccountController {
 
     /// Keeps a team server signed in to (`ServerSignInFlow`), or signs an
     /// account already there in again, and opens it.
-    public func addServer(_ signedIn: ServerSignInFlow.SignedIn) async throws {
+    /// `open` false only keeps it: Happy Cloud's list joins several servers,
+    /// then opens one with `switchAccount(to:)`. Returns its id.
+    @discardableResult
+    public func addServer(_ signedIn: ServerSignInFlow.SignedIn, open: Bool = true) async throws -> String {
         guard !busy else { throw AccountSwitchError.operationInProgress }
         busy = true; defer { finishOperation() }
         _ = await prepareStorageDirectory()
-        let name = URLComponents(string: signedIn.origin.value)?.host ?? signedIn.origin.value
-        let account = try await agentConnections.addServer(signedIn.origin, signIn: signedIn.record, access: signedIn.access, name: name)
+        let name = HappyCloud.serverName(signedIn.origin.value) ?? URLComponents(string: signedIn.origin.value)?.host ?? signedIn.origin.value
+        let account = try await agentConnections.addServer(signedIn.origin, signIn: signedIn.record, access: signedIn.access, name: name, instanceId: signedIn.instanceId, select: open)
+        guard open else { return account.id }
         isAddingAccount = false
         try await activateAgentConnection(account.id)
+        return account.id
     }
 
     /// Shows or hides the paired computers. Hidden while one is open, the

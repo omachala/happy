@@ -1,5 +1,6 @@
 package com.slopus.happy.ui.connection
 
+import com.slopus.happy.ui.gates.cloudOnboardingRoutes
 import com.slopus.happy.ui.vaults.vaultRoutes
 import com.slopus.happy.ui.page
 import androidx.compose.runtime.Composable
@@ -18,13 +19,18 @@ import androidx.navigation.NavGraphBuilder
 import androidx.navigation.NavHostController
 import androidx.navigation.toRoute
 import com.slopus.happy.AppGraph
+import com.slopus.happy.connection.PairingStart
 import com.slopus.happy.connection.PairingFlow
 import com.slopus.happy.connection.PairingState
+import com.slopus.happy.connection.HappyCloud
 import com.slopus.happy.connection.ServerInvite
 import com.slopus.happy.connection.ServerSignInFlow
 import com.slopus.happy.connection.ServerSignInState
+import com.slopus.happy.connection.server
 import com.slopus.happy.ui.artifacts.artifactRoutes
 import com.slopus.happy.ui.feed.feedRoutes
+import com.slopus.happy.ui.pipelines.pipelineRoutes
+import com.slopus.happy.ui.plugins.pluginRoutes
 import com.slopus.happy.ui.surfaces.surfaceRoutes
 import kotlinx.serialization.Serializable
 
@@ -51,15 +57,19 @@ val LocalServerSignIn: androidx.compose.runtime.ProvidableCompositionLocal<((Ser
 fun NavGraphBuilder.agentConnectionRoutes(graph: AppGraph, nav: NavHostController) {
     page<PairingRoute> { Pairing(graph, nav) }
     page<ServerSignInRoute> { ServerSignIn(graph, nav) }
+    cloudRoutes(graph, nav)
     artifactRoutes(graph, nav)
+    pluginRoutes(graph, nav)
+    pipelineRoutes(graph, nav)
+    cloudOnboardingRoutes(graph, nav)
     feedRoutes(graph, nav)
     surfaceRoutes(graph, nav)
     vaultRoutes(graph, nav)
 }
 
 /** Starts pairing [code] and shows it, over whatever screen is up. */
-fun NavHostController.connectAgent(graph: AppGraph, code: String) {
-    graph.startAgentPairing(code)
+fun NavHostController.connectAgent(graph: AppGraph, code: String, start: PairingStart) {
+    graph.startAgentPairing(code, start)
     navigate(PairingRoute) { launchSingleTop = true }
 }
 
@@ -129,13 +139,65 @@ private fun ServerSignIn(graph: AppGraph, nav: NavHostController) {
     val dark = com.slopus.happy.ui.theme.HappyTheme.colors.dark
     LaunchedEffect(state) {
         val done = state as? ServerSignInState.Done ?: return@LaunchedEffect
+        // The name is in and the server kept: a picture that didn't go up is said, and can be added later.
+        if (done.photoFailed) android.widget.Toast.makeText(context, R.string.cloud_profile_photo_failed, android.widget.Toast.LENGTH_LONG).show()
         // Signed in again: back where the person was. A new server opens, as a new agent does, and so
         // does another member's connection, which took the place of the one signed in again on.
         if (flow?.replacing == done.account.id) nav.popBackStack() else graph.open(done.account.id)
     }
+    // A Happy Cloud server signed in to without the account (signed out of it) goes through the browser, opened without a tap.
+    LaunchedEffect(state) {
+        val ready = state as? ServerSignInState.Ready ?: return@LaunchedEffect
+        if (HappyCloud.isServer(ready.server) && !holder.opened) {
+            holder.opened = true
+            flow?.browserUrl()?.let { url -> openSignInPage(context, url, dark) }
+        }
+    }
+    val openBrowser = { flow?.browserUrl()?.let { url -> openSignInPage(context, url, dark) }; Unit }
+    // Kept once known: Done no longer names the server, and the screen must not change look as it leaves.
+    state.server?.let { holder.cloud = HappyCloud.handle(it) }
+    val cloud = holder.cloud
+    if (cloud != null && state is ServerSignInState.NeedsName) {
+        val unreadable = androidx.compose.ui.res.stringResource(R.string.settings_could_not_change_photo)
+        val choosePhoto = rememberProfilePhotoPicker(
+            onPicked = { flow?.choosePhoto(it) },
+            onFailed = { android.widget.Toast.makeText(context, unreadable, android.widget.Toast.LENGTH_SHORT).show() },
+        )
+        CloudProfileScreen(
+            handle = cloud,
+            seed = HappyCloud.serverName(state.server) ?: state.server,
+            suggested = state.suggested,
+            photo = rememberPhoto(state.photo),
+            saving = state.saving,
+            failed = state.failed,
+            onChoosePhoto = choosePhoto,
+            onSubmit = { flow?.submitName(it) },
+            onBack = { nav.popBackStack() },
+        )
+        return
+    }
+    if (cloud != null) {
+        CloudConnectingScreen(
+            handle = cloud,
+            failed = (state as? ServerSignInState.Failed)?.reason,
+            inBrowser = state is ServerSignInState.InBrowser,
+            onOpenBrowser = openBrowser,
+            onRetry = {
+                // The account's hour ran out on the way: its sign-in, not the same refusal again.
+                val account = graph.cloudAccount
+                if (account != null && (state as? ServerSignInState.Failed)?.reason == com.slopus.happy.connection.ServerAuthException.Reason.SignInRequired && !account.signedIn()) {
+                    nav.navigate(CloudRoute) { popUpTo<ServerSignInRoute> { inclusive = true }; launchSingleTop = true }
+                } else {
+                    flow?.retry()
+                }
+            },
+            onBack = { nav.popBackStack() },
+        )
+        return
+    }
     ServerSignInScreen(
         state = state,
-        onOpenBrowser = { flow?.browserUrl()?.let { url -> openSignInPage(context, url, dark) } },
+        onOpenBrowser = openBrowser,
         onSubmitName = { flow?.submitName(it) },
         onRetry = { flow?.retry() },
         onBack = { nav.popBackStack() },
@@ -147,7 +209,7 @@ private fun ServerSignIn(graph: AppGraph, nav: NavHostController) {
  * never a WebView), so the person's SSO session and password manager are
  * there; where no browser has Custom Tabs, the default browser.
  */
-private fun openSignInPage(context: android.content.Context, url: String, dark: Boolean) {
+internal fun openSignInPage(context: android.content.Context, url: String, dark: Boolean) {
     val intent = androidx.browser.customtabs.CustomTabsIntent.Builder()
         .setShowTitle(true)
         .setColorScheme(if (dark) androidx.browser.customtabs.CustomTabsIntent.COLOR_SCHEME_DARK else androidx.browser.customtabs.CustomTabsIntent.COLOR_SCHEME_LIGHT)
@@ -162,6 +224,12 @@ private fun openSignInPage(context: android.content.Context, url: String, dark: 
 /** The sign-in this screen shows, kept by its back stack entry; popping the screen ends it. */
 private class ServerSignInHolder(private val graph: AppGraph) : ViewModel() {
     var flow: ServerSignInFlow? = graph.serverSignIn.value
+
+    /** The browser was opened without a tap once (a Happy Cloud server, the account signed out); after that, as any sign-in. */
+    var opened = false
+
+    /** A Happy Cloud server's `@name`, drawn as [CloudConnectingScreen]; null for any other server. */
+    var cloud: String? = null
 
     override fun onCleared() {
         flow?.let(graph::endServerSignIn)

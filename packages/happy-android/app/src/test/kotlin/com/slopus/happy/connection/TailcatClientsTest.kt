@@ -8,9 +8,11 @@ import com.slopus.happy.conversation.Mode
 import io.tailcat.NodePublicKey
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.async
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.JsonElement
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotSame
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
@@ -35,13 +37,13 @@ class TailcatClientsTest {
         assertTrue(clients.connected().isEmpty())
         assertTrue(made.isEmpty())
         val query = clients.lease(RequestCategory.Query)
-        assertEquals(listOf(RequestCategory.Query to query.client), clients.connected())
+        assertEquals(listOf(RequestCategory.Realtime to query.client), clients.connected())
         clients.reset(query)
         assertEquals(1, clients.count(RequestCategory.Query))
         assertTrue(clients.connected().isEmpty())
         query.release()
         val replacement = clients.lease(RequestCategory.Query)
-        assertEquals(listOf(RequestCategory.Query to replacement.client), clients.connected())
+        assertEquals(listOf(RequestCategory.Realtime to replacement.client), clients.connected())
         clients.close()
         assertTrue(clients.connected().isEmpty())
     }
@@ -56,32 +58,46 @@ class TailcatClientsTest {
     }
 
     @Test
-    fun eachCategoryHasItsOwnClientUnderItsOwnNodeKey() = runBlocking {
+    fun streamAndJsonShareOneMainClientAndFilesHaveTheirOwnKey() = runBlocking {
         val realtime = clients.lease(RequestCategory.Realtime)
         val query = clients.lease(RequestCategory.Query)
         val file = clients.lease(RequestCategory.File)
-        assertEquals(listOf(RequestCategory.Realtime, RequestCategory.Query, RequestCategory.File), made.map { it.category })
-        assertEquals(3, made.map { it.key }.toSet().size)
+        assertEquals(listOf(RequestCategory.Realtime, RequestCategory.File), made.map { it.category })
+        assertEquals(2, made.map { it.key }.toSet().size)
+        assertSame(realtime.client, query.client)
         // A category's next request reuses its client, busy or not.
         assertSame(realtime.client, clients.lease(RequestCategory.Realtime).client)
         assertSame(query.client, clients.lease(RequestCategory.Query).client)
         file.release()
         assertSame(file.client, clients.lease(RequestCategory.File).client)
-        assertEquals(3, made.size)
+        assertEquals(2, made.size)
     }
 
     @Test
-    fun filesSpreadOverAtMostEightClients() = runBlocking {
+    fun backFromTheBackgroundEveryClientIsHandedBackAndNoneLetGo() = runBlocking {
+        assertTrue(clients.connected().isEmpty())
+        val realtime = clients.lease(RequestCategory.Realtime)
+        val query = clients.lease(RequestCategory.Query)
+        val upload = clients.lease(RequestCategory.File)
+        realtime.release(); query.release()
+        // Idle or carrying an upload, each is kept, to be woken.
+        assertEquals(setOf(realtime.client, query.client, upload.client), clients.connected().map { it.second }.toSet())
+        assertTrue(!realtime.client.closed && !query.client.closed && !upload.client.closed)
+        // The next stream goes over the same client.
+        assertSame(realtime.client, clients.lease(RequestCategory.Realtime).client)
+        upload.release()
+    }
+
+    @Test
+    fun filesSpreadOverAtMostThreeClients() = runBlocking {
         val leases = (1..10).map { clients.lease(RequestCategory.File) }
-        assertEquals(TailcatClients.MAX_FILE_CLIENTS, clients.count(RequestCategory.File))
-        assertEquals(8, made.size)
-        assertEquals(8, made.map { it.key }.toSet().size)
-        // The first eight each took a client of their own; the two over the cap share the idlest.
-        assertEquals(8, leases.take(8).map { it.client }.toSet().size)
-        assertEquals(listOf(made[0], made[1]), leases.drop(8).map { it.client })
+        assertEquals(3, clients.count(RequestCategory.File))
+        assertEquals(3, made.size)
+        assertEquals(3, made.map { it.key }.toSet().size)
+        assertEquals(listOf(made[0], made[1], made[2], made[0], made[1], made[2], made[0], made[1], made[2], made[0]), leases.map { it.client })
         // An idle client is used before any busy one.
-        leases[5].release()
-        assertSame(made[5], clients.lease(RequestCategory.File).client)
+        leases.filter { it.client === made[2] }.forEach { it.release() }
+        assertSame(made[2], clients.lease(RequestCategory.File).client)
         // Nothing beyond the files' clients was made.
         assertEquals(0, clients.count(RequestCategory.Query))
     }
@@ -101,7 +117,7 @@ class TailcatClientsTest {
         val again = clients.lease(RequestCategory.File)
         assertSame(second.slot, again.slot)
         assertNotSame(second.client, again.client)
-        assertEquals(5, made.map { it.key }.toSet().size)
+        assertEquals(4, made.map { it.key }.toSet().size)
         // A late reset for the old failure leaves the new client be.
         clients.reset(second)
         assertEquals(false, again.client.closed)
@@ -120,7 +136,7 @@ class TailcatClientsTest {
         assertEquals(false, query.client.closed)
         clients.reset(RequestCategory.Query)
         assertTrue(query.client.closed)
-        assertEquals(false, realtime.client.closed)
+        assertTrue(realtime.client.closed)
         assertNotSame(query.client, clients.lease(RequestCategory.Query).client)
     }
 
@@ -135,7 +151,7 @@ class TailcatClientsTest {
             assertTrue(made.all { it.closed })
         }
         unavailable { clients.lease(RequestCategory.Query) }
-        assertEquals(4, made.size)
+        assertEquals(3, made.size)
     }
 
     @Test
@@ -183,7 +199,7 @@ class TailcatClientsTest {
         unavailable { transport.request("PUT", "/v0/profile/photo", "token", ByteArray(3), category = RequestCategory.File) }
         unavailable { transport.stream("/v0/events/stream", "token") }
         unavailable { transport.socket() }
-        assertEquals(listOf(RequestCategory.Query, RequestCategory.File, RequestCategory.Realtime, RequestCategory.File), asked)
+        assertEquals(listOf(RequestCategory.Realtime, RequestCategory.File, RequestCategory.Realtime, RequestCategory.File), asked)
         assertEquals(4, keys.toSet().size)
     }
 
@@ -208,6 +224,72 @@ class TailcatClientsTest {
         override suspend fun close() {}
     }
 
+    private val checks = Collections.synchronizedList(mutableListOf<Client>())
+
+    private fun watched(checkEveryMillis: Long = TailcatClients.CHECK_EVERY_MILLIS) = TailcatClients(
+        connect = { category, key -> Client(category, key.publicKey).also { made += it } },
+        disconnect = { it.closed = true },
+        check = { checks += it },
+        checkEveryMillis = checkEveryMillis,
+    )
+
+    /**
+     * A request with nothing back has its client checked, once in five
+     * seconds however many stall; one answered in time, or on a client that
+     * brought bytes back meanwhile, has it checked never.
+     */
+    @Test
+    fun aStalledRequestChecksItsClientOnceAndAnAnsweredOneNever() = runBlocking {
+        val clients = watched()
+        val query = clients.lease(RequestCategory.Query)
+        val answered = query.watch(quietMillis = 100)
+        delay(20)
+        query.heard()
+        answered.cancel()
+        val heard = query.watch(quietMillis = 100)
+        delay(20)
+        query.heard()
+        delay(200)
+        assertTrue(checks.isEmpty())
+        heard.cancel()
+
+        val stalled = List(3) { query.watch(quietMillis = 50) }
+        delay(300)
+        assertEquals(listOf(made.first()), checks.toList())
+        stalled.forEach { it.cancel() }
+        query.release()
+        clients.close()
+    }
+
+    /** A check whose relay answers lets go of nothing: the client and its key stay, and the next request goes over it. */
+    @Test
+    fun aCheckTheRelayAnswersReconnectsNothing() = runBlocking {
+        val clients = watched(checkEveryMillis = 10)
+        val stream = clients.lease(RequestCategory.Realtime)
+        val silence = stream.watch(quietMillis = 50, repeating = true)
+        delay(300)
+        silence.cancel()
+        assertTrue("A stream silent on is checked again", checks.size >= 2)
+        assertSame(stream.client, clients.lease(RequestCategory.Realtime).client)
+        assertEquals(1, made.size)
+        assertFalse(made[0].closed)
+        clients.close()
+    }
+
+    /** A client let go of after a failure is checked no more on its old leases' behalf. */
+    @Test
+    fun aResetClientIsNotChecked() = runBlocking {
+        val clients = watched()
+        val query = clients.lease(RequestCategory.Query)
+        val stalled = query.watch(quietMillis = 50)
+        clients.reset(query)
+        delay(200)
+        assertTrue(checks.isEmpty())
+        stalled.cancel()
+        query.release()
+        clients.close()
+    }
+
     @Test
     fun theEndpointPassesTheCategoryOn() = runBlocking {
         val base = Recorder()
@@ -228,7 +310,7 @@ class TailcatClientsTest {
         ArtifactClient(client).file("r1", 2, "report.md")
         val api = ConversationApi { method, path, body: JsonElement?, category -> client.send(method, path, body, category = category) }
         api.uploadFile("w1", "a.png", byteArrayOf(1))
-        api.media("a1", "t1", 0)
+        api.media("a1", com.slopus.happy.conversation.MediaRef("t1", 0, com.slopus.happy.conversation.MediaItem("image", "", "")))
         api.send("a1", "m1", "hi", emptyList(), Mode("anthropic", "opus", "high", null, "default"))
         api.send("a1", "m2", "", listOf(Block.Image("image/png", "AQ==")), Mode("anthropic", "opus", "high", null, "default"))
         AgentIdentity.refresh(agent, "token", "Studio")

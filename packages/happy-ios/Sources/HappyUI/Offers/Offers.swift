@@ -1,4 +1,5 @@
 #if canImport(UIKit)
+import HappyAnalytics
 import HappyCore
 import HappyLayout
 import UIKit
@@ -10,8 +11,6 @@ enum OfferSheet: Equatable {
     case welcome
     /// Voice's time is used; when some is back, if that is known. Its start is greyed out.
     case used(freeAgain: Date?)
-    /// The relay's voice refused without the subscription: voice's sheet with no free way on.
-    case required
 }
 
 /// How an offer sheet was closed.
@@ -26,7 +25,7 @@ enum OfferResult: Equatable {
 
 /// The app's one subscription (`Subscription`) and its offer sheets, one
 /// at a time, for everything that sells it: the agent call's welcome and
-/// used-up sheet, the relay's voice; Support Happy's page and Settings buy
+/// used-up sheet; Support Happy's page and Settings buy
 /// and restore through it too. Built once,
 /// with the build's RevenueCat key; without one it sells nothing.
 @MainActor
@@ -40,7 +39,6 @@ public final class Offers {
     let preview: String?
     private weak var shown: OfferSheetViewController?
     private var observation: SubscriptionObservation?
-    private var accountsObservation: AccountsObservation?
 
     init(subscription: Subscription, intro: CallIntro = CallIntro(), preview: String? = Offers.previewPrice) {
         self.subscription = subscription
@@ -49,11 +47,15 @@ public final class Offers {
     }
 
     /// The build's: StoreKit and RevenueCat with its key, nothing without
-    /// one. Debug runs can ask for a fixture (`HAPPY_SUBSCRIPTION_FIXTURE`).
+    /// one; the preview app's grants it, with no store. Debug runs can ask
+    /// for a fixture (`HAPPY_SUBSCRIPTION_FIXTURE`).
     private static func build() -> Subscription {
         #if DEBUG
         if let fixture = SubscriptionFixture(ProcessInfo.processInfo.environment["HAPPY_SUBSCRIPTION_FIXTURE"]) { return fixture.subscription }
         #endif
+        if AppVariant.current().grantsPro {
+            return Subscription(store: nil, revenueCat: nil, defaults: UserDefaultsStore(suiteName: "happy.subscription"), grantsPro: true)
+        }
         let key = RevenueCatClient.key(Bundle.main.object(forInfoDictionaryKey: "HappyRevenueCatAppleKey"))
         return Subscription(
             store: key.map { _ in StoreKitSubscriptionStore() },
@@ -77,26 +79,11 @@ public final class Offers {
         shared.subscription.launch()
     }
 
-    /// The foreground: what's on sale, what the store left unfinished, what RevenueCat says.
+    /// The foreground: what the store left unfinished, whose subscription
+    /// the App Store account holds, what's on sale, what RevenueCat says.
+    /// The subscription is this install's, whatever account is signed in.
     func foreground() {
         subscription.refresh()
-    }
-
-    /// The accounts, once they are known: whose subscription it is follows
-    /// the Happy account in front, or the one before an agent connection.
-    func follow(_ account: AccountController) {
-        tell(account)
-        accountsObservation = account.observeAccounts { [weak self, weak account] _ in
-            guard let self, let account else { return }
-            self.tell(account)
-        }
-    }
-
-    func tell(_ account: AccountController) {
-        // The relay token's `sub` (AccountSession.serverID), happy-app's RevenueCat appUserID.
-        let active = account.session.flatMap { session in session.serverID.map { Subscription.Account(id: session.keys.anonID, subject: $0) } }
-        let signedIn = Set(account.accounts.filter { !$0.isAgentConnection }.map(\.id))
-        subscription.accounts(active: active, signedIn: signedIn)
     }
 
     /// What the sheets offer. A debug preview charges and grants nothing.
@@ -122,7 +109,6 @@ public final class Offers {
     func ask(_ sheet: OfferSheet, over top: UIViewController) async -> OfferResult {
         guard shown == nil, top.presentedViewController == nil || !(top.presentedViewController is OfferSheetViewController) else { return .dismissed }
         let proBefore = subscription.hasPro
-        let generation = subscription.generation
         return await withCheckedContinuation { continuation in
             let controller: OfferSheetViewController = CallSheetViewController(sheet, offers: self)
             controller.onResult = { [weak self] result in
@@ -131,10 +117,10 @@ public final class Offers {
                 continuation.resume(returning: result)
             }
             shown = controller
-            // pro came, or another customer: the sheet has done its work, or isn't theirs.
+            // pro came: the sheet has done its work. The customer is this
+            // install's whatever account is in front, so nothing else closes it.
             observation = subscription.observe { [weak self, weak controller] in
                 guard let self, let controller else { return }
-                if self.subscription.generation != generation { return controller.finish(.dismissed) }
                 if !proBefore, self.subscription.hasPro { return controller.finish(.pro) }
                 controller.offerChanged()
             }
@@ -142,6 +128,7 @@ public final class Offers {
             controller.sheetPresentationController?.detents = [.large()]
             controller.sheetPresentationController?.preferredCornerRadius = 28
             top.present(controller, animated: true)
+            if sheet != .welcome { Analytics.shared.paywallPresented() }
         }
     }
 
@@ -155,6 +142,7 @@ public final class Offers {
     func subscribe(from controller: UIViewController) async {
         if case .preview = offer { return Alerts.show(Strings.Call.upgradePreviewTitle, Strings.Call.upgradePreviewMessage, on: controller) }
         let result = await subscription.buy()
+        Analytics.shared.purchaseEnded(result)
         guard controller.viewIfLoaded?.window != nil else { return }
         switch result {
         case .pending: Alerts.show(Strings.Offer.pendingTitle, Strings.Offer.pendingMessage, on: controller)
@@ -169,6 +157,7 @@ public final class Offers {
     func restore(from controller: UIViewController) async {
         if case .preview = offer { return Alerts.show(Strings.Call.upgradePreviewTitle, Strings.Call.upgradePreviewMessage, on: controller) }
         let result = await subscription.restore()
+        Analytics.shared.restoreEnded(result)
         guard controller.viewIfLoaded?.window != nil else { return }
         switch result {
         case .restored: Alerts.show(Strings.Offer.restoredTitle, on: controller)

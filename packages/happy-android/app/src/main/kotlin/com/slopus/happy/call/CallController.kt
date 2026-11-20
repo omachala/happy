@@ -1,15 +1,24 @@
 package com.slopus.happy.call
 
+import com.slopus.happy.analytics.Analytics
+import com.slopus.happy.analytics.AnalyticsEvent
+import com.slopus.happy.analytics.AnalyticsSpan
+import com.slopus.happy.analytics.DurationBucket
+import com.slopus.happy.analytics.VoiceError
 import android.content.Context
 import android.os.SystemClock
 import com.slopus.happy.BuildConfig
+import com.slopus.happy.agent.AgentSession
 import com.slopus.happy.agent.AgentSessions
+import com.slopus.happy.agent.WireProfileResponse
+import com.slopus.happy.agent.decode
 import com.slopus.happy.payments.OfferResult
 import com.slopus.happy.payments.OfferSheet
 import com.slopus.happy.payments.Offers
 import com.slopus.happy.payments.Subscription
 import com.slopus.happy.ui.conversation.Typesetter
 import com.slopus.happy.ui.conversation.failureText
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -25,13 +34,16 @@ import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * The agent connection's voice call (iOS `CallController`): started from
  * home's voice button, shown as the bar across the window's top
  * (`ui/call/CallFrame`), bound to the one connection it started on. It ends
- * when the app leaves the foreground, and when another account opens. Apart
- * from the relay's voice ([stopRelayVoice]), whose call it stops first.
+ * when the app leaves the foreground, and when another account opens. What
+ * each call said is kept for the connection's next one ([CallHistory]), and a
+ * call that ends unasked plays [CallDropSound]. Apart from the relay's voice
+ * ([stopRelayVoice]), whose call it stops first.
  */
 class CallController(
     private val appContext: Context,
@@ -65,12 +77,14 @@ class CallController(
     private var calling: CoroutineScope? = null
     private var connectionId: String? = null
     private var focus: String? = null
+    private var report: CallReport? = null
+    private val dropSound = CallDropSound(appContext)
     /** Set by the screen while it is up. */
     var screen: CallScreen? = null
 
     init {
         // Leaving the foreground hangs up: no microphone behind the person's back.
-        foreground.filter { !it }.onEach { hangUp() }.launchIn(scope)
+        foreground.filter { !it }.onEach { hangUp(CallEnding.Background) }.launchIn(scope)
         openAccount.drop(1).distinctUntilChanged().onEach { id -> if (state.value.isShown && id != connectionId) close() }.launchIn(scope)
         relayVoiceActive.distinctUntilChanged().filter { it }.onEach { if (state.value.isLive) close() }.launchIn(scope)
         // Subscribed while the used-up sheet is up: it goes once there is time again.
@@ -98,23 +112,28 @@ class CallController(
         connectionId = connection
         val targets = ConnectionCallTargets(account, appContext.resources::failureText, Typesetter.of(appContext)) { screen }
         val context = CallContext(targets)
-        val call = CallSession(scope, grants, permission = { stopRelayVoice(); microphone() }, now = SystemClock::elapsedRealtime, allowance = allowance) { grant, request, events ->
+        val history = CallHistory(sessions.keptFile(connection, HISTORY_FILE)?.let(::FileCallHistoryStore))
+        val call = CallSession(
+            scope, grants, permission = { stopRelayVoice(); microphone() }, now = SystemClock::elapsedRealtime, allowance = allowance, history = history,
+        ) { grant, request, events ->
             ElevenLabsCallConnection.connect(appContext, scope, grant, request, events)
         }
+        // Not the person's own end, nor the agent's goodbye: those were heard coming.
+        call.onEnded = { ending -> if (ending.isUnexpected) dropSound.play() }
         val calling = CoroutineScope(scope.coroutineContext + SupervisorJob(scope.coroutineContext[Job]))
         this.calling = calling
         this.targets = targets
         this.context = context
         session = call
+        // Begun now: a call started while analytics is off, or on through an opt-out, is never told.
+        val report = CallReport(Analytics.span()).also { this.report = it }
         call.onLevel = { level -> if (session === call) mutableLevel.value = level }
-        val drain = DirectoryDrain(calling, context, call)
+        // The agent hung up: as if End were tapped, with no bar left.
+        call.onHangUp = { if (session === call) close() }
         call.onOverflow = {
             calling.launch {
                 val update = context.resync()
-                if (session === call) {
-                    call.deliver(update)
-                    drain.start()
-                }
+                if (session === call) call.deliver(update)
             }
         }
         // Each callback belongs to this call: once it ends, or another one starts, what it still says goes nowhere.
@@ -124,28 +143,53 @@ class CallController(
                 if (session === call) call.deliver(update)
             }
         }
-        // A change to home settles for a second from the first one, never longer, then goes as one update: as home is then.
+        // A change to home settles for a second from the first one, never longer, then goes as one update of what changed.
         val settle = DirectorySettle(calling) {
             if (session !== call) return@DirectorySettle
-            val update = context.flushDirectory()
-            if (session !== call) return@DirectorySettle
-            call.deliver(update)
-            hold(context.followed(), targets)
-            drain.start()
+            val update = context.directoryUpdate()
+            if (session === call) call.deliver(update)
         }
         account.feed.onEach { feed ->
             if (session === call && context.directoryChanged(CallTarget.from(feed)) && session === call) settle.changed()
         }.launchIn(calling)
         call.state.onEach { state ->
             if (session !== call) return@onEach
+            report.observe(state)
             show(state)
-            // Connected: whatever the directory still owes goes now.
-            if (state is CallState.Active) drain.start()
         }.launchIn(calling)
         focus = targets.focusedNow
+        calling.launch { context.onRestart { withContext(Dispatchers.Main) { call.requestRestart() } } }
+        // What a read's refresh found after the read answered: context, never a cue.
+        calling.launch {
+            context.onReading { line ->
+                calling.launch {
+                    if (session === call) call.deliver(CallUpdate(listOf(line)))
+                }
+            }
+        }
         call.start(language = null, context = {
-            context.initial().also { hold(context.followed(), targets) }
-        }, tool = { context.handle(it) })
+            context.initial(history.slots, person(account)).also { hold(context.followed(), targets) }
+        }, tool = {
+            context.handle(it).also {
+                // A message makes where it went one the call hears from.
+                withContext(Dispatchers.Main.immediate) { if (session === call) hold(context.followed(), targets) }
+            }
+        })
+    }
+
+    /** Who the call talks to, in a team: the person's name on this computer; null outside one, or while it can't be read. */
+    private suspend fun person(account: AgentSession): String? {
+        if (account.catalog.value.userId == null) return null
+        val name = account.profile.state.value.name.ifBlank {
+            try {
+                account.client.decode<WireProfileResponse>("GET", "/v0/profile").profile.name.orEmpty()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                ""
+            }
+        }
+        return name.trim().ifEmpty { null }
     }
 
     /** Exactly the conversations the call hears from stay read: one that dropped out of the last visited is let go. */
@@ -196,11 +240,13 @@ class CallController(
         if (state == CallState.Ended(CallProblem.LimitReached) && before != state) showUsed()
     }
 
-    /** End: the call, or the bar of one that ended. */
-    fun close() {
+    /** End: the call, or the bar of one that ended; [ending] says why, for the call's history. */
+    fun close(ending: CallEnding = CallEnding.HungUp) {
+        report?.closed()
+        report = null
         val old = session
         session = null
-        old?.stop()
+        old?.stop(ending)
         val context = context
         this.context = null
         context?.let { scope.launch { it.close() } }
@@ -215,8 +261,8 @@ class CallController(
     }
 
     /** The call stops for the system; one that was live leaves no bar. */
-    private fun hangUp() {
-        if (state.value.isShown) close()
+    private fun hangUp(ending: CallEnding) {
+        if (state.value.isShown) close(ending)
     }
 
     /**
@@ -250,6 +296,9 @@ class CallController(
     }
 
     companion object {
+        /** Each connection's call history, beside its catalog. */
+        const val HISTORY_FILE = "call-history.json"
+
         /** Telegram's call clock: m:ss, then h:mm:ss. */
         fun clock(seconds: Long): String =
             if (seconds < 3600) "%d:%02d".format(seconds / 60, seconds % 60)
@@ -257,3 +306,42 @@ class CallController(
     }
 }
 
+/**
+ * How one call ended, once: `voice_session_stopped` when it was closed
+ * after it connected, `voice_session_error` when it failed to start or
+ * dropped, with how long it was live (none if it never was). A call never
+ * set up on this build, or closed before it connected, reports nothing;
+ * nor does one analytics was off for at any point ([span]).
+ */
+private class CallReport(private val span: AnalyticsSpan) {
+    private var since: Long? = null
+    private var done = false
+
+    fun observe(state: CallState) {
+        when (state) {
+            is CallState.Active -> if (since == null) since = state.since
+            is CallState.Ended -> end(state.problem)
+            else -> Unit
+        }
+    }
+
+    fun closed() {
+        if (since != null) end(null)
+    }
+
+    private fun end(problem: CallProblem?) {
+        if (done || problem == CallProblem.NotSetUp) return
+        done = true
+        val live = since?.let { DurationBucket.of(SystemClock.elapsedRealtime() - it) }
+        val error = when (problem) {
+            // Ended as asked: only a call that connected counts.
+            null -> return live?.let { span.record(AnalyticsEvent.VoiceSessionStopped(it)) } ?: Unit
+            CallProblem.MicrophonePermission -> VoiceError.MicDenied
+            CallProblem.SubscriptionRequired, CallProblem.LimitReached -> VoiceError.QuotaExhausted
+            CallProblem.Connection -> if (since != null) VoiceError.Dropped else VoiceError.ConnectFailed
+            CallProblem.Authentication -> VoiceError.ConnectFailed
+            CallProblem.NotSetUp -> VoiceError.Unknown
+        }
+        span.record(AnalyticsEvent.VoiceSessionError(error, live))
+    }
+}

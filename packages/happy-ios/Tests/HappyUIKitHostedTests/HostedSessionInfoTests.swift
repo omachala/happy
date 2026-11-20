@@ -287,7 +287,7 @@ final class HostedSessionInfoTests: XCTestCase {
         window.layoutIfNeeded()
         let routes: [Route] = [
             .session(id: Self.sessionId), .sessionInfo(id: Self.sessionId), .sessionChanges(id: Self.sessionId),
-            .machine(id: "test-mac"), .settings, .settingsAppearance, .settingsLanguage, .settingsVoice,
+            .machine(id: "test-mac"), .settings, .settingsAppearance, .settingsLanguage,
         ]
         for route in routes {
             let top = try XCTUnwrap(navigation.topViewController)
@@ -583,7 +583,7 @@ final class HostedSessionInfoTests: XCTestCase {
             format: "SESSIONINFO groups after %.0f ms; longest main-thread frame gap %.0f ms; %d late frames, %.0f ms late in all, over %d frames",
             openedAfter * 1000, longest * 1000, late.count, late.map { $0 - 1.0 / 60 }.reduce(0, +) * 1000, ticks.count
         ))
-        XCTAssertLessThan(longest, 0.25, "the main thread was held \(longest) s")
+        XCTAssertLessThan(longest, TestTime.budget(0.25), "the main thread was held \(longest) s")
         await controller.signOut()
     }
 

@@ -49,8 +49,8 @@ private actor FeedComputer: AgentTransport {
 
     func request(method: String, path: String, credential: String, body: Data?, headers: [String: String]) async throws -> HTTP1Response {
         requested.append(path)
-        if path == "/v0/bootstrap/desktop" { return .init(status: 200, body: Data(bootstrap.utf8)) }
-        if path == "/v0/health" { return try json(["ready": .bool(true), "capabilities": ["feed": .bool(true)]]) }
+        // Its health, exactly `GET /v0/health`, comes with it.
+        if path == "/v0/bootstrap/desktop" { return .init(status: 200, body: Data(bootstrap.replacingOccurrences(of: "{", with: #"{"health":{"ready":true,"capabilities":{"feed":true}},"#, options: [], range: bootstrap.range(of: "{")).utf8)) }
         if path.hasPrefix("/v0/feed?") { return try json(["items": .array(feed), "unread": 4, "hasMore": .bool(false), "cursor": "cursor-1"]) }
         if path.hasPrefix("/v0/artifacts?") { return try json(["artifacts": [], "nextPageCursor": .null]) }
         if path.hasPrefix("/v0/users?ids=") {
@@ -102,7 +102,7 @@ final class FeedChangesetTests: XCTestCase {
 
     private func start() async throws -> (FeedComputer, SyncEngine, [FeedRow]) {
         let computer = FeedComputer()
-        let engine = SyncEngine(client: AgentClient(transport: computer, token: "test"), directory: nil)
+        let engine = SyncEngine(client: AgentClient(transport: computer, token: "test"), directory: nil, rereadInterval: .zero)
         await engine.start()
         // Every entry resolved, the newest todo's text and the people read.
         let rows = try await rows(engine) { rows in

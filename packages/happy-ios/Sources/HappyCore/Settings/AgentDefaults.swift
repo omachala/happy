@@ -70,6 +70,11 @@ public enum AgentDefaults {
 
     /// `auto` first shipped in this happy-cli.
     public static let cliVersionWithAuto = "1.2.1-beta.2"
+    /// Gemini 4 model+effort expansion in agy needs this happy-cli or newer.
+    /// (The fork's CLI reports 1.2.0 and has no Gemini 4, so agy stays on
+    /// Gemini 3.8 Flash there.)
+    public static let cliVersionWithAgyGemini4 = "1.2.7-beta.0"
+    static let agyModelBeforeGemini4 = "Gemini 3.8 Flash"
 
     /// The fork (sync/agentDefaults.ts): every agent starts in its own
     /// never-ask mode, Claude on Opus 5.5 at high effort. Opus 5.5 is not
@@ -80,18 +85,25 @@ public enum AgentDefaults {
         case .codex: Config(permissionMode: "yolo", modelMode: "gpt-6.1-sol", effortLevel: "medium")
         case .gemini: Config(permissionMode: "yolo", modelMode: "gemini-2.5-pro", effortLevel: nil)
         case .openclaw: Config(permissionMode: "bypassPermissions", modelMode: "default", effortLevel: nil)
-        case .agy: Config(permissionMode: "bypassPermissions", modelMode: "Gemini 3.8 Flash", effortLevel: "medium")
+        case .agy: Config(permissionMode: "bypassPermissions", modelMode: "Gemini 4 Hydrogen", effortLevel: "medium")
         case .opencode: Config(permissionMode: "bypassPermissions", modelMode: OpenCode.modelKey, effortLevel: nil)
         }
     }
 
     /// The code defaults for the CLI that will run them: an older CLI gets
-    /// `default` instead of `auto`.
+    /// `default` instead of `auto`, and an unknown one keeps agy on Flash.
     public static func codeDefaults(_ agent: Agent, cliVersion: String?) -> Config {
         var config = codeDefaults(agent)
         if config.permissionMode == "auto", let cliVersion {
             if !SemanticVersion.isWellFormed(cliVersion) || SemanticVersion.compare(cliVersion, cliVersionWithAuto) < 0 {
                 config.permissionMode = "default"
+            }
+        }
+        if agent == .agy, config.modelMode == "Gemini 4 Hydrogen" {
+            if let cliVersion, SemanticVersion.isWellFormed(cliVersion), SemanticVersion.compare(cliVersion, cliVersionWithAgyGemini4) >= 0 {
+                // Supported.
+            } else {
+                config.modelMode = agyModelBeforeGemini4
             }
         }
         return config
@@ -273,8 +285,11 @@ public enum AgentDefaults {
             ]
         case .codex:
             [
-                Option("gpt-6-astra", "GPT-6 Astra", "most capable"),
+                Option("gpt-6.2-astra", "GPT-6.2 Astra", "most capable"),
+                Option("gpt-6.2-sol", "GPT-6.2 Sol"),
+                Option("gpt-6-astra", "GPT-6 Astra"),
                 Option("gpt-6.1-sol", "GPT-6.1 Sol"),
+                Option("gpt-6.1-terra", "GPT-6.1 Terra"),
                 Option("gpt-6-sol", "GPT-6 Sol"),
                 Option("gpt-6-luna", "GPT-6 Luna"),
                 Option("gpt-5.6-sol", "GPT-5.6 Sol"),
@@ -294,9 +309,16 @@ public enum AgentDefaults {
             [Option("default", "Default model")]
         case .agy:
             [
+                Option("Gemini 4 Neon", "Gemini 4 Neon"),
+                Option("Gemini 4 Carbon", "Gemini 4 Carbon"),
+                Option("Gemini 4 Argon", "Gemini 4 Argon"),
+                Option("Gemini 4 Hydrogen", "Gemini 4 Hydrogen"),
+                Option("Orchestrator (Neon)", "Orchestrator (Neon)"),
+                Option("Orchestrator (Carbon)", "Orchestrator (Carbon)"),
+                Option("Orchestrator (Argon)", "Orchestrator (Argon)"),
                 Option("Gemini 3.8 Flash", "Gemini 3.8 Flash"),
-                Option("Claude Sonnet 4.6 (Thinking)", "Claude Sonnet 4.6 (Thinking)"),
-                Option("Claude Opus 4.6 (Thinking)", "Claude Opus 4.6 (Thinking)"),
+                Option("Claude Opus 5.5", "Claude Opus 5.5"),
+                Option("Claude Sonnet 5.5", "Claude Sonnet 5.5"),
                 Option("GPT-OSS 120B (Medium)", "GPT-OSS 120B (Medium)"),
             ]
         case .opencode:
@@ -325,8 +347,11 @@ public enum AgentDefaults {
             keys = ["low", "medium", "high", "xhigh", "max"]
         case .codex:
             let byModel: [String: [String]] = [
+                "gpt-6.2-astra": ["low", "medium", "high", "xhigh", "max", "ultra"],
+                "gpt-6.2-sol": ["low", "medium", "high", "xhigh", "max", "ultra"],
                 "gpt-6-astra": ["low", "medium", "high", "xhigh", "max", "ultra"],
                 "gpt-6.1-sol": ["low", "medium", "high", "xhigh", "max", "ultra"],
+                "gpt-6.1-terra": ["low", "medium", "high", "xhigh", "max", "ultra"],
                 "gpt-6-sol": ["low", "medium", "high", "xhigh", "max", "ultra"],
                 "gpt-6-luna": ["low", "medium", "high", "xhigh", "max"],
                 "gpt-5.6-sol": ["low", "medium", "high", "xhigh", "max", "ultra"],
@@ -335,7 +360,16 @@ public enum AgentDefaults {
             ]
             keys = byModel[model] ?? ["low", "medium", "high", "xhigh"]
         case .agy:
-            keys = model == "Gemini 3.8 Flash" ? ["low", "medium", "high"] : []
+            let byModel: [String: [String]] = [
+                "Gemini 4 Neon": ["low", "medium", "high", "xhigh"],
+                "Gemini 4 Carbon": ["low", "medium", "high"],
+                "Gemini 4 Argon": ["low", "medium", "high"],
+                "Gemini 4 Hydrogen": ["low", "medium", "high", "xhigh"],
+                "Gemini 3.8 Flash": ["low", "medium", "high"],
+                "Claude Opus 5.5": ["low", "medium", "high"],
+                "Claude Sonnet 5.5": ["low", "medium", "high"],
+            ]
+            keys = byModel[model] ?? []
         case .gemini, .openclaw, .opencode:
             keys = []
         }

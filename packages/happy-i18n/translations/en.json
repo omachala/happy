@@ -770,7 +770,7 @@
     "settingsVoice.promptGuideTitle": "Agent Prompt Guide",
     "settingsVoice.promptGuideDescription": "Your ElevenLabs agent needs:\n\n• Tool: sendMessageToSession — parameters: sessionId (string), message (string). Sends a message to the specified coding session.\n• Tool: processPermissionRequest — parameters: requestId (string), decision (\"allow\" or \"deny\"). Approves or denies a pending tool permission.\n• Dynamic variable: {{initialConversationContext}} — receives session history and context on start.\n\nThe agent acts as a voice bridge between the user and coding agents. It should be concise, only respond when addressed, and report when a coding agent finishes work.",
     "settingsVoice.usageTitle": "Usage (Last 30 Days)",
-    "settingsVoice.usageFooter": "Voice time used in the last 30 days. Free tier: 20 min. Subscribed: 5 hours. Max 100 conversations per month.",
+    "settingsVoice.usageFooter": "Voice time used in the last 30 days. Free tier: 20 min. Subscribed: 2 hours. Max 100 conversations per month.",
     "settingsVoice.usageLabel": "Voice Time",
     "settingsVoice.conversationsLabel": "Conversations",
     "settingsVoice.usageUsed": {
@@ -1141,8 +1141,8 @@
     "newWork.task": "Task",
     "newWork.bot": "Bot",
     "newWork.name": "Name (optional)",
-    "newWork.taskNote": "A task names itself from its first message unless you name it.",
-    "newWork.botNote": "A bot is one lasting conversation with a folder of its own.",
+    "newWork.taskNote": "A task is one piece of work, big or small. It can reach across several projects and hand parts off to subtasks.",
+    "newWork.botNote": "A bot is like a colleague: one lasting conversation with a folder of its own. Tell it what to do in your first message.",
     "newWork.taskFailed": {
       "t": "The task could not be started. ${reason} Your text and attachments are still here."
     },

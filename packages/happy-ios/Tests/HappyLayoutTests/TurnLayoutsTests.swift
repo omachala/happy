@@ -12,6 +12,12 @@ final class TurnLayoutsTests: XCTestCase {
 
     // MARK: Tool rows
 
+    func testAStandaloneSummaryUsesTheVerbLaneWithoutAnEmptyGap() {
+        let row = ToolRowLayout(width: 390, verbWidth: 0, textWidth: 200)
+        XCTAssertEqual(row.text, CGRect(x: 36, y: 6, width: 338, height: 20))
+        XCTAssertEqual(row.glyph, CGRect(x: 16, y: 9, width: 14, height: 14))
+    }
+
     func testAToolRowIsOneLineWithItsSubjectInTheRest() {
         let row = ToolRowLayout(width: 390, verbWidth: 40.3, textWidth: 200)
         XCTAssertEqual(row.size, CGSize(width: 390, height: 32))
@@ -34,6 +40,24 @@ final class TurnLayoutsTests: XCTestCase {
         XCTAssertEqual(long.deleted, CGRect(x: 360, y: 6, width: 14, height: 20))
     }
 
+    /// Group tool calls: a run summed up is a call's 32 line, its kinds
+    /// then its duration right after them.
+    func testASectionSumsUpOnTheLineACallTakes() {
+        let row = ToolSectionLayout(width: 390, kindsWidth: 120.4, durationWidth: 50.2)
+        XCTAssertEqual(row.size, CGSize(width: 390, height: 32))
+        XCTAssertEqual(row.glyph, CGRect(x: 16, y: 9, width: 14, height: 14))
+        XCTAssertEqual(row.kinds, CGRect(x: 36, y: 6, width: 121, height: 20))
+        XCTAssertEqual(row.duration, CGRect(x: 157, y: 6, width: 51, height: 20))
+        // Too narrow for both, the kinds give way and the time stays whole.
+        let narrow = ToolSectionLayout(width: 390, kindsWidth: 400, durationWidth: 50.2)
+        XCTAssertEqual(narrow.kinds, CGRect(x: 36, y: 6, width: 287, height: 20))
+        XCTAssertEqual(narrow.duration, CGRect(x: 323, y: 6, width: 51, height: 20))
+        // Under a second there is no time to say.
+        let quick = ToolSectionLayout(width: 390, kindsWidth: 400, durationWidth: nil)
+        XCTAssertEqual(quick.kinds, CGRect(x: 36, y: 6, width: 338, height: 20))
+        XCTAssertNil(quick.duration)
+    }
+
     func testAToolRowSitsInTheReadingColumn() {
         let row = ToolRowLayout(width: 1000, maxContentWidth: 700, verbWidth: 40, textWidth: 50)
         XCTAssertEqual(row.glyph.minX, 166)
@@ -48,8 +72,12 @@ final class TurnLayoutsTests: XCTestCase {
         let result = ToolResultLayout(width: 390, line: line, parts: [.media([screenshot, screenshot], columns: 2)])
         XCTAssertEqual(result.line, line)
         guard result.body.parts.count == 1, case .media(let frames) = result.body.parts[0] else { return XCTFail("one grid") }
-        XCTAssertEqual(frames, [rect(16, 34, 175, 78.5), rect(199, 34, 175, 78.5)])
-        XCTAssertEqual(result.size, CGSize(width: 390, height: 34 + 78.5 + 6))
+        let imageHeight: CGFloat = 175 * 550 / 1228
+        XCTAssertEqual(frames.count, 2)
+        for (frame, x) in zip(frames, [CGFloat(16), 199]) {
+            assertFrame(frame, rect(x, 34, 175, imageHeight))
+        }
+        assertSize(result.size, CGSize(width: 390, height: 34 + imageHeight + 6))
     }
 
     // MARK: How a turn ended

@@ -4,11 +4,11 @@ import ElevenLabs
 import HappyCore
 import UIKit
 
-/// The hosted call agent over the official SDK. Apart from the relay's
-/// `ElevenLabsVoiceConnection` on purpose: no prompt, greeting or relay
-/// tools are sent; the hosted agent has its own, and its one variable is
-/// `initialConversationContext`. Tool calls are answered one at a time, by
-/// their provider ID, and an ID seen before is never run again.
+/// The hosted call agent over the official SDK. The call's own prompt goes
+/// as the agent's prompt override, with its one variable,
+/// `initialConversationContext`; no greeting is sent. Tool
+/// calls are answered one at a time, by their provider ID, and an ID seen
+/// before is never run again.
 @MainActor
 final class ElevenLabsCallConnection: CallConnection {
     private let conversation: ElevenLabsConversation
@@ -25,18 +25,25 @@ final class ElevenLabsCallConnection: CallConnection {
     static func connect(grant: CallGrant, request: CallStart, events: CallEvents) async throws -> ElevenLabsCallConnection {
         let tracker = Tracker(events.activity)
         let config = ConversationConfig(
-            agentOverrides: request.language.flatMap(Language.init(rawValue:)).map { AgentOverrides(language: $0) },
+            // The hosted agent must allow the prompt override (its Security settings), or the call is refused.
+            agentOverrides: AgentOverrides(prompt: request.prompt, language: request.language.flatMap(Language.init(rawValue:))),
             dynamicVariables: ["initialConversationContext": request.context],
             userId: grant.userId,
             // Foreground only: recording is let go when the call ends.
             audioConfiguration: AudioPipelineConfiguration(recordingAlwaysPrepared: false),
+            // What was said aloud, for the call's history: never a cue, which comes back as none of these.
+            onAgentResponse: { text, event in Task { @MainActor in events.said(text, event) } },
+            onAgentResponseCorrection: { _, corrected, event in Task { @MainActor in events.corrected(corrected, event) } },
+            onUserTranscript: { text, _ in Task { @MainActor in events.heard(text) } },
             onVadScore: { score in Task { @MainActor in tracker.vad(score) } }
         )
         let teardown = Teardown()
-        let disconnected: @Sendable (DisconnectionReason) -> Void = { _ in
+        // The SDK ends the call itself for the agent's end_call, as the
+        // person's own end: only an end it didn't ask for is a drop.
+        let disconnected: @Sendable (DisconnectionReason) -> Void = { reason in
             Task { @MainActor in
                 teardown.finish()
-                events.disconnected()
+                if reason == .user { events.hungUp() } else { events.disconnected() }
             }
         }
         // A minted token when a Happy service grants one; a public agent by its ID otherwise.
@@ -48,6 +55,11 @@ final class ElevenLabsCallConnection: CallConnection {
         let connection = ElevenLabsCallConnection(conversation, teardown: teardown)
         #if DEBUG
         CallProbe.watch(conversation, context: request.context, store: &connection.observations)
+        CallProbe.type = { [weak conversation] text in
+            CallProbe.sent("typed", text)
+            Task { try? await conversation?.sendMessage(text) }
+            events.heard(text)
+        }
         #endif
         conversation.$agentState.removeDuplicates().sink { state in
             tracker.agentSpeaking(state == .speaking)
@@ -89,6 +101,15 @@ final class ElevenLabsCallConnection: CallConnection {
         CallProbe.sent("update", context)
         #endif
         try await conversation.updateContext(context)
+    }
+
+    /// A user message the prompt reads as the app's (`CallCue.mark`): the
+    /// one event that has the agent take a turn; a contextual update never does.
+    func cue(_ facts: String) async throws {
+        #if DEBUG
+        CallProbe.sent("cue", facts)
+        #endif
+        try await conversation.sendMessage(CallCue.mark + facts)
     }
 
     @MainActor

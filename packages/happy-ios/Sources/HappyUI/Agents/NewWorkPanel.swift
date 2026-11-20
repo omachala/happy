@@ -8,14 +8,26 @@ import UIKit
 /// (`NewWorkLayout`), on both homes. The composer stays where it is, and
 /// its first message makes what was chosen here.
 ///
-/// - `.work` (Happy Agent): Task (the default) or Bot, an optional name,
-///   and a line saying what that kind is. Desktop asks a bot's name the
-///   same way ("generated if left blank"); here a task's too.
-/// - `.session` (a legacy account): the computer, shown only when the
-///   account has more than one, the folder on it, and the harness. Where
-///   the computer's Happy Agent makes bots or tasks, Session | Bot | Task
-///   heads it, as home's dock did: a task asks only the computer, a bot
-///   the computer and its name, which it can't go without.
+/// - `.work` (Happy Agent): Task (the default) or Bot. A bot takes an
+///   optional name and a line saying what it is, as desktop asks it
+///   ("generated if left blank"); a task asks nothing and names itself
+///   from its first message, as one sent with a blank name always has.
+///   It keeps the bot's room empty, so Task | Bot moves nothing.
+/// - `.session` (a legacy account): the computer, the project on it, and
+///   the harness, each row two columns lined up across the rows, what it
+///   picks and the pick (`NewWorkRowColumns`). Where a computer's Happy
+///   Agent makes bots or tasks, Session | Bot | Task heads it, as home's
+///   dock did: a task asks only the computer, a bot the computer and its
+///   name, which it can't go without. Between the kind and the rows a
+///   line says what the kind is: a bot's and a task's are `.work`'s words.
+///   While the kind is a choice the block keeps its tallest kind's room
+///   (the picture's, the longest line's, three rows'), so the choice holds
+///   still as it changes (Kirill).
+///
+/// A bot stands under the robot and a task under the magic wand, the
+/// empty states' 128 (`NewWorkLayout.Metrics.art`), or 77 for a legacy
+/// account (`givingWayArt`), still: each plays only when tapped, once, and
+/// comes back to rest. A session has none.
 final class NewWorkPanel: UIView, UITextFieldDelegate {
     enum Mode {
         case work
@@ -30,7 +42,10 @@ final class NewWorkPanel: UIView, UITextFieldDelegate {
     let machine = NewWorkMenuRow(icon: .ionicons("desktop-outline"), showsStatus: true)
     let folder = NewWorkMenuRow(icon: .ionicons("folder-outline"))
     let harness = NewWorkMenuRow(icon: .ionicons("hardware-chip-outline"))
-    private let note = UILabel()
+    let note = UILabel()
+    let art = StateSceneView(scene: .magicWand, size: NewWorkLayout.Metrics.art, play: .onDemand, replayLabel: Strings.Tablet.replayIllustration, immediate: true)
+    /// The kind's picture; nil for a session.
+    private(set) var artScene: StateScene?
 
     /// `.session`: why the bot's name is refused, until it is typed into:
     /// a red edge on the field and the reason, in red, in place of its
@@ -66,11 +81,16 @@ final class NewWorkPanel: UIView, UITextFieldDelegate {
     var onBotName: ((String) -> String)?
 
     var choice: NewTask.Choice {
-        get { NewTask.Choice(kind: kind.selectedSegmentIndex == 1 ? .bot : .task, name: name.text ?? "") }
+        get {
+            let bot = kind.selectedSegmentIndex == 1
+            // A task is never named here: it goes as a blank name does.
+            return NewTask.Choice(kind: bot ? .bot : .task, name: bot ? name.text ?? "" : "")
+        }
         set {
             kind.selectedSegmentIndex = newValue.kind == .bot ? 1 : 0
-            if name.text != newValue.name { name.text = newValue.name }
+            if newValue.kind == .bot, name.text != newValue.name { name.text = newValue.name }
             showNote()
+            showArt(newValue.kind == .bot ? .robot : .magicWand)
         }
     }
 
@@ -113,7 +133,8 @@ final class NewWorkPanel: UIView, UITextFieldDelegate {
         folder.isHidden = current != .session
         harness.isHidden = current != .session
         field.isHidden = current != .bot
-        note.isHidden = current != .bot
+        note.text = Self.note(current)
+        showArt(Self.art(current))
         if current != .bot { validation = nil }
         if current != .bot, name.isFirstResponder { onReturn?() }
         superview?.setNeedsLayout()
@@ -139,6 +160,14 @@ final class NewWorkPanel: UIView, UITextFieldDelegate {
         note.textColor = UIColor(Palette.textSecondary)
         note.textAlignment = .center
         note.numberOfLines = 0
+        for (room, text) in [(botNoteRoom, Strings.newWorkBotNote), (taskNoteRoom, Strings.newWorkTaskNote)] {
+            room.font = note.font
+            room.numberOfLines = 0
+            room.text = text
+        }
+        art.accessibilityIdentifier = "new-work-art"
+        art.isHidden = true
+        addSubview(art)
         field.addSubview(name)
         switch mode {
         case .work:
@@ -147,6 +176,7 @@ final class NewWorkPanel: UIView, UITextFieldDelegate {
             name.autocapitalizationType = .sentences
             for view in [kind, field, note] { addSubview(view) }
             showNote()
+            showArt(.magicWand)
         case .session:
             kind.accessibilityLabel = Strings.Home.composerKindLabel
             kind.removeAllSegments()
@@ -156,8 +186,16 @@ final class NewWorkPanel: UIView, UITextFieldDelegate {
             name.attributedPlaceholder = Self.placeholder(NewSessionChoices.botNamePlaceholder)
             name.autocapitalizationType = .words
             field.isHidden = true
-            note.text = Strings.Home.botLede
-            note.isHidden = true
+            note.text = Self.note(.session)
+            note.accessibilityIdentifier = "new-work-note"
+            machine.label = Strings.Home.machineTitle
+            folder.label = Strings.Home.projectTitle
+            harness.label = Strings.Home.harnessTitle
+            let font = Fonts.ui(.regular, size: 16)
+            let widest = [machine, folder, harness].map { (($0.label ?? "") as NSString).size(withAttributes: [.font: font]).width }.max() ?? 0
+            for row in [machine, folder, harness] { row.labelWidth = widest }
+            // A path is cut from its start, so its folder shows (Kirill).
+            folder.pickBreakMode = .byTruncatingHead
             machine.accessibilityIdentifier = "new-work-machine"
             folder.accessibilityIdentifier = "new-work-folder"
             harness.accessibilityIdentifier = "new-work-harness"
@@ -176,12 +214,26 @@ final class NewWorkPanel: UIView, UITextFieldDelegate {
         ])
     }
 
-    /// `.session`'s rows, top to bottom, as the kind shows them.
+    /// `.session`'s rows, top to bottom, as the kind lays them out.
     private var sessionRows: [UIView] {
-        [machine, folder, harness, field].filter { !$0.isHidden }
+        [machine, folder, harness].filter { !$0.isHidden } + (sessionKind == .bot ? [field] : [])
     }
 
-    private var measuredNote: Measurable { Self.measured(note) }
+    /// `.session`: the kind is a choice, and holds still as it changes.
+    private var holdsKind: Bool { mode == .session && !kind.isHidden }
+
+    /// `.work`: a bot's note, laid out for either kind, so Task | Bot moves
+    /// nothing; a task's stands in the name's place, over that room.
+    private let botNoteRoom = UILabel()
+    private let taskNoteRoom = UILabel()
+    private var measuredRoom: Measurable {
+        let bot = Self.measured(botNoteRoom), task = Self.measured(taskNoteRoom)
+        return Measurable { width in
+            let room = bot.size(fitting: width)
+            let task = task.size(fitting: width).height - NewWorkLayout.Metrics.rowHeight - NewWorkLayout.Metrics.rowsToNote
+            return CGSize(width: room.width, height: max(room.height, task))
+        }
+    }
 
     private static func measured(_ label: UILabel) -> Measurable {
         Measurable { width in
@@ -197,30 +249,44 @@ final class NewWorkPanel: UIView, UITextFieldDelegate {
         case .work:
             return NewWorkLayout(
                 width: width, sides: sides, top: top, bottom: bottom,
+                // A task lays out a bot's name and note's room too.
                 kindHeight: kind.intrinsicContentSize.height, rows: 1,
-                note: measuredNote
+                note: measuredRoom, art: artScene != nil
             )
         case .session:
             return NewWorkLayout(
                 width: width, sides: sides, top: top, bottom: bottom,
                 kindHeight: kind.isHidden ? nil : kind.intrinsicContentSize.height,
                 givingWay: sessionRows.count,
-                note: note.isHidden ? nil : measuredNote
+                note: sessionNoteRoom, art: artScene != nil,
+                reserveArt: holdsKind, reserveRows: holdsKind ? 3 : 0
             )
         }
     }
 
     func place(_ layout: NewWorkLayout) {
         frame = layout.block
+        art.isHidden = artScene == nil || layout.art == nil
+        if let frame = layout.art { art.frame = frame }
         if let frame = layout.kind { kind.frame = frame }
-        if let frame = layout.note { note.frame = frame }
+        // A note that gave way has no place: none, rather than its last.
+        note.frame = layout.note ?? .zero
         switch mode {
         case .work:
-            field.frame = layout.rows[0]
+            if let frame = layout.rows.first { field.frame = frame }
+            // A task's note, top-aligned in the name's place.
+            if field.isHidden, let row = layout.rows.first, let room = layout.note {
+                let height = Self.measured(note).size(fitting: room.width).height
+                note.frame = CGRect(x: room.minX, y: row.minY, width: room.width, height: height)
+            }
         case .session:
             for (row, frame) in zip(sessionRows, layout.rows) { row.frame = frame }
-            // Short of room the note gives way first (`NewWorkLayout`).
-            note.alpha = layout.showsNote ? 1 : 0
+            // At the top of the longest kind's room.
+            if let room = layout.note {
+                note.frame = CGRect(x: room.minX, y: room.minY, width: room.width, height: Self.measured(note).size(fitting: room.width).height)
+            }
+            // Covered by the rows as they rise to the kind (`NewWorkLayout`).
+            note.alpha = layout.noteAlpha
         }
         name.frame = field.bounds.insetBy(dx: 16, dy: 0)
     }
@@ -228,7 +294,7 @@ final class NewWorkPanel: UIView, UITextFieldDelegate {
     /// Only the controls take touches: a drag anywhere else is the
     /// transcript's, which takes the keyboard down.
     override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
-        let controls: [UIView] = mode == .work ? [kind, field] : [kind, machine, folder, harness, field]
+        let controls: [UIView] = mode == .work ? [art, kind, field] : [art, kind, machine, folder, harness, field]
         return controls.contains { !$0.isHidden && $0.frame.insetBy(dx: -8, dy: -8).contains(point) }
     }
 
@@ -254,12 +320,61 @@ final class NewWorkPanel: UIView, UITextFieldDelegate {
         }
     }
 
+    /// `.work`: a bot's name and what a bot is; a task says what a task is
+    /// in the name's place, keeping a bot's room.
     private func showNote() {
-        let text = kind.selectedSegmentIndex == 1 ? Strings.newWorkBotNote : Strings.newWorkTaskNote
-        if note.text != text {
-            note.text = text
-            superview?.setNeedsLayout()
+        let bot = kind.selectedSegmentIndex == 1
+        let text = bot ? Strings.newWorkBotNote : Strings.newWorkTaskNote
+        if note.text != text { note.text = text }
+        guard field.isHidden == bot else { return }
+        field.isHidden = !bot
+        if !bot, name.isFirstResponder { onReturn?() }
+        superview?.setNeedsLayout()
+    }
+
+    /// `.session`: what the kind is.
+    private static func note(_ kind: HomeDockKind) -> String {
+        switch kind {
+        case .session: Strings.Home.sessionNote
+        case .bot: Strings.newWorkBotNote
+        case .task: Strings.newWorkTaskNote
         }
+    }
+
+    /// `.session`: the note's room, the longest of the kinds shown, so
+    /// switching kinds keeps it.
+    private var sessionNoteRoom: Measurable {
+        let rooms = sessionKinds.map { kind in
+            let label = UILabel()
+            label.font = note.font
+            label.numberOfLines = 0
+            label.text = Self.note(kind)
+            return Self.measured(label)
+        }
+        return Measurable { width in
+            rooms.map { $0.size(fitting: width) }.max { $0.height < $1.height } ?? .zero
+        }
+    }
+
+    private static func art(_ kind: HomeDockKind) -> StateScene? {
+        switch kind {
+        case .session: nil
+        case .bot: .robot
+        case .task: .magicWand
+        }
+    }
+
+    /// The kind's picture, at rest: it plays only when tapped.
+    private func showArt(_ scene: StateScene?) {
+        guard scene != artScene else { return }
+        artScene = scene
+        superview?.setNeedsLayout()
+        guard let scene else {
+            art.isHidden = true
+            return
+        }
+        art.isHidden = false
+        art.scene = scene
     }
 
     @objc private func kindChanged() {
@@ -267,6 +382,7 @@ final class NewWorkPanel: UIView, UITextFieldDelegate {
         switch mode {
         case .work:
             showNote()
+            showArt(kind.selectedSegmentIndex == 1 ? .robot : .magicWand)
             onChange?(choice)
         case .session:
             guard sessionKinds.indices.contains(kind.selectedSegmentIndex) else { return }
@@ -291,8 +407,10 @@ final class NewWorkPanel: UIView, UITextFieldDelegate {
     }
 }
 
-/// One of `.session`'s rows: an icon, what is chosen, and the menu that
-/// chooses it, on the name field's ground, centred. The computer's row
+/// One of `.session`'s rows: an icon, what it picks, what is chosen, and
+/// the menu that chooses it, on the name field's ground: with a
+/// `labelWidth`, two columns from its start (`NewWorkRowColumns`), else
+/// centred. The computer's row
 /// also says whether it answers, in a small chip on its top-right corner
 /// (`NewWorkStatusLayout`): laid over the row, it takes no part in its
 /// layout, so the icon and the name sit as in any row and a status
@@ -301,6 +419,29 @@ final class NewWorkMenuRow: UIButton {
     let showsStatus: Bool
     private let chip = UIView()
     private let statusLabel = UILabel()
+    private let iconView = UIImageView()
+    private let labelView = UILabel()
+    private let valueView = UILabel()
+
+    /// Two columns, the label's as wide as `labelWidth` (the widest
+    /// label's) and the glyph; nil, centred.
+    var labelWidth: CGFloat? {
+        didSet {
+            for view in [iconView, labelView, valueView] { view.isHidden = labelWidth == nil }
+            showTitle()
+            setNeedsLayout()
+        }
+    }
+
+    /// How the pick is cut, in two columns: at its end, or a path from its start.
+    var pickBreakMode: NSLineBreakMode {
+        get { valueView.lineBreakMode }
+        set { valueView.lineBreakMode = newValue }
+    }
+
+    /// The glyph and the pick in two columns, for tests.
+    var glyphView: UIImageView { iconView }
+    var pickLabel: UILabel { valueView }
 
     init(icon: Icon, showsStatus: Bool = false) {
         self.showsStatus = showsStatus
@@ -320,6 +461,20 @@ final class NewWorkMenuRow: UIButton {
         }
         self.configuration = configuration
         showsMenuAsPrimaryAction = true
+        self.icon = icon
+        iconView.image = .icon(icon, size: 16)
+        iconView.tintColor = UIColor(Palette.inputText)
+        iconView.contentMode = .center
+        labelView.font = Fonts.ui(.regular, size: 16)
+        labelView.textColor = UIColor(Palette.textSecondary)
+        valueView.font = Fonts.ui(.regular, size: 16)
+        valueView.textColor = UIColor(Palette.inputText)
+        valueView.lineBreakMode = .byTruncatingTail
+        for view in [iconView, labelView, valueView] {
+            view.isUserInteractionEnabled = false
+            view.isHidden = true
+            addSubview(view)
+        }
         if showsStatus {
             chip.backgroundColor = UIColor(Palette.surface)
             chip.layer.cornerRadius = NewWorkStatusLayout.height / 2
@@ -338,19 +493,50 @@ final class NewWorkMenuRow: UIButton {
 
     @available(*, unavailable) required init?(coder: NSCoder) { fatalError() }
 
-    var title: String {
-        get { configuration?.title ?? "" }
-        set {
-            guard configuration?.title != newValue else { return }
-            configuration?.title = newValue
+    var title: String = "" {
+        didSet {
+            guard title != oldValue else { return }
+            showTitle()
             updateAccessibility()
         }
+    }
+
+    /// What the row picks ("Machine", "Folder", "Harness"), in the
+    /// secondary colour before the pick; nil for the pick alone.
+    var label: String? {
+        didSet {
+            guard label != oldValue else { return }
+            showTitle()
+            updateAccessibility()
+        }
+    }
+
+    private func showTitle() {
+        if labelWidth != nil {
+            configuration?.image = nil
+            configuration?.attributedTitle = nil
+            configuration?.title = nil
+            labelView.text = label
+            valueView.text = title
+            return
+        }
+        guard let label else {
+            configuration?.attributedTitle = nil
+            configuration?.title = title
+            return
+        }
+        var text = AttributedString(label + "  ")
+        text.foregroundColor = UIColor(Palette.textSecondary)
+        var pick = AttributedString(title)
+        pick.foregroundColor = UIColor(Palette.inputText)
+        configuration?.attributedTitle = text + pick
     }
 
     var icon: Icon? {
         didSet {
             guard let icon, icon != oldValue else { return }
-            configuration?.image = .icon(icon, size: 16)
+            iconView.image = .icon(icon, size: 16)
+            if labelWidth == nil { configuration?.image = .icon(icon, size: 16) }
         }
     }
 
@@ -375,6 +561,12 @@ final class NewWorkMenuRow: UIButton {
 
     override func layoutSubviews() {
         super.layoutSubviews()
+        if let labelWidth {
+            let frames = NewWorkRowColumns(size: bounds.size, labelWidth: labelWidth, lineHeight: valueView.font.lineHeight)
+            iconView.frame = frames.icon
+            labelView.frame = frames.label
+            valueView.frame = frames.value
+        }
         guard showsStatus else { return }
         let text = statusLabel.sizeThatFits(CGSize(width: CGFloat.greatestFiniteMagnitude, height: NewWorkStatusLayout.height))
         chip.frame = NewWorkStatusLayout.chip(rowWidth: bounds.width, textWidth: text.width)
@@ -388,6 +580,7 @@ final class NewWorkMenuRow: UIButton {
     }
 
     private func updateAccessibility() {
+        if let label { accessibilityLabel = label }
         accessibilityValue = [title, status?.text].compactMap { $0 }.joined(separator: ", ")
     }
 }

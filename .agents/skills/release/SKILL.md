@@ -88,7 +88,7 @@ local release procedure.
 
 Tag namespace note:
 - CLI releases use `cli-X.Y.Z`
-- Native releases use `native-<runtime-version>`
+- Native public releases use `native-<platform>-<version>-build<N>` (see Native Mobile Release)
 - Do not use a bare `vX.Y.Z` tag for Happy releases because multiple release streams coexist in this repo
 
 ### Step 2: Gather state
@@ -214,8 +214,8 @@ entrypoint into `dist/` and copies `prisma/` in (this needs bun).
 Publish from `packages/happy-server-self-host`; it no longer bundles a web app.
 Pre-run its full `prepublishOnly` chain before handing a publish to the user.
 
-The server typecheck, unit suite, and both Docker images are gated by
-`.github/workflows/server.yml`.
+There is no server CI: run the server typecheck and unit suite locally before
+publishing.
 
 (Observed: `1332` merged a `standalone.spec.ts` test that only passes on Windows
 because the impl used POSIX `path.basename`; it was red on `main` and would have
@@ -323,18 +323,76 @@ The Expo app, EAS OTA workflows and legacy web/Tauri client have been removed.
 Do not invoke their former scripts. A native store release needs the existing
 App Store / Play signing identity and an explicit store build number.
 
+### Version
+
+Native versions are CalVer `YYYY.M.C` (UTC year, unpadded month, a counter
+from 1 each month), counted per platform. Every variant ships the same
+version, and every build of it differs only by build number. Uploading a
+build, to TestFlight or a Play test track, production included, does not
+move the version: any number of builds of 2026.11.1 can go up. `C` moves
+only when a version is **released publicly** (App Store release, Play
+production rollout), and the release flow records that with the platform's
+tag on the released build, made at release time:
+
+    native-ios-<version>-build<CFBundleVersion>
+    native-android-<versionName>-build<versionCode>
+
+Annotate it as the existing ones are ("Native <platform> production
+<version> (<build>)", source commit, binary SHA-256, distribution, store
+receipt). An upload gets no tag; report its upload ID and binary SHA-256
+instead. Before any native build, preview or production, from `main` per
+Step 0:
+
+```bash
+node scripts/native-version.cjs check ios        # or android
+```
+
+It prints the checked-in version when that is the upcoming release (the
+highest `C` this UTC month's release tags carry, plus one, else 1). If it
+fails, because a version was released or a new month began, run
+`node scripts/native-version.cjs set ios` (it reads origin's tags and writes
+every file that holds the version), commit, push to `main`, and start Step 0
+again. `next` prints the version without writing anything. Never move or
+reuse an existing tag.
+
+### Debug symbols
+
+- **Android:** the AAB embeds the R8 mapping and any available native symbols
+  (`ndk.debugSymbolLevel = "FULL"` for release and preview). Before upload, list
+  its metadata with `unzip -Z1 <app.aab> 'BUNDLE-METADATA/*'`. If
+  `com.android.tools.build.debugsymbols` is present, Play receives those symbols
+  with the bundle; no separate upload is needed. Play's native-code-without-debug-symbols
+  warning is expected while every `.so` is a stripped vendor prebuilt:
+  `liblkjingle_peerconnection_so.so` (LiveKit WebRTC),
+  `libandroidx.graphics.path.so`, `libdatastore_shared_counter.so`,
+  `libimage_processing_util_jni.so` and `libsurface_util_jni.so` (AndroidX/CameraX).
+  The upstream AARs already ship these libraries stripped: build IDs in the AAB
+  match the Maven AARs byte for byte, with no `.symtab` or `.debug_*` sections. AGP
+  therefore has nothing to extract, and `keepDebugSymbols` cannot help. Neither
+  webrtc-sdk (Maven Central, GitHub releases; see webrtc-sdk/android#57) nor
+  Google Maven publishes symbol artifacts for them. The warning is advisory. It
+  does not block review or rollout, and Java/Kotlin stack traces are still
+  deobfuscated through the embedded R8 mapping.
+  Do not fabricate or upload a symbols zip containing stripped libraries. If
+  first-party native code is added, the build must produce its symbols and the
+  warning must go away.
+- **iOS:** export uploads the app's own dSYM. "Upload Symbols Failed" for
+  `LiveKitWebRTC.framework` or `RustLiveKitUniFFI.framework` is expected: those
+  vendor frameworks ship without dSYMs. Any other missing dSYM blocks the
+  release until investigated.
+
 ---
 
 ## Server Release
 
     Package:     packages/happy-server
-    Dockerfile:  Dockerfile.server (production), Dockerfile (standalone w/ PGlite)
+    Dockerfile:  Dockerfile.server (production, Rust: packages/happy-server-rs), Dockerfile (standalone w/ PGlite, TS)
     Image:       docker.korshakov.com/handy-server:{version}
     K8s:         packages/happy-server/deploy/handy.yaml (1 replica, port 3005)
 
 Server releases go through TeamCity (`Lab_HappyServer`). The config is in the TeamCity UI, not in the repo.
 
-Build: node:24 + python3 + ffmpeg, builds happy-wire + happy-server.
+Build: compiles packages/happy-server-rs (rust:1.99) and keeps the Prisma CLI from packages/happy-server for migrations.
 Secrets from Vault: handy-db, handy-master, handy-github, handy-files, handy-e2b, handy-revenuecat, handy-elevenlabs.
 Redis: happy-redis StatefulSet (redis:7-alpine, 1Gi persistent volume).
 

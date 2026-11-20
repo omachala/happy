@@ -1,5 +1,8 @@
 package com.slopus.happy.ui.artifacts
 
+import com.slopus.happy.references.HappyReferences
+import com.slopus.happy.ui.references.ProvideBusyLinks
+import com.slopus.happy.ui.references.ReferenceOpener
 import com.slopus.happy.ui.page
 import android.content.res.Resources
 import androidx.compose.runtime.Composable
@@ -21,7 +24,7 @@ import com.slopus.happy.R
 import com.slopus.happy.agent.AgentSession
 import com.slopus.happy.agent.HappyLink
 import com.slopus.happy.agent.HappyReferenceKind
-import com.slopus.happy.agent.HappyUrls
+import com.slopus.happy.agent.HappyShareLinks
 import com.slopus.happy.artifacts.ArtifactCatalogFeed
 import com.slopus.happy.artifacts.ArtifactClient
 import com.slopus.happy.artifacts.ArtifactRef
@@ -33,10 +36,15 @@ import com.slopus.happy.ui.connection.rememberNetworkPath
 import com.slopus.happy.ui.conversation.linkState
 import com.slopus.happy.feed.FeedSubject
 import com.slopus.happy.browser.BrowserProxy
-import com.slopus.happy.browser.browserWorkspace
+import com.slopus.happy.browser.browserAgentCompute
+import com.slopus.happy.browser.browserNetwork
+import com.slopus.happy.browser.computeAnswers
+import com.slopus.happy.ui.browser.BrowserComputeWatch
 import com.slopus.happy.ui.browser.BrowserPage
 import com.slopus.happy.ui.browser.BrowserScreen
 import com.slopus.happy.ui.browser.openOutside
+import com.slopus.happy.ui.genui.GenUiSecretApi
+import com.slopus.happy.ui.plugins.openPlugin
 import com.slopus.happy.ui.connection.LocalHappyLinks
 import kotlinx.serialization.Serializable
 
@@ -85,16 +93,7 @@ internal fun computerName(graph: AppGraph, connectionId: String): String {
 }
 
 private class ArtifactsHolder(session: AgentSession?) : ViewModel() {
-    val feed: ArtifactCatalogFeed? = session?.let {
-        val files = ArtifactClient(it.client)
-        ArtifactCatalogFeed(
-            scope = viewModelScope,
-            fetch = { cursor -> files.catalog(cursor) },
-            fetchOne = { id -> files.artifact(id) },
-            kept = { it.cachedResource(ArtifactCatalogFeed.RESOURCE) },
-            keep = { value -> it.keepResource(ArtifactCatalogFeed.RESOURCE, value) },
-        ).also { feed -> feed.start(it.events) }
-    }
+    val feed: ArtifactCatalogFeed? = session?.artifacts
     val thumbnails: ArtifactThumbnails? = session?.let { ArtifactThumbnails(ArtifactClient(it.client), viewModelScope) }
 }
 
@@ -103,6 +102,7 @@ private fun AgentArtifacts(graph: AppGraph, nav: NavHostController, route: Agent
     val session = remember(route.connectionId) { graph.agentSessions.session(route.connectionId) }
     val holder = viewModel { ArtifactsHolder(session) }
     val feed = holder.feed
+    LaunchedEffect(feed) { feed?.refresh() }
     val state = feed?.state?.collectAsStateWithLifecycle()?.value ?: ArtifactCatalogFeed.State(loaded = true, error = Problem.Unknown)
     val status = session?.status?.collectAsStateWithLifecycle()?.value
     val syncing = session?.isSyncing?.collectAsStateWithLifecycle()?.value ?: false
@@ -111,10 +111,10 @@ private fun AgentArtifacts(graph: AppGraph, nav: NavHostController, route: Agent
         state = state,
         onBack = { nav.popBackStack() },
         onOpen = { nav.openArtifact(route.connectionId, it.ref) },
-        onRefresh = { feed?.refresh() },
         thumbnails = holder.thumbnails,
         link = link,
         covers = session?.feedCovers,
+        shareLink = { HappyShareLinks.format(HappyLink.Reference(HappyReferenceKind.Artifact, it.id), instanceId(graph, route.connectionId)) },
     )
 }
 
@@ -130,6 +130,11 @@ private class ArtifactHolder(session: AgentSession?, route: ArtifactRoute, resou
                 resources.getString(R.string.artifact_media_label, resources.getString(if (isVideo) R.string.artifact_video else R.string.artifact_picture), name)
             },
             library = it.media,
+            // Its Happy links read as a message's, by their live names, unless the document named them; what they name is read once each.
+            resolve = { text ->
+                it.references.read(HappyReferences.linkTags(text, it::isHere))
+                HappyReferences.markdown(text, it.references.references.value, here = it::isHere, labels = true)
+            },
         ).also(ArtifactLoader::load)
     }
 
@@ -155,12 +160,15 @@ private fun ArtifactEntry(graph: AppGraph, nav: NavHostController, route: Artifa
     }
     val ui by loader.state.collectAsStateWithLifecycle()
     val title by loader.title.collectAsStateWithLifecycle()
-    ArtifactScreen(
+    val plugins = session?.pluginsAvailable?.collectAsStateWithLifecycle()?.value == true
+    // What a Happy link names opens in the app, as one in a message does, and shimmers while it works.
+    val opener = remember(nav, session, happyLinks) { ReferenceOpener(nav, route.connectionId, session!!.references, happyLinks, session::isHere) }
+    ProvideBusyLinks(opener, session!!.references) { ArtifactScreen(
         title = title,
         ui = ui,
         media = loader.media,
         computer = computer,
-        actions = remember(loader, nav) {
+        actions = remember(loader, nav, plugins) {
             ArtifactActions(
                 onBack = { nav.popBackStack() },
                 link = loader::link,
@@ -170,24 +178,30 @@ private fun ArtifactEntry(graph: AppGraph, nav: NavHostController, route: Artifa
                 // A Happy URL stays in the app: an internal one means this connection, an external one its own.
                 onOpenExternal = { url -> if (happyLinks?.open(url, route.connectionId) != true) openOutside(context, url) },
                 artifactLink = { id ->
-                    graph.agentConnections.accounts.value.firstOrNull { it.id == route.connectionId }?.instanceId
-                        ?.let { HappyUrls.format(HappyLink.Reference(HappyReferenceKind.Artifact, id), it) }
+                    HappyShareLinks.format(HappyLink.Reference(HappyReferenceKind.Artifact, id), instanceId(graph, route.connectionId))
                 },
                 shareLink = if (route.path != null) null else ({
-                    graph.agentConnections.accounts.value.firstOrNull { it.id == route.connectionId }?.instanceId
-                        ?.let { HappyUrls.format(HappyLink.Reference(HappyReferenceKind.Artifact, route.artifactId, version = route.version.takeIf { route.pinned }), it) }
+                    HappyShareLinks.format(
+                        HappyLink.Reference(HappyReferenceKind.Artifact, route.artifactId, version = route.version.takeIf { route.pinned }),
+                        instanceId(graph, route.connectionId),
+                    )
                 }),
                 fileReader = { file, progress ->
                     val version = loader.version ?: throw IllegalStateException("not read")
                     ArtifactClient(session!!.client).bytes(route.artifactId, version.number, file.path, chunk = ArtifactClient.PROGRESS_CHUNK, progress = progress)
                 },
                 artifactKey = "artifact-${route.artifactId}",
+                references = session?.references?.references,
+                resolve = { text, references -> HappyReferences.markdown(text, references, here = session::isHere, labels = true) },
+                openApp = { url -> opener.open(url) },
                 // The artifact itself, not one file of it a link opened.
                 onDelete = if (route.path == null) ({ ArtifactClient(session!!.client).delete(route.artifactId) }) else null,
+                genUiSecrets = session?.client?.let { GenUiSecretApi(it) },
+                onOpenPlugin = if (plugins) ({ id -> nav.openPlugin(route.connectionId, id) }) else null,
             )
         },
         history = rememberArtifactHistory(loader, session, nav, route, title),
-    )
+    ) }
 }
 
 /** The artifact's versions for its screen; another version takes this screen's place, so Back still leaves the artifact. */
@@ -212,17 +226,30 @@ private fun rememberArtifactHistory(loader: ArtifactLoader, session: AgentSessio
 @Composable
 private fun BrowserEntry(graph: AppGraph, nav: NavHostController, route: BrowserRoute) {
     val session = remember(route.connectionId) { graph.agentSessions.session(route.connectionId) }
+    val happyLinks = LocalHappyLinks.current
     BrowserScreen(
         url = route.url,
         computer = computerName(graph, route.connectionId),
         agentStatus = session?.status?.collectAsStateWithLifecycle()?.value,
         prepare = {
             val client = session?.client ?: throw IllegalStateException("no connection")
-            BrowserPage(route.url, BrowserProxy.Scope.Workspace(client) { client.browserWorkspace(agentId = route.agentId) })
+            BrowserPage(route.url, BrowserProxy.Scope.Web(client) { client.browserNetwork(agentId = route.agentId) })
+        },
+        // A chat's page follows its agent's compute.
+        compute = remember(session, route.agentId) {
+            val agentId = route.agentId?.takeIf { it.isNotEmpty() } ?: return@remember null
+            session?.let { BrowserComputeWatch(browserAgentCompute(it.client, it.events, agentId)) { url -> it.client.computeAnswers(agentId, url) } }
         },
         onBack = { nav.popBackStack() },
         onOpenElsewhere = { url ->
-            if (BrowserPolicy.route(url) == BrowserPolicy.Route.Web) nav.navigate(BrowserRoute(route.connectionId, url, route.agentId))
+            // A share link the page followed opens in the app.
+            if (happyLinks?.open(url, route.connectionId) != true && BrowserPolicy.route(url) == BrowserPolicy.Route.Web) {
+                nav.navigate(BrowserRoute(route.connectionId, url, route.agentId))
+            }
         },
     )
 }
+
+/** [connectionId]'s installation, as its health last said: what its share links name; null where it reports none. */
+internal fun instanceId(graph: AppGraph, connectionId: String): String? =
+    graph.agentConnections.accounts.value.firstOrNull { it.id == connectionId }?.instanceId

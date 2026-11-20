@@ -153,23 +153,28 @@ and fixtures remain. Preserve credential and push compatibility on upgrades.
   - artifacts and the recent-sessions screen, which have no entry point;
   - web and desktop-only UI (command palette, shortcut hints, sidebar
     navigator, web tab bar), purchases and analytics.
-- **Voice in a Happy account's sessions is off** (`LegacyVoice`, user
-  request): the relay's ElevenLabs voice (`HappyUI/Voice`, `HappyCore/Voice`)
-  stays in the tree, out of reach. The session composer shows no microphone,
-  `VoiceCoordinator.start` says so before any context, status screen,
-  microphone, grant or provider, and Settings' Voice Assistant says so with
-  no usage request or Upgrade (`HostedLegacyVoiceGateTests`). Don't delete
-  the engine, or turn it back on, without the user. DEBUG runs can
-  (`HAPPY_RELAY_VOICE=1`) to look into it.
+- **A Happy account's sessions have no voice** (Kirill): the relay's
+  ElevenLabs voice, its composer microphone, status screen, Settings' Voice
+  Assistant page, grant, usage and client tools, is deleted. Its synced
+  settings (`voiceAssistantLanguage`, `voiceCustomAgentId`,
+  `voiceBypassToken`) stay in the account's settings, unread.
 - **An agent connection's voice call** (`HappyCore/Call`, `HappyUI/Call`) is
-  apart from that relay voice: home's three-bar button beside compose starts
+  the app's only voice: home's three-bar button beside compose starts
   it, and Telegram's in-call bar (`CallBarLayout`, `CallWaves`, adapted with
   Steve's permission) sits above the navigation bar and pushes the window
-  down by its height. It talks to a new hosted ElevenLabs agent of its own
-  with four client tools (`CallTool`: listSessions, getSessionContext,
-  openSession, sendMessage) and no permission or question tool; a
-  conversation waiting on the person is a `needsInput` flag on a read only.
-  The call hears from the last four conversations visited (`CallContext`):
+  down by its height. It talks to a hosted ElevenLabs agent of its own
+  ("Happy Agent v3public") with four client tools (`CallTool`:
+  listConversations, readConversation, message, navigate) and no permission
+  or question tool, and the phone sends its system prompt (`CallPrompt`, the
+  agent's prompt override); a conversation waiting on the person is a
+  `needsInput` flag on a read only. message's new-task and new-bot are
+  compose's own, navigate's happy://back and happy://home the stack's own
+  back and root, and message's model and effort the composer's pickers'.
+  v2 ("Happy Agent v2public" and its sendMessage, listSessions,
+  getSessionContext and openSession) is what the shipped App Store build
+  calls: frozen, never edited.
+  The call hears from the last four conversations visited or messaged
+  (`CallContext`):
   only their agents' new words, each piece once and whole when complete
   (the agent went on past it in its run, or the run is no longer the
   newest or working; never on a pause, never as it streams, never because
@@ -181,14 +186,27 @@ and fixtures remain. Preserve credential and push compatibility on upgrades.
   settles one second from the first, never longer (`DirectorySettle`), and
   goes whole, as the sidebar is then. It projects the app's own state
   (`WarmChats` hold, watch and release, the chat's own send), never a read
-  of its own.
-  It ends on background, interruption, lost route, account change and when
-  the relay's voice starts. For launch it connects to a public agent by its
+  of its own. A conversation it doesn't follow is reached for first, as a
+  finger on its row reaches (`WarmChats.intent`), and both a read and a send
+  wait for its first page: one never opened on this phone takes a message
+  by voice, and a read or send after it finds it kept, not started over.
+  A read of one not current makes it current
+  (`SessionCallTargets.refreshed`, up to eight seconds) and waits for that
+  700 ms at most (`freshWait`): in time, the read is what the computer has
+  and nothing follows. Past that it answers with what the phone has, marked
+  `refreshing`, and what the refresh finds goes as a line of context
+  (`conversation_update`, or a line that nothing is new or it didn't come
+  current). Nothing another conversation says is ever a cue: the agent
+  speaks of it when the person asks, or when it bears on what it is saying.
+  It ends on background, interruption, lost route and account change. For launch it connects to a public agent by its
   ID (`PublicAgentCallGrants`): a connection mechanism, not authentication.
-  The ID is injected at build time (`HAPPY_CALL_AGENT_ID`, from the ignored
-  `Config/Call.local.xcconfig` or the command line) and is never committed
-  in code, docs or tests. Without it the tap ends at once as "Voice isn't
-  set up for this connection yet"; never fake a live call. Each device gets
+  The ID is injected at build time (`HAPPY_CALL_AGENT_V3_ID`, from the ignored
+  `Config/Call.local.xcconfig`, the command line or the environment) and is
+  never committed in code, docs or tests. Without it the tap ends at once as
+  "Voice isn't set up for this connection yet"; never fake a live call.
+  Preview and Release builds fail without it (the Happy target's "Require
+  the voice agent" phase reads the built Info.plist); one that ships nowhere
+  sets `HAPPY_RELEASE_WITHOUT_CALL_AGENT=1`. Each device gets
   20 free connected minutes in any rolling 30 days (`CallAllowance`, local,
   provisional). A device's first tap shows voice's welcome and its last
   free minute the same screen with "Start Voice Session" greyed out: one
@@ -200,11 +218,15 @@ and fixtures remain. Preserve credential and push compatibility on upgrades.
   (`HAPPY_REVENUE_CAT_APPLE_KEY` → `HappyRevenueCatAppleKey`). It is on sale
   only when the current offering's `$rc_monthly` is a one-month
   auto-renewable App Store product, at the store's price; anything else,
-  nothing is sold. RevenueCat's `pro`, from any product, gives 5 hours a
-  paid month in place of the free time. The rules (customer ids, store ids,
-  restore, grace, months, retention) are the frozen billing contract
-  shared with Android; read `Subscription.swift` and `ProPass.swift`
-  before changing them. One knowing divergence from RevenueCat's SDK: a
+  nothing is sold. RevenueCat's `pro`, from any product, gives 2 hours a
+  paid month in place of the free time. The customer is the install's own
+  anonymous id, kept on the phone: no Happy account, sign-in or analytics
+  id touches it. Its `appAccountToken` is that id's hex as a UUID, so an
+  active subscription on the Apple ID is adopted by every phone at launch
+  and foreground without a restore. The rules (customer ids, store ids,
+  adoption, restore, the one migration restore, grace, months, retention)
+  are the frozen billing contract shared with Android; read
+  `Subscription.swift` and `ProPass.swift` before changing them. One knowing divergence from RevenueCat's SDK: a
   transaction is finished only after RevenueCat answers 2xx, never on a
   4xx. Restore runs on a person's tap only, never at launch. Debug runs
   can draw it from a fixture (`HAPPY_SUBSCRIPTION_FIXTURE`: `onsale`,
@@ -214,7 +236,7 @@ and fixtures remain. Preserve credential and push compatibility on upgrades.
   account's Support us) is the same subscription on its own pushed page
   (`SupportViewController`), without a voice session: Subscribe always
   there (greyed out while nothing is on sale), then Restore Purchases and
-  Manage Subscriptions as quiet links. `openSession` replaces a conversation on top
+  Manage Subscriptions as quiet links. `navigate` to a conversation replaces one on top
   and goes over anything else (`CallNavigation`). Contract, prompt, tool schemas and rationale:
   `docs/agent-voice-call.md` at the repository root. Harness hooks
   (`HAPPY_CALL_FIXTURE`, `HAPPY_CALL_TAP`, `-callLive`, `CallProbe`) are
@@ -452,6 +474,13 @@ and fixtures remain. Preserve credential and push compatibility on upgrades.
       account, or "Happy account" (rule 10).
     - A registry rebuilt from the Keychain after corruption loses the
       origin, so those accounts come back as legacy.
+  - **A computer's code goes to an account already here.** Opened as a
+    link or scanned to connect, a `happy://terminal?` code goes to the
+    Happy account in use; with an agent connection shown, to the one used
+    last (the registry's active one), which is shown first
+    (`accountForComputer`, `ScanRoute.connectComputerSwitching`).
+    Authenticate Terminal names that account. Only with none here is a new
+    one made; Add account always makes one.
   - **Account id.** The account's anonymous id, derived from its secret,
     so it is known offline and the same account is never listed twice.
   - **Separate caches.** Each account has its own directory,
@@ -516,6 +545,10 @@ and fixtures remain. Preserve credential and push compatibility on upgrades.
   emoji sits on a tile like every other row's glyph, the tile's size (30)
   where the tile goes and orange for the boba, at the row's top when the
   row grows (`SettingsLayout`'s art row, `SupportBobaArt`).
+- **No pull to refresh** (Steve, for both apps), on any list or page. A
+  list stays current through its feed (events, a resync after a gap, a
+  read when it opens or the stream reconnects); a page reloads from its
+  header's button.
 
 ## Record kinds: current vs retired
 
@@ -664,25 +697,57 @@ identical and checks the variant keys:
 - `HappyAppVariant`;
 - ATS: local networking everywhere, arbitrary loads outside production.
 
-No variant has associated domains in the fork (no universal links).
+Every variant asks for push (`aps-environment`). No variant has associated
+domains in the fork (no universal links: the fork controls none of
+app.happy.engineering, join.happy.engineering or link.happy.page's AASA
+files); development and preview add Sign in with Apple for Happy Cloud.
+Each variant has its own Google iOS client for Continue with Google:
+`HAPPY_GOOGLE_CLIENT` in `project.yml`'s Happy target, which the plists
+turn into `GIDClientID` and its reversed-client-ID URL scheme. xtool doesn't
+expand it, so an xtool build's Continue with Google fails at Google. (They are
+upstream's clients, made for upstream's bundle ids.)
 
 ### Versioning
 
-All three variants (development, preview, production) carry the same semver
-version, `2.0.0`, continuing the RN app's `1.x` releases. Production
-continues the fork's existing `com.omachala.happy` listing; dev and preview ship the
-same number on their own listings.
+The version is CalVer `YYYY.M.C`: the UTC year, the month without a
+leading zero, and a counter that starts at 1 each month (`2026.11.1`,
+`2026.9.3`). It is still three integers, as `CFBundleShortVersionString`
+wants, and sorts above the RN app's `1.x` and the first native `2.0.0`.
+All three variants (development, preview, production) carry the same
+version, and every build of it, preview or production, differs only by its
+build number. Production continues the fork's existing `com.omachala.happy`
+listing, with the fork's own build numbers (44 and up, never upstream's);
+dev and preview ship the same number on their own listings.
 
-- Bump `MARKETING_VERSION` in `project.yml`'s base settings, the only one
-  there; the Mac app and the App Clip read it too. Because xtool doesn't
-  expand `$(VARIABLES)`, the three `App/Info-*.plist` files and
-  `AppClip/project.yml` repeat it, and `AppConfigurationTests` fails until
-  they all match.
+- The checked-in version is the upcoming release. `C` moves only when a
+  version is released publicly on the App Store; uploading to TestFlight,
+  production builds included, doesn't move it, so any number of builds of
+  2026.11.1 go up until 2026.11.1 is released. The next version is the
+  highest `C` this UTC month's release tags carry, plus one, else 1. A
+  month without a release restamps the version to the new month.
+- The build released publicly is tagged `native-ios-<version>-build<N>`
+  when it is released, never at upload (iOS counts on its own; Android has
+  its own tags). Uploads get no tag; their upload ID and binary SHA-256 go
+  in the release report. Tags of other schemes (`2.0.0`) don't count.
+- `node scripts/native-version.cjs next ios` prints the upcoming version
+  from the tags; `check ios` fails unless the checked-in version is it;
+  `set ios` writes it. Before any release build run `check ios`, and if it
+  fails, `set ios`, commit and land that on `main` first.
+- `set` writes `MARKETING_VERSION` in `project.yml`'s base settings (the
+  only one there; the Mac app and the App Clip read it too) and the copies
+  xtool needs because it doesn't expand `$(VARIABLES)`: the three
+  `App/Info-*.plist` files and `AppClip/project.yml`.
+  `AppConfigurationTests` fails unless they all match and the version is
+  CalVer.
 - `CFBundleVersion` (`CURRENT_PROJECT_VERSION`) stays the build number:
   production's is set in `App/Info-Production.plist` and the Happy target's
   Release settings; preview uploads let Xcode pick the next free one.
-- The version also goes out as `X-Happy-Client: ios/<version>`. The
-  server uses it only for metrics labels.
+- Settings › Version shows both, `2026.11.1 (160)`, as Android shows
+  `versionName (versionCode)`; outside production the variant follows
+  (`2026.11.1 (171) / preview`).
+- The version also goes out as `X-Happy-Client: ios/<version>` and in
+  `POST /v1/version` (the server's semver range `>=1.4.1` admits it). The
+  server uses the header only for metrics labels.
 
 ## Conventions
 
@@ -703,7 +768,10 @@ same number on their own listings.
 - Don't add a dependency without saying why in the PR. Current ones:
   - GRDB;
   - swift-crypto, Linux only;
-  - swift-asn1, which swift-crypto pulls in.
+  - swift-asn1, which swift-crypto pulls in;
+  - GoogleSignIn-iOS, iOS only, for Happy Cloud's Continue with Google
+    (with AppAuth, GTMAppAuth, gtm-session-fetcher and app-check, which it
+    pulls in).
 
 ## Workstreams
 

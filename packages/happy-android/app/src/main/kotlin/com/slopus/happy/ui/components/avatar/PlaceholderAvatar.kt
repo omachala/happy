@@ -81,11 +81,13 @@ private var SemanticsPropertyReceiver.placeholderIndex by PlaceholderIndexKey
  *
  * Where it [may move][animated] and Animated Avatars is on, on Android 13
  * and later it is drawn as its live shader instead ([AVATAR_SHADER_AGSL]),
- * starting on the still picture's frame (its phase), [AvatarShader.speed]
- * times the package's rate for its size: [AvatarShader.FRAMES_PER_SECOND]
- * frames a second from one shared clock, only while composed (a lazy list's rows on
- * screen) and its screen is resumed, at most [LiveAvatarClock.MAX_LIVE] at
- * once (the rest stay still). With animations removed or in battery saver
+ * on its placeholder's own clock ([LiveAvatarClock.origin]), which every
+ * view of it shares and which starts on the still picture's frame (its
+ * phase), at [AvatarShader.SPEED] times the package's rate:
+ * [AvatarShader.FRAMES_PER_SECOND] frames a second, only while composed (a
+ * lazy list's rows on screen) and its screen is resumed, at most
+ * [LiveAvatarClock.MAX_LIVE] at once (the rest hold the clock's frame of
+ * the moment). With animations removed or in battery saver
  * each holds its picture, as happy-ios does under Reduce Motion or Low
  * Power Mode. Older Android, or a shader that won't build, draws the still
  * picture.
@@ -116,20 +118,21 @@ fun PlaceholderAvatar(
             onDispose { LiveAvatarClock.leave(token) }
         }
         val moving by remember(token) { derivedStateOf { token in LiveAvatarClock.live.value } }
-        if (moving) {
-            val parameters = remember(index) { AvatarShader.parameters(index) }
-            val started = remember(index) { SystemClock.uptimeMillis() }
-            val speed = AvatarShader.speed(size.value)
-            Box(
-                box.testTag(PlaceholderAvatarTags.LIVE).drawBehind {
-                    val time = AvatarShader.time(parameters, LiveAvatarClock.millis.longValue - started, speed)
-                    drawIntoCanvas { canvas ->
-                        AvatarShaderProgram.draw(canvas.nativeCanvas, parameters, time, this.size.width, monochrome)
-                    }
-                },
-            )
-            return
-        }
+        val parameters = remember(index) { AvatarShader.parameters(index) }
+        val started = remember(index) { LiveAvatarClock.origin(index) }
+        // Moving, it follows the clock's ticks; held (its screen not
+        // resumed, or past the cap), it shows the clock's frame of the
+        // moment, so starting or stopping changes nothing on screen.
+        Box(
+            box.testTag(if (moving) PlaceholderAvatarTags.LIVE else PlaceholderAvatarTags.STILL).drawBehind {
+                val now = if (moving) LiveAvatarClock.millis.longValue else SystemClock.uptimeMillis()
+                val time = AvatarShader.time(parameters, now - started, AvatarShader.SPEED)
+                drawIntoCanvas { canvas ->
+                    AvatarShaderProgram.draw(canvas.nativeCanvas, parameters, time, this.size.width, monochrome)
+                }
+            },
+        )
+        return
     }
     StillPlaceholder(index, pixels, box, monochrome)
 }
@@ -209,7 +212,7 @@ object LiveAvatarClock {
     const val MAX_LIVE = 32
     private const val FRAME_MS = 1000L / AvatarShader.FRAMES_PER_SECOND
 
-    /** [SystemClock.uptimeMillis] at the last tick; read in draw, so a tick only redraws. */
+    /** The last tick's vsync, in [SystemClock.uptimeMillis]'s time (the same monotonic clock); read in draw, so a tick only redraws. */
     val millis = mutableLongStateOf(SystemClock.uptimeMillis())
 
     /** The ones moving now. */
@@ -217,14 +220,25 @@ object LiveAvatarClock {
     private val joined = LinkedHashSet<Any>()
     private var ticking = false
 
-    private val tick: Choreographer.FrameCallback = Choreographer.FrameCallback {
-        millis.longValue = SystemClock.uptimeMillis()
+    /** Moved to the vsync's time, on the first at least [FRAME_MS] (less its jitter) after the last tick. */
+    private val tick: Choreographer.FrameCallback = Choreographer.FrameCallback { frameNanos ->
+        val frame = frameNanos / 1_000_000
+        if (frame - millis.longValue >= FRAME_MS - 2) millis.longValue = frame
         if (joined.isEmpty()) ticking = false else post()
     }
 
+    /**
+     * Woken [EARLY_MS] before the next tick is due, so the vsync at or just
+     * past it moves it: every 6 vsyncs at 120 Hz, 3 at 60. Waking at the
+     * tick itself would wait for the vsync after, 7 at 120 Hz (17 a second)
+     * and 3 to 5 at 60, unevenly.
+     */
     private fun post() {
-        Choreographer.getInstance().postFrameCallbackDelayed(tick, FRAME_MS)
+        val delay = millis.longValue + FRAME_MS - EARLY_MS - SystemClock.uptimeMillis()
+        Choreographer.getInstance().postFrameCallbackDelayed(tick, delay.coerceAtLeast(1))
     }
+
+    private const val EARLY_MS = 4L
 
     /** Main thread only. */
     fun join(token: Any) {
@@ -243,6 +257,11 @@ object LiveAvatarClock {
 
     /** Whether the clock is running, for tests. */
     val isTicking: Boolean get() = ticking
+
+    private val clock = AvatarShader.Clock()
+
+    /** When placeholder [index]'s clock started, in [SystemClock.uptimeMillis]'s time: the first time any view showed it. */
+    fun origin(index: Int): Long = clock.origin(index, SystemClock.uptimeMillis())
 
     private fun update() {
         val next = if (joined.size <= MAX_LIVE) joined.toSet() else joined.take(MAX_LIVE).toSet()

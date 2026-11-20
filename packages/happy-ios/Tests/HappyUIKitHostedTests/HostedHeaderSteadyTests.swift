@@ -203,7 +203,7 @@ final class HostedHeaderSteadyTests: XCTestCase {
             try await Task.sleep(for: .milliseconds(150))
             XCTAssertEqual(name(), idle, "the name moved after the fade")
             if index < Strings.HeaderStatus.all.count { capture(window, "chat-status-\(index)") }
-            if status == Strings.HeaderStatus.all[4] { capture(window, "6-chat-thinking") }
+            if status == Strings.HeaderStatus.all[3] { capture(window, "6-chat-thinking") }
         }
     }
 
@@ -250,8 +250,8 @@ final class HostedHeaderSteadyTests: XCTestCase {
             return [navigation.navigationBar, sidebar].map { $0.convert($0.bounds, to: window) } + [name.frame.rounded()]
                 + [CGRect(origin: switcherFrame.origin, size: CGSize(width: 0, height: switcherFrame.height))]
         }
-        /// The first row, as it rests. The offline notice is the list's
-        /// first row (`SidebarList.notice`), so the row stands under it.
+        /// The first row, as it rests. A notice is the list's first row
+        /// (`SidebarList.notice`), so the row would stand under it.
         func firstRow() throws -> CGRect {
             let row = try XCTUnwrap(sidebar.view(for: "s:0"))
             return row.convert(row.bounds, to: window)
@@ -267,7 +267,6 @@ final class HostedHeaderSteadyTests: XCTestCase {
         for state in Strings.HeaderStatus.State.allCases + Strings.HeaderStatus.State.allCases.reversed() {
             home.headerState = state
             snapshot.live = state == .online
-            snapshot.error = state == .offline ? "The computer is offline" : nil
             content.applyConnection(snapshot)
             try await Task.sleep(for: .milliseconds(80))
             XCTAssertEqual(frames(), original, "mid-fade at \(state)")
@@ -295,28 +294,42 @@ final class HostedHeaderSteadyTests: XCTestCase {
         XCTAssertEqual(Strings.HeaderStatus.text(.online, activity: nil, loaded: true), "online")
         XCTAssertEqual(Strings.HeaderStatus.text(.online, activity: Activity(phase: .awaitingAnswer, startedAt: nil), loaded: true), "Waiting for your answer")
         XCTAssertEqual(Set(Strings.HeaderStatus.translations.keys), Set(AppLanguage.supported.map(\.code)))
-        for text in Strings.HeaderStatus.translations.values { XCTAssertEqual(text.count, 8); XCTAssertTrue(text.allSatisfy { !$0.isEmpty }) }
+        for text in Strings.HeaderStatus.translations.values { XCTAssertEqual(text.count, 7); XCTAssertTrue(text.allSatisfy { !$0.isEmpty }) }
         var snapshot = HomeSnapshot()
-        XCTAssertEqual(Session.headerState(status: .connecting, snapshot: snapshot), .connecting)
-        XCTAssertEqual(Session.headerState(status: .connected, snapshot: snapshot), .syncing)
+        XCTAssertEqual(Session.headerState(snapshot: snapshot), .connecting)
+        XCTAssertEqual(Session.headerState(snapshot: snapshot), .connecting, "connecting until the stream's hello")
         snapshot.loaded = true; snapshot.live = true
-        XCTAssertEqual(Session.headerState(status: .connected, snapshot: snapshot), .syncing, "an open stream is still catching up")
+        XCTAssertEqual(Session.headerState(snapshot: snapshot), .syncing, "an open stream is still catching up")
         snapshot.syncing = false
-        XCTAssertEqual(Session.headerState(status: .connected, snapshot: snapshot), .online)
-        snapshot.live = false; snapshot.error = "offline"
-        XCTAssertEqual(Session.headerState(status: .connected, snapshot: snapshot), .offline)
-        // Retrying after the computer did not answer: home's notice says
-        // so, the header says offline rather than connecting for it too.
-        XCTAssertEqual(Session.headerState(status: .retrying, snapshot: snapshot), .offline)
+        XCTAssertEqual(Session.headerState(snapshot: snapshot), .online)
+        // No link is ever offline: not live, for any reason, it is connecting.
+        XCTAssertFalse(Strings.HeaderStatus.State.allCases.contains { "\($0)" == "offline" })
+        snapshot.live = false
+        for status in [ConnectionStatus.connecting, .retrying, .paused, .revoked] {
+            XCTAssertEqual(Session.headerState(snapshot: snapshot), .connecting, "\(status)")
+        }
+        // An engine stopped for a reason home's notice says (a pairing to
+        // redo, a sign-in that ended): the header says connecting beside it.
+        snapshot.error = "This device was disconnected. Pair it again."
+        for status in [ConnectionStatus.connected, .retrying, .paused, .revoked] {
+            XCTAssertEqual(Session.headerState(snapshot: snapshot), .connecting, "\(status)")
+        }
+        XCTAssertEqual(Session.headerState(snapshot: snapshot, network: false), .waitingForNetwork)
         snapshot.error = nil
-        XCTAssertEqual(Session.headerState(status: .retrying, snapshot: snapshot), .connecting)
-        XCTAssertEqual(Session.headerState(status: .paused, snapshot: snapshot), .offline)
-        XCTAssertEqual(Session.headerState(status: .revoked, snapshot: snapshot), .offline)
         // The stream is open: live, whatever the pairing's check last said.
         snapshot.live = true
-        XCTAssertEqual(Session.headerState(status: .retrying, snapshot: snapshot), .online)
-        XCTAssertEqual(Session.headerState(status: .revoked, snapshot: snapshot), .offline)
-        XCTAssertEqual(Session.headerState(status: .connecting, snapshot: snapshot, network: false), .waitingForNetwork)
+        XCTAssertEqual(Session.headerState(snapshot: snapshot), .online)
+        XCTAssertEqual(Session.headerState(snapshot: snapshot), .online)
+        XCTAssertEqual(Session.headerState(snapshot: snapshot, network: false), .waitingForNetwork)
+        // A stream on its way back, a server's or a computer's: connecting,
+        // whatever the pairing's own check says, until it is live again.
+        snapshot.live = false; snapshot.reconnecting = true
+        for status in [ConnectionStatus.connected, .retrying, .paused] {
+            XCTAssertEqual(Session.headerState(snapshot: snapshot), .connecting, "\(status)")
+        }
+        XCTAssertEqual(Session.headerState(snapshot: snapshot, network: false), .waitingForNetwork)
+        snapshot.live = true; snapshot.syncing = true
+        XCTAssertEqual(Session.headerState(snapshot: snapshot), .syncing, "live again, it catches up")
     }
 }
 

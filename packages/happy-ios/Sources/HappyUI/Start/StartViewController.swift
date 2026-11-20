@@ -5,13 +5,14 @@ import UIKit
 
 /// The first screen, shown while the phone has no Happy account and no
 /// agent connection; Android's (ui/start). No bar: Grain Gradient fills
-/// the window behind the status bar. ⋯ at the top right has the other ways
-/// in (enter a link, restore, the server) and help, with the logotype,
-/// small, on its row; desktop's welcome slides (`StartGalleryView`) are in
-/// the middle; Start (48 above the bottom, as wide as its label) opens
-/// `InstallDesktopViewController`, which says to get Happy for the
-/// computer and scans its code. There is no Create account: a computer's
-/// code makes one. `StartLayout` places it all.
+/// the window behind the status bar. ? at the top right is Get help, with
+/// the logotype, small, on its row; desktop's welcome slides
+/// (`StartGalleryView`) are in the middle; Start (48 above the bottom, as
+/// wide as its label) opens `InstallDesktopViewController`, which says to
+/// get Happy for the computer and scans its code, and whose ⋯ has the other
+/// self-hosted ways in; Use Happy Cloud, a text action under Start where
+/// Happy Cloud is offered, opens Happy Cloud's welcome. There is no Create
+/// account: a computer's code makes one. `StartLayout` places it all.
 ///
 /// The palette is Android's: deep blue and violet over near-black in dark
 /// mode, their pale tints over lavender white in light; every colour behind
@@ -39,10 +40,17 @@ final class StartViewController: UIViewController {
     private let logo = UIImageView()
     private let gallery = StartGalleryView()
     private let start = RoundButton(title: Strings.Start.button)
-    private let more = UIButton(type: .system)
-    private var busy = false {
-        didSet { start.isLoading = busy; more.isEnabled = !busy }
-    }
+    /// Happy Cloud, a text action under Start rather than in ⋯, where it is
+    /// offered: a phone needs no computer for it.
+    private let cloud = StartViewController.cloudButton()
+    /// ?, Get help, where ⋯ was: the other ways in are on the next screens.
+    private let help = UIButton(type: .system)
+    private var offersCloud: Bool { HappyCloud.isOffered(in: context.variant) }
+    /// The stack whose bar this screen hid. Replaced rather than pushed
+    /// over (an account made from a link opened here), it has left the
+    /// stack by the time it disappears, with no navigationController to
+    /// give the bar back to, and the new home came without it.
+    private weak var hidingBar: UINavigationController?
 
     init(context: AppContext) {
         self.context = context
@@ -71,36 +79,46 @@ final class StartViewController: UIViewController {
         start.onTap = { [weak self] in self?.next() }
         scroll.addSubview(gallery)
         scroll.addSubview(start)
-        more.setImage(UIImage(systemName: "ellipsis", withConfiguration: UIImage.SymbolConfiguration(pointSize: 20, weight: .semibold)), for: .normal)
-        more.tintColor = Colors.text
-        more.accessibilityLabel = Strings.Start.more
-        more.accessibilityIdentifier = "start-more"
-        more.showsMenuAsPrimaryAction = true
-        more.menu = UIMenu(children: [UIDeferredMenuElement.uncached { [weak self] done in
-            guard let self else { return done([]) }
-            done(StartMenu.items(context: context, from: self, busy: busy) { [weak self] in self?.busy = $0 })
-        }])
-        view.addSubview(more)
+        cloud.accessibilityIdentifier = "start-cloud"
+        cloud.onTap = { [weak self] in
+            guard let self else { return }
+            AccountAdding.connectToCloud(context: context, from: self)
+        }
+        cloud.isHidden = !offersCloud
+        scroll.addSubview(cloud)
+        help.setImage(UIImage(systemName: "questionmark.circle", withConfiguration: UIImage.SymbolConfiguration(pointSize: 20, weight: .semibold)), for: .normal)
+        help.tintColor = Colors.text
+        help.accessibilityLabel = Strings.Onboarding.getHelp
+        help.accessibilityIdentifier = "start-help"
+        help.addAction(UIAction { [weak self] _ in
+            guard let self else { return }
+            Alerts.help(on: self)
+        }, for: .touchUpInside)
+        view.addSubview(help)
         updateLogo()
         registerForTraitChanges([UITraitUserInterfaceStyle.self]) { (self: Self, _) in self.updateLogo() }
     }
 
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
-        navigationController?.setNavigationBarHidden(true, animated: animated)
+        hidingBar = navigationController
+        hidingBar?.setNavigationBarHidden(true, animated: animated)
     }
 
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
         gallery.isRunning = true
+        // Use Happy Cloud's welcome opens on the liquid metal cloud.
+        if offersCloud { LiquidMetalView.prepare() }
     }
 
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
         gallery.isRunning = false
-        // The screens it opens have their bar.
-        if navigationController?.topViewController !== self {
-            navigationController?.setNavigationBarHidden(false, animated: animated)
+        // The screens it opens have their bar, and so does one that
+        // takes its place.
+        if let stack = hidingBar, stack.topViewController !== self {
+            stack.setNavigationBarHidden(false, animated: animated)
         }
     }
 
@@ -111,6 +129,7 @@ final class StartViewController: UIViewController {
             size: bounds.size,
             safeArea: LayoutInsets(view.safeAreaInsets),
             button: start.layout(width: StartLayout.Metrics.buttonMinWidth).size,
+            cloud: offersCloud ? cloud.layout(width: StartLayout.Metrics.buttonMinWidth).size : .zero,
             slides: gallery.slides,
             dots: gallery.dotsSize
         )
@@ -120,7 +139,18 @@ final class StartViewController: UIViewController {
         gallery.setLayoutFrame(layout.gallery)
         gallery.apply(layout)
         start.frame = layout.button
-        more.frame = layout.more
+        cloud.frame = layout.cloud
+        help.frame = layout.help
+    }
+
+    /// Use Happy Cloud: a text action in the slides' secondary colour, so
+    /// Start stays the one filled button. The screen after Start measures
+    /// one too, so its button rises as Start does.
+    static func cloudButton() -> RoundButton {
+        let button = RoundButton(title: Strings.Start.cloud, size: .normal, display: .inverted)
+        button.label.color = Palette.startTextSecondary
+        button.spinner.color = UIColor(Palette.startTextSecondary)
+        return button
     }
 
     /// The light logotype on the dark gradient, the dark one on the light.
@@ -130,13 +160,12 @@ final class StartViewController: UIViewController {
 
     /// Getting Happy for the computer, then its code.
     private func next() {
-        guard !busy else { return }
         navigationController?.pushViewController(InstallDesktopViewController(context: context), animated: true)
     }
 }
 
-/// ⋯'s menu on the first screen and the one after it: the ways in besides
-/// scanning (`AccountAdding`), and help.
+/// ⋯'s menu on the screen after Start: the self-hosted ways in besides
+/// scanning (`AccountAdding`), and help. The first screen has no ⋯.
 @MainActor
 enum StartMenu {
     static func items(context: AppContext, from controller: UIViewController, busy: Bool, setBusy: @escaping (Bool) -> Void) -> [UIMenuElement] {

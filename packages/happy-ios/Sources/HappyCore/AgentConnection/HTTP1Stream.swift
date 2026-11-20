@@ -2,6 +2,12 @@ import Foundation
 import HappyWire
 import Tailcat
 
+/// A candidate in a foreground race owns only its TCP flow. A failure
+/// there must not replace the tunnel under a different, winning flow.
+enum EventStreamPolicy {
+    @TaskLocal static var resetsTunnel: Bool = true
+}
+
 extension TailcatHTTPTransport {
     static func safe(path: String, credential: String, headers: [String: String]) -> Bool {
         path.hasPrefix("/") && !path.contains("\r") && !path.contains("\n") && !path.contains(" ")
@@ -15,14 +21,18 @@ extension TailcatHTTPTransport {
     public func stream(path: String, credential: String, headers: [String: String]) async throws -> HTTP1Stream {
         guard Self.safe(path: path, credential: credential, headers: headers) else { throw PairingError.invalidResponse }
         let lease = try await lease(.realtime)
+        let watch = lease?.watch()
+        defer { watch?.cancel() }
         let stream: any BrowserStream
         do { stream = try await flow(lease, .realtime) } catch {
             lease?.release()
-            if Self.lostTunnel(error) { await reset(lease) }
+            if EventStreamPolicy.resetsTunnel, !Task.isCancelled, Self.lostTunnel(error) { await reset(lease) }
             throw error
         }
         do {
             var head = "GET \(path) HTTP/1.1\r\nHost: \(authority)\r\nAuthorization: Bearer \(credential)\r\nConnection: close\r\nAccept: text/event-stream\r\n"
+            // A daemon that compresses the stream flushes it after every event.
+            if !headers.keys.contains(where: { $0.lowercased() == "accept-encoding" }) { head += "Accept-Encoding: \(ContentCoding.accepted)\r\n" }
             for (name, value) in headers { head += "\(name): \(value)\r\n" }
             try await stream.write(Data((head + "\r\n").utf8))
             let (responseHead, rest) = try await withThrowingTaskGroup(of: (HTTP1Head, Data).self) { group in
@@ -42,31 +52,43 @@ extension TailcatHTTPTransport {
                 return value
             }
             let chunked = responseHead.headers["transfer-encoding"]?.lowercased() == "chunked"
+            let coding = try ContentCoding.coding(responseHead.headers)
             let body = AsyncThrowingStream<Data, Error> { continuation in
+                // Silent past its heartbeat: its client is checked.
+                let silence = lease?.watch(quiet: carrierHeardWithin, repeating: true)
                 let reader = Task {
+                    defer { silence?.cancel() }
                     var decoder = HTTP1BodyDecoder(chunked: chunked)
+                    var ended = false
                     do {
+                        let content = try coding.map(ContentDecoder.init)
                         var bytes = rest
                         while true {
-                            let decoded = try decoder.append(bytes)
+                            var decoded = try decoder.append(bytes)
+                            if let content { decoded = try content.append(decoded, limit: ContentCoding.limit) }
                             if !decoded.isEmpty { continuation.yield(decoded) }
                             if decoder.finished { break }
                             try Task.checkCancellation()
                             bytes = try await stream.read(maximumBytes: 65536)
                             if bytes.isEmpty { break }
                         }
+                        ended = true
                         continuation.finish()
                     } catch { continuation.finish(throwing: error) }
-                    await stream.close()
+                    // Let go of before its end: the computer stops sending.
+                    if ended { await stream.close() } else { await stream.abort() }
                 }
-                continuation.onTermination = { _ in reader.cancel(); Task { await stream.close() } }
+                continuation.onTermination = { termination in
+                    reader.cancel()
+                    if case .cancelled = termination { Task { await stream.abort() } }
+                }
             }
             return HTTP1Stream(status: responseHead.status, headers: responseHead.headers, body: body)
         } catch {
-            await stream.close()
+            await stream.abort()
             // No answer on a stream the tunnel opened: the far side may
             // have restarted and forgotten it.
-            if Self.lostTunnel(error) { await reset(lease) }
+            if EventStreamPolicy.resetsTunnel, !Task.isCancelled, Self.lostTunnel(error) { await reset(lease) }
             throw error
         }
     }
@@ -165,20 +187,38 @@ public struct ServerSentEventParser: Sendable {
 
     public init() {}
 
+    /// Lines are found by scanning the bytes and taken whole: appended to
+    /// `Data` a byte at a time, the stream's every byte cost a call, about
+    /// a twentieth of the phone's time while agents wrote.
     public mutating func append(_ bytes: Data) -> [ServerSentEvent] {
         var frames: [ServerSentEvent] = []
-        for byte in bytes {
-            if sawCR {
+        bytes.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
+            let all = raw.bindMemory(to: UInt8.self)
+            var index = 0
+            // A CR that ended the last chunk: an LF starting this one is its pair.
+            if sawCR, !all.isEmpty {
                 sawCR = false
-                if byte == 0x0A { continue }
+                if all[0] == 0x0A { index = 1 }
             }
-            if byte == 0x0A || byte == 0x0D {
-                sawCR = byte == 0x0D
-                line(String(decoding: buffer, as: UTF8.self), into: &frames)
-                buffer.removeAll(keepingCapacity: true)
-            } else {
-                buffer.append(byte)
+            var start = index
+            while index < all.count {
+                let byte = all[index]
+                guard byte == 0x0A || byte == 0x0D else { index += 1; continue }
+                let piece = UnsafeBufferPointer(rebasing: all[start..<index])
+                if buffer.isEmpty {
+                    line(String(decoding: piece, as: UTF8.self), into: &frames)
+                } else {
+                    buffer.append(contentsOf: piece)
+                    line(String(decoding: buffer, as: UTF8.self), into: &frames)
+                    buffer.removeAll(keepingCapacity: true)
+                }
+                index += 1
+                if byte == 0x0D {
+                    if index == all.count { sawCR = true } else if all[index] == 0x0A { index += 1 }
+                }
+                start = index
             }
+            if start < all.count { buffer.append(contentsOf: UnsafeBufferPointer(rebasing: all[start..<all.count])) }
         }
         return frames
     }

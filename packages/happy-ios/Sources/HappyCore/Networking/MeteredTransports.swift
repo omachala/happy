@@ -189,6 +189,11 @@ public final class MeteredStream: BrowserStream, @unchecked Sendable {
         await base.close()
         markClosed()
     }
+
+    public func abort() async {
+        await base.abort()
+        markClosed()
+    }
 }
 
 /// A transport that counts its own wire (flows, bytes, its tunnel) once
@@ -341,6 +346,8 @@ public struct MeteredAgentTransport: AgentTransport {
 
     public func reset() async { await base.reset() }
     public func reset(_ category: RequestCategory) async { await base.reset(category) }
+    public func resumed() async { await base.resumed() }
+    public func warm(_ count: Int) async { await base.warm(count) }
     public func close() async { await base.close() }
 }
 

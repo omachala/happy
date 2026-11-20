@@ -4,12 +4,19 @@ import HappyWire
 /// Which tool calls keep their raw `arguments` and `result` on the phone,
 /// and how much of them. A presentation that already carries what the call
 /// did (a command and its output, a diff, media, an artifact) makes the raw
-/// data redundant; any other call is shown on its screen from the raw data,
+/// data redundant; only its bounded display fields survive (`ToolSummary`).
+/// Any other call is shown on its screen from the raw data,
 /// so it is kept, every string cut to `maxString` characters so one long
 /// read or output can't swell the kept conversation.
+///
+/// Chat-based onboarding is deferred. If revisited, prefer settings
+/// widgets, top-level tools like MCP apps, or general Card/Button/Text/
+/// Column UI (json-render/A2UI/ChatGPT-style), not this widget protocol.
+/// Unrecognized or malformed presentations use ordinary tool rows and
+/// bounded raw data, including historical calls.
 public enum ToolRaw {
     /// Presentations that say everything the call's screen shows.
-    static let complete: Set<String> = ["exec_command", "file_diff", "media", "artifact", "background_terminal_interaction", "compaction"]
+    static let complete: Set<String> = ["exec_command", "file_diff", "media", "artifact", "gen_ui", "background_terminal_interaction", "compaction"]
 
     public static let maxString = 32 * 1024
     /// What a cut string ends with.

@@ -18,8 +18,10 @@ xcodegen && open Happy.xcodeproj   # macOS
 ## Production continuation
 
 The native iOS app continues the omachala fork's `com.omachala.happy` App Store
-Connect listing ("Happy Localhost", team 924FH7MYCN) with **2.0.0 (39)**,
-following the fork's React Native app's 1.7.0 (38).
+Connect listing ("Happy Localhost", team 924FH7MYCN), following the fork's
+React Native app's 1.7.0 (38) and the fork's native 2.0.0 builds (39–44).
+Since the upstream merge it carries upstream's CalVer version (`2026.11.1`)
+with the fork's own build number (44 and up).
 Development and preview keep their separate bundle identities and share the
 same version. The version is set once in `project.yml` (see
 [Versioning](AGENTS.md#versioning)); production's build number is set in
@@ -29,12 +31,15 @@ default Keychain access group so the RN credentials and Expo installation ID
 survive an in-place upgrade.
 
 Follow [the release skill](../../.agents/skills/release/SKILL.md) from a clean
-local `main` matching freshly fetched `origin/main`. This release is for
-**TestFlight only**: upload to App Store Connect without submitting for App
-Store review or public release. After successful submission, tag the exact
-source commit `native-ios-2.0.0-build156`; future iOS tags follow
-`native-ios-<version>-build<build>`. Never move an existing tag. No GitHub
-Release is needed for this TestFlight build.
+local `main` matching freshly fetched `origin/main`. Production signs manually
+with the distribution certificate and profile and uploads with the App Store
+Connect API key: the Xcode account on the release Mac has no access to this
+app. App Review submission and public release each need separate user
+authorization. An upload gets no tag: report its upload ID and binary
+SHA-256. When a build is released publicly on the App Store, tag its exact
+source commit `native-ios-<version>-build<build>`; that moves the version
+on (see [Versioning](AGENTS.md#versioning)). Never move an existing tag. No
+GitHub Release is needed for a native build.
 
 ## Native Mac app
 

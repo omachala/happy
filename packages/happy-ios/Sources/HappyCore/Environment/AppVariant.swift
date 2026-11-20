@@ -27,6 +27,14 @@ public enum AppVariant: String, Sendable, CaseIterable {
         }
     }
 
+    /// Whether the build grants the subscription itself: the preview app,
+    /// whose voice works as a subscriber's. Set by the build (its Info.plist
+    /// or bundle id), never by anything the person can change.
+    public var grantsPro: Bool { self == .preview }
+
+    /// Preview's testing allowance; paid production and development keep two hours.
+    public var monthlyVoiceHours: Int { self == .preview ? 10 : 2 }
+
     /// Reads the variant from the bundle: the explicit Info.plist key first,
     /// then the bundle id, then development.
     public static func current(bundle: Bundle = .main) -> AppVariant {

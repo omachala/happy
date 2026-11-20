@@ -1,5 +1,6 @@
 package com.slopus.happy.ui.start
 
+import com.slopus.happy.ui.connection.LocalCloudConnect
 import androidx.activity.compose.ReportDrawn
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
@@ -18,24 +19,20 @@ import kotlinx.serialization.Serializable
 @Serializable data object InstallDesktopRoute
 
 /**
- * The first screen with its flows: Start opens [InstallDesktopRoute], and
- * "Enter link manually" asks for the link through the app's Add flow
- * ([add]). The ⋮ menu also restores a legacy account and picks the legacy
- * server.
+ * The first screen: Start opens [InstallDesktopRoute], and Use Happy Cloud
+ * opens Happy Cloud's welcome where the build offers it. The other ways in
+ * are the next screen's ⋮.
  */
 @Composable
+@Suppress("UNUSED_PARAMETER")
 fun Start(graph: AppGraph, nav: NavHostController, add: ConnectFlow) {
-    val customServerLabel = rememberCustomServerLabel(graph)
     // Nothing to read from disk: the first frame is the whole screen.
     ReportDrawn()
 
     StartScreen(
         connecting = add.isLoading,
-        customServerLabel = customServerLabel,
         onStart = { nav.navigate(InstallDesktopRoute) },
-        onEnterLink = { add.enteringLink = true },
-        onRestore = { nav.navigate(RestoreRoute) },
-        onServer = { nav.navigate(ServerRoute) },
+        onCloud = LocalCloudConnect.current,
     )
 }
 

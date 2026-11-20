@@ -9,7 +9,13 @@ public actor BrowserProxy {
     public enum Scope: Sendable {
         case artifact(id: String, version: Int, authority: BrowserPolicy.Authority, workspaceID: String?)
         case workspace(id: String)
-        case liveArtifact(id: String, workspaceID: String, authority: BrowserPolicy.Authority)
+        /// A page opened from an agent's chat: the network its commands
+        /// run in, read again when the computer stops serving it.
+        case agent(BrowserAgentNetwork)
+        /// A live artifact's page at its URL: every tunnel goes through the
+        /// artifact's own proxy, whose daemon decides what it may reach.
+        /// No data bridge: its `/api/*` is the site's own.
+        case liveArtifact(id: String)
         /// A vault's artifact entry: its own files and nothing else, no
         /// data bridge and no network beyond them.
         case vaultArtifact(surfaceId: String, entryId: String, version: Int, authority: BrowserPolicy.Authority)
@@ -114,54 +120,48 @@ public actor BrowserProxy {
                 let request = try await BrowserRelay.head(local)
                 try BrowserPolicy.checkArtifactOrigin(request.0, authority: authority)
                 try await artifact(local, client: client, upstream: upstream, files: .vault(surfaceId: surfaceId, entryId: entryId, version: version), initial: request)
-            case .workspace(let id):
-                let remote = try await client.browserTunnel(workspaceID: id, target: authority)
-                do {
-                    try await local.write(Data("HTTP/1.1 200 Connection Established\r\n\r\n".utf8))
-                    opaqueTunnel = true
-                    if !rest.isEmpty { try await remote.write(rest) }
-                    try await BrowserRelay.duplex(local, remote)
-                } catch { await remote.close(); throw error }
-            case .liveArtifact(let artifactID, let workspaceID, let allowed) where allowed == authority:
-                try await local.write(Data("HTTP/1.1 200 Connection Established\r\n\r\n".utf8))
-                guard rest.isEmpty else { throw BrowserError.malformed }
-                let request = try await BrowserRelay.head(local)
-                let target = request.0.line.split(separator: " ").dropFirst().first ?? ""
-                if target.hasPrefix("/api/") {
-                    try BrowserPolicy.checkArtifactOrigin(request.0, authority: authority)
-                    try await artifact(local, client: client, upstream: upstream, files: .artifact(id: artifactID, version: 1), initial: request)
-                } else {
-                    var head = request.0
-                    head.fields.removeAll { ["connection", "proxy-authorization", "proxy-connection", "x-happy-proxy-route"].contains($0.0.lowercased()) }
-                    // Each HTTP connection is classified once. Closing ordinary
-                    // responses prevents a later /api request bypassing the gate.
-                    head.fields.append(("Connection", head.value("upgrade") == nil ? "close" : "Upgrade"))
-                    let remote = try await client.browserTunnel(workspaceID: workspaceID, target: authority)
-                    do {
-                        try await remote.write(head.data)
-                        if !request.1.isEmpty { try await remote.write(request.1) }
-                        opaqueTunnel = true
-                        try await BrowserRelay.duplex(local, remote)
-                    } catch { await remote.close(); throw error }
-                }
             default:
-                let workspaceID: String
+                var network: BrowserNetwork
                 switch scope {
                 case .artifact(_, _, _, let workspace):
                     guard let workspace else { throw BrowserError.unavailable }
-                    workspaceID = workspace
-                case .liveArtifact(_, let workspace, _): workspaceID = workspace
-                case .workspace(let workspace): workspaceID = workspace
+                    network = .workspace(workspace)
+                case .liveArtifact(let id): network = .artifact(id)
+                case .workspace(let workspace): network = .workspace(workspace)
+                case .agent(let agent): network = try await agent.current()
                 case .vaultArtifact: throw BrowserError.unavailable
                 }
                 // Even public CDNs, redirects and WebSockets are resolved and
-                // connected by the computer. There is no phone-network fallback.
-                let remote = try await client.browserTunnel(workspaceID: workspaceID, target: authority)
+                // connected by the computer, unless the network carries only
+                // its loopback (`BrowserDestinations`): then the phone dials
+                // the rest. A loopback alias is the computer's own loopback.
+                let loopback = BrowserPolicy.Loopback.target(authority)
+                let agent: BrowserAgentNetwork? = if case .agent(let agent) = scope, case .network = network { agent } else { nil }
+                let remote: any BrowserStream
+                if let agent, try await !agent.tunnels(authority) { remote = try await BrowserDirect.open(authority) }
+                else {
+                    do { remote = try await client.browserTunnel(network, target: loopback ?? authority) }
+                    catch BrowserError.upstream(404) where agent != nil {
+                        // The computer no longer serves that network: the agent's is read again, once.
+                        guard let agent else { throw BrowserError.upstream(404) }
+                        await agent.forget(network)
+                        network = try await agent.current()
+                        remote = try await client.browserTunnel(network, target: loopback ?? authority)
+                    } catch BrowserError.outsideNetwork where agent != nil {
+                        // A network that carries only its loopback though its lookup didn't say.
+                        guard let agent, await agent.refused(authority) else { throw BrowserError.outsideNetwork }
+                        remote = try await BrowserDirect.open(authority)
+                    }
+                }
                 do {
                     try await local.write(Data("HTTP/1.1 200 Connection Established\r\n\r\n".utf8))
                     opaqueTunnel = true
-                    if !rest.isEmpty { try await remote.write(rest) }
-                    try await BrowserRelay.duplex(local, remote)
+                    if let loopback {
+                        try await BrowserRelay.loopback(local, remote, initial: rest, alias: authority.host, host: loopback.literal)
+                    } else {
+                        if !rest.isEmpty { try await remote.write(rest) }
+                        try await BrowserRelay.duplex(local, remote)
+                    }
                 } catch { await remote.close(); throw error }
             }
         } catch {
@@ -173,6 +173,9 @@ public actor BrowserProxy {
                 if case BrowserProxyFailure.responseStarted = error {} else if !opaqueTunnel {
                     if let target { refusals.record(BrowserProxyRefusal(status: failure.status, code: failure.code), for: target) }
                     try? await local.write(failure.data)
+                } else if error as? BrowserError == .computeGone, let target {
+                    // An open tunnel (a dev server's socket) closed for the compute: told, never answered.
+                    refusals.record(BrowserProxyRefusal(status: failure.status, code: failure.code), for: target)
                 }
             }
             throw error
@@ -270,6 +273,86 @@ public actor BrowserProxy {
     private nonisolated static func writeResponse(_ bytes: Data, to local: any BrowserStream) async throws {
         do { try await local.write(bytes) }
         catch { throw BrowserProxyFailure.responseStarted(error) }
+    }
+}
+
+/// A destination the phone dials itself, for a network that carries only
+/// its computer's loopback (`BrowserDestinations.loopback`): plain TCP,
+/// whatever the page speaks over it (TLS stays the page's own).
+enum BrowserDirect {
+    static func open(_ authority: BrowserPolicy.Authority, timeout: Duration = .seconds(20)) async throws -> any BrowserStream {
+        guard let port = NWEndpoint.Port(rawValue: authority.port) else { throw BrowserError.forbidden }
+        let host = NWEndpoint.Host(authority.host)
+        if isPhone(host) { throw BrowserError.forbidden }
+        let connection = NWConnection(host: host, port: port, using: .tcp)
+        let opened = Opening()
+        connection.stateUpdateHandler = { state in
+            switch state {
+            case .ready: opened.finish(nil)
+            case .failed(let error), .waiting(let error): opened.finish(error)
+            case .cancelled: opened.finish(CancellationError())
+            default: break
+            }
+        }
+        connection.start(queue: DispatchQueue(label: "happy.browser.direct"))
+        do {
+            try await withThrowingTaskGroup(of: Void.self) { group in
+                group.addTask { try await opened.wait() }
+                group.addTask { try await Task.sleep(for: timeout); throw BrowserError.timeout }
+                defer { group.cancelAll() }
+                try await group.next()
+            }
+        } catch {
+            connection.cancel()
+            // The phone's own network couldn't reach it: as a server that isn't answering.
+            if error is CancellationError || error as? BrowserError == .timeout { throw error }
+            throw BrowserError.upstream(502)
+        }
+        connection.stateUpdateHandler = nil
+        // A name that resolved to the phone itself.
+        if case .hostPort(let remote, _)? = connection.currentPath?.remoteEndpoint, isPhone(remote) {
+            connection.cancel()
+            throw BrowserError.forbidden
+        }
+        return NetworkBrowserStream(connection)
+    }
+
+    /// The phone's own machine (its loopback, `0.0.0.0`): never a page's, whose loopback is the computer's.
+    static func isPhone(_ host: NWEndpoint.Host) -> Bool {
+        func own(_ address: IPv4Address) -> Bool { address.isLoopback || address == .any }
+        switch host {
+        case .ipv4(let address): return own(address)
+        case .ipv6(let address): return address.isLoopback || address == .any || address.asIPv4.map(own) == true
+        default: return false
+        }
+    }
+
+    private final class Opening: @unchecked Sendable {
+        private let lock = NSLock()
+        private var result: Result<Void, any Error>?
+        private var waiter: CheckedContinuation<Void, any Error>?
+
+        func finish(_ error: (any Error)?) {
+            let waiter: CheckedContinuation<Void, any Error>? = lock.withLock {
+                guard result == nil else { return nil }
+                result = error.map { .failure($0) } ?? .success(())
+                defer { self.waiter = nil }
+                return self.waiter
+            }
+            waiter?.resume(with: error.map { .failure($0) } ?? .success(()))
+        }
+
+        func wait() async throws {
+            try await withTaskCancellationHandler {
+                try await withCheckedThrowingContinuation { continuation in
+                    let done: Result<Void, any Error>? = lock.withLock {
+                        if result == nil { waiter = continuation }
+                        return result
+                    }
+                    if let done { continuation.resume(with: done) }
+                }
+            } onCancel: { finish(CancellationError()) }
+        }
     }
 }
 

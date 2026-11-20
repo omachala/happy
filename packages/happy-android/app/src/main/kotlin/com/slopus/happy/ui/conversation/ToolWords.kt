@@ -5,6 +5,7 @@ import androidx.compose.runtime.Immutable
 import com.slopus.happy.R
 import com.slopus.happy.conversation.ConversationRow
 import com.slopus.happy.conversation.Presentation
+import com.slopus.happy.conversation.Question
 import com.slopus.happy.conversation.ToolHint
 import com.slopus.happy.conversation.ToolUse
 import com.slopus.happy.model.compactCount
@@ -22,7 +23,8 @@ sealed interface ToolGlyph {
  * A tool call's words and mark as desktop's single-line row reads them
  * (AgentActivityRow.tsx `AgentToolActivity`, `toolVerb`, `toolGlyph`; iOS
  * ChatTurnPlans.swift `ToolWords`): "Read README.md", "Edited x.ts +3 −1",
- * "Shell ls -la", in the present tense while it runs.
+ * "Shell ls -la", in the present tense while it runs. A builtin summary is already
+ * a complete label and takes the line without an extra verb; rich details stay unchanged.
  */
 @Immutable
 data class ToolWords(
@@ -40,6 +42,14 @@ data class ToolWords(
             val lower = name.lowercase()
             val p = tool.presentation
             val glyph = glyph(name, p, tool.failed)
+            tool.summary?.takeIf { !name.startsWith("mcp_") }?.let { summary ->
+                val diff = p as? Presentation.FileDiff
+                return ToolWords(
+                    verb = "", subject = summary, mono = false, glyph = glyph,
+                    added = diff?.files?.sumOf { it.added ?: 0 }?.takeIf { it > 0 },
+                    deleted = diff?.files?.sumOf { it.deleted ?: 0 }?.takeIf { it > 0 },
+                )
+            }
             // A skill the agent reads is named: "Read skill: release-notes".
             if (p == null && tool.skill != null) {
                 return ToolWords(res.getString(if (tool.running) R.string.turn_reading_skill else R.string.turn_read_skill), tool.skill, false, glyph)
@@ -151,6 +161,40 @@ data class ToolWords(
             return say(R.string.turn_tool, R.string.turn_used)
         }
 
+        /**
+         * `agentActivityKindName`: the kind of step a call was, in the word its
+         * line leads with once done ("Read", "Edit", "Bash"), else its own name;
+         * how it ended is left out, so a failed read is still a read. A tool
+         * section's summary counts its calls by it.
+         */
+        fun kind(tool: ToolUse, res: Resources): String {
+            val name = tool.name
+            val lower = name.lowercase()
+            val p = tool.presentation
+            if (name == Question.TOOL_NAME) return res.getString(R.string.turn_kind_ask)
+            when (p) {
+                is Presentation.Search -> return res.getString(R.string.turn_kind_search)
+                is Presentation.Exploration -> return res.getString(R.string.turn_kind_explore)
+                else -> Unit
+            }
+            if (p is Presentation.Artifact || matches("^(create_artifact|edit_artifact_files|update_artifact)$", lower)) {
+                return res.getString(
+                    when (lower) {
+                        "edit_artifact_files" -> R.string.turn_kind_open
+                        "create_artifact" -> R.string.turn_kind_create
+                        else -> R.string.turn_kind_update
+                    },
+                )
+            }
+            if (p is Presentation.Terminal || matches("stdin|terminal_?input|taskinput", lower)) return res.getString(R.string.turn_kind_type)
+            if (lower == "wait_agent") return res.getString(R.string.turn_kind_wait)
+            if (p is Presentation.Command || matches("(bash|exec|shell|command|run)", lower)) return verb(name, "completed", p, res)
+            if (matches("(grep|find|glob|^ls$|list|search)", lower)) return res.getString(R.string.turn_kind_explore)
+            if (matches("(read|view|cat|open)", lower)) return res.getString(R.string.turn_kind_read)
+            if (matches("(write|edit|patch|update|apply)", lower)) return res.getString(R.string.turn_kind_edit)
+            return humanize(name, res)
+        }
+
         /** `toolGlyph`. */
         fun glyph(name: String, presentation: Presentation?, failed: Boolean): ToolGlyph {
             if (failed) return ToolGlyph.Oct(Octicon.Alert)
@@ -197,8 +241,8 @@ data class ToolWords(
         )
 
         private fun mcp(name: String): String? {
-            val parts = name.split("__")
-            return if (parts.size >= 3) "${parts[1]} · ${parts.drop(2).joinToString(" ")}" else null
+            val parts = name.removePrefix("mcp__").split("__", limit = 2)
+            return if (parts.size == 2) "${parts[0]} · ${parts[1]}" else null
         }
 
         /** `humanizeToolName`: its own name where it has one, else its words spaced and capitalised. */

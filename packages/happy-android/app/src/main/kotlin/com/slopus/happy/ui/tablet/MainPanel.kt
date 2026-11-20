@@ -1,5 +1,14 @@
 package com.slopus.happy.ui.tablet
 
+import com.slopus.happy.ui.call.voiceTouch
+import com.slopus.happy.ui.call.rememberVoiceTouchSource
+import com.slopus.happy.call.CallControl
+import androidx.compose.ui.graphics.Shape
+import androidx.compose.foundation.shape.GenericShape
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.material3.ripple
+import androidx.compose.foundation.indication
 import com.slopus.happy.ui.backStackEntries
 
 import androidx.compose.foundation.background
@@ -42,6 +51,7 @@ import com.slopus.happy.ui.artifacts.AgentArtifactsRoute
 import com.slopus.happy.ui.feed.AgentFeedRoute
 import com.slopus.happy.ui.chat.COMPOSE_STARTED
 import com.slopus.happy.ui.chat.SessionRoute
+import com.slopus.happy.ui.chat.shownSessionId
 import com.slopus.happy.ui.chat.isComposeChatId
 import com.slopus.happy.ui.components.MaterialSymbols
 import com.slopus.happy.ui.components.SceneAnimation
@@ -182,6 +192,8 @@ val LocalMainPanel = compositionLocalOf<MainPanel?> { null }
 object MainPanelKey {
     const val SETTINGS = "settings"
     const val ARTIFACTS = "artifacts"
+    const val PLUGINS = "plugins"
+    const val PIPELINES = "pipelines"
     const val FEED = "feed"
     const val TODOS = "todos"
     const val NEW_SESSION = "newSession"
@@ -199,13 +211,15 @@ object MainPanelKey {
     fun of(entry: NavBackStackEntry): String? {
         val destination = entry.destination
         return when {
-            // A compose chat is the session its first send started, and nothing before.
-            destination.hasRoute<SessionRoute>() -> entry.toRoute<SessionRoute>().id
+            // A compose chat is the session its first send started, and nothing before; a tab picked in place, that tab.
+            destination.hasRoute<SessionRoute>() -> entry.shownSessionId()
                 .let { if (isComposeChatId(it)) entry.savedStateHandle.get<String>(COMPOSE_STARTED) else it }
                 ?.let(::session)
             destination.hasRoute<ConversationRoute>() -> entry.toRoute<ConversationRoute>().agentId?.let(::conversation)
             destination.hasRoute<SurfaceRoute>() -> surface(entry.toRoute<SurfaceRoute>().surfaceId)
             destination.hasRoute<AgentArtifactsRoute>() -> ARTIFACTS
+            destination.hasRoute<com.slopus.happy.ui.plugins.PluginsRoute>() -> PLUGINS
+            destination.hasRoute<com.slopus.happy.ui.pipelines.PipelinesRoute>() -> PIPELINES
             destination.hasRoute<AgentFeedRoute>() -> FEED
             destination.hasRoute<com.slopus.happy.ui.todos.TodoListsRoute>() -> TODOS
             destination.hasRoute<SettingsRoute>() -> SETTINGS
@@ -234,7 +248,16 @@ fun rememberMainPanelRoot(): Boolean {
  */
 @Composable
 fun BackOrSidebarToggle(tint: Color = LocalContentColor.current, back: @Composable () -> Unit) {
-    if (rememberMainPanelRoot()) SidebarToggle(tint) else back()
+    if (rememberMainPanelRoot()) return SidebarToggle(tint)
+    // The call's back, pressed as a finger would ([VoiceTouch]): lit and rippled as the icon button's own state layer.
+    val source = rememberVoiceTouchSource()
+    Box(Modifier.voiceTouch(CallControl.Back, IconButtonStateLayer, source).indication(source, ripple(bounded = false, radius = 20.dp))) { back() }
+}
+
+/** An icon button's state layer, the 40 circle in the middle of its 48 target. */
+private val IconButtonStateLayer: Shape = GenericShape { size, _ ->
+    val radius = minOf(size.width, size.height) * 20f / 48f
+    addOval(Rect(Offset(size.width / 2, size.height / 2), radius))
 }
 
 /** The sidebar's button, as iPadOS names it: Hide Sidebar, or Show Sidebar while it is hidden. A 48 target, its 24 glyph [tint]. */

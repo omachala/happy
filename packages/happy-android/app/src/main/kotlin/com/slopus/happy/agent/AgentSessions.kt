@@ -6,7 +6,8 @@ import com.slopus.happy.connection.agentTransport
 import com.slopus.happy.connection.Transport
 import com.slopus.happy.connection.AgentIdentity
 import com.slopus.happy.connection.AgentConnectionException
-import com.slopus.happy.connection.returns
+import com.slopus.happy.connection.NetworkChange
+import com.slopus.happy.connection.changes
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -15,6 +16,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.collectLatest
@@ -27,8 +29,8 @@ import java.io.File
  * Every agent connection's [AgentSession], made on first use and kept while
  * the connection is on the phone. A session's live link runs only while
  * its connection is the open account and the app is in the foreground;
- * otherwise it stays with its cached catalog. Removing a connection closes
- * its session and deletes its cache.
+ * otherwise it stays with its cached catalog. Removing a connection, or
+ * its team server's session ending, closes its session and deletes its cache.
  */
 class AgentSessions(
     private val connections: AgentConnections,
@@ -38,22 +40,38 @@ class AgentSessions(
     /** The open agent connection's id ([com.slopus.happy.AppGraph.openAgentId]). */
     private val openId: StateFlow<String?>,
     private val foreground: StateFlow<Boolean>,
-    /** Whether the phone has a way out at all ([com.slopus.happy.connection.networkPath]). */
-    private val network: Flow<Boolean> = flowOf(true),
+    /** The phone's default network ([com.slopus.happy.connection.defaultNetwork]). */
+    private val network: Flow<Long?> = flowOf(0L),
     private val identityRefreshMillis: Long = 60_000,
     /** Desktop's completion chime, for a conversation that finished while its connection is open ([CompletionWatch]). */
     private val chime: () -> Unit = {},
+    /**
+     * Files read through any connection and staged for another app to open
+     * or share ([com.slopus.happy.conversation.MediaFiles.DIRECTORY]), not
+     * kept per connection: emptied when a team server's session ends, as
+     * they are made again on the next open.
+     */
+    private val stagedFiles: File? = null,
+    private val clock: () -> Long = { System.nanoTime() / 1_000_000 },
+    /** Appearance's Group tool calls, which every connection's chats follow. */
+    private val toolCallsGrouped: StateFlow<Boolean> = MutableStateFlow(false),
     private val makeTransport: (AgentConnectionCredentials) -> Transport = { agentTransport(it.address, it.port, it.publicUrl, it.tailcatAvailable != false) },
 ) {
     private val sessions = HashMap<String, AgentSession>()
+    @Volatile private var openChat: Pair<String, String>? = null
+
+    fun setOpenChat(connectionId: String?, agentId: String?) {
+        openChat = if (connectionId != null && agentId != null) connectionId to agentId else null
+        if (connectionId != null && agentId != null) synchronized(sessions) { sessions[connectionId] }?.hintOpenChat(agentId)
+    }
 
     init {
-        // Discovery belongs to every paired account, not only the open
-        // session. These identity-only jobs never open a catalog or SSE and
+        // Discovery covers the other paired accounts; the open session uses
+        // its bootstrap identity. These jobs never open a catalog or SSE and
         // their transient failures cannot cancel the selected session.
         scope.launch {
-            combine(connections.accounts, foreground) { accounts, front ->
-                if (front) accounts.filterNot { it.revoked }.map { it.id }.toSet() else emptySet()
+            combine(connections.accounts, foreground, openId) { accounts, front, open ->
+                if (front) accounts.filterNot { it.revoked || it.id == open }.map { it.id }.toSet() else emptySet()
             }.distinctUntilChanged().collectLatest { ids ->
                 coroutineScope {
                     ids.forEach { id -> launch { refreshIdentity(id) } }
@@ -61,23 +79,37 @@ class AgentSessions(
             }
         }
         scope.launch {
-            // Back from airplane mode: a link waiting out its backoff tries now (iOS's Session `networkWatch`).
-            network.returns().collect { synchronized(sessions) { sessions.values.toList() }.forEach { it.networkReturned() } }
+            // Back from airplane mode: a link waiting out its backoff tries now; off Wi-Fi onto
+            // cellular: a live stream is opened again (iOS's Session `networkWatch`).
+            network.changes().collect { change ->
+                synchronized(sessions) { sessions.values.toList() }.forEach {
+                    when (change) {
+                        NetworkChange.Returned -> it.networkReturned()
+                        NetworkChange.Moved -> it.networkMoved()
+                    }
+                }
+            }
         }
         scope.launch {
             var known: Set<String>? = null
+            var endedBefore = emptySet<String>()
             connections.accounts.collect { list ->
                 val ids = list.map { it.id }.toSet()
-                val gone = synchronized(sessions) { sessions.keys.filter { it !in ids }.map { sessions.remove(it)!! } }
+                // A team server whose session ended keeps its entry, for its Sign in, and nothing else: its session and caches go too.
+                val ended = list.filter { it.sessionEnded }.map { it.id }.toSet()
+                val gone = synchronized(sessions) { sessions.keys.filter { it !in ids || it in ended }.map { sessions.remove(it)!! } }
                 gone.forEach { it.close() }
-                // Every connection that went, open or not (another member's replaced, one forgotten), and at the
-                // start whatever a connection gone while the app wasn't running left behind.
-                val wiped = known?.let { it - ids }.orEmpty() + gone.map { it.connectionId }
+                // Every connection that went, open or not (another member's replaced, one forgotten), every ended session,
+                // and at the start whatever a connection gone while the app wasn't running left behind.
+                val wiped = known?.let { it - ids }.orEmpty() + gone.map { it.connectionId } + ended
+                val newlyEnded = ended - endedBefore
                 withContext(Dispatchers.IO) {
                     wiped.forEach(::deleteCache)
                     if (known == null) sweep(ids)
+                    if (newlyEnded.isNotEmpty()) stagedFiles?.deleteRecursively()
                 }
                 known = ids
+                endedBefore = ended
             }
         }
     }
@@ -124,9 +156,19 @@ class AgentSessions(
         }
     }
 
-    /** The session for [connectionId]; null when no such connection is on the phone. */
+    /**
+     * The app went to the background (one of its activities is no longer
+     * started): every session kept resumes its tunnels when it next runs.
+     * Told at once, by whoever sets [foreground], so a quick return can't
+     * outrun it.
+     */
+    fun backgrounded() {
+        synchronized(sessions) { sessions.values.toList() }.forEach { it.backgrounded() }
+    }
+
+    /** The session for [connectionId]; null when no such connection is on the phone, or its team server's session ended. */
     fun session(connectionId: String): AgentSession? {
-        if (connections.accounts.value.none { it.id == connectionId }) return null
+        if (connections.accounts.value.none { it.id == connectionId && !it.sessionEnded }) return null
         return synchronized(sessions) {
             sessions.getOrPut(connectionId) {
                 AgentSession(
@@ -137,6 +179,10 @@ class AgentSessions(
                     parent = scope,
                     makeTransport = makeTransport,
                     chime = chime,
+                    openChat = { openChat?.takeIf { it.first == connectionId }?.second },
+                    clock = clock,
+                    initiallyActive = openId.value == connectionId && foreground.value && connections.accounts.value.none { it.id == connectionId && it.signInRequired },
+                    toolCallsGrouped = toolCallsGrouped,
                 )
             }
         }
@@ -156,6 +202,9 @@ class AgentSessions(
             if (f.name.substringBefore('.') !in keep) f.deleteRecursively()
         }
     }
+
+    /** A file another feature keeps for [connectionId] beside its catalog (`call-history.json`): deleted with it. */
+    fun keptFile(connectionId: String, name: String): File? = cacheFile(connectionId)?.let { File(it.parentFile, "${it.nameWithoutExtension}.$name") }
 
     private fun cacheFile(connectionId: String): File? =
         cacheDir?.let { File(it, "${connectionId.filter { c -> c.isLetterOrDigit() || c == '-' }}.json") }

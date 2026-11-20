@@ -6,6 +6,9 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.slopus.happy.agent.AgentApiException
 import com.slopus.happy.agent.AgentClient
 import com.slopus.happy.agent.AgentSessions
+import com.slopus.happy.analytics.AnalyticsEvent
+import com.slopus.happy.analytics.SignInError
+import com.slopus.happy.analytics.SignInMethod
 import com.slopus.happy.auth.ExpoSecureStore
 import com.slopus.happy.auth.SecureStoreKeys
 import com.slopus.happy.testing.SoftwareKeys
@@ -79,6 +82,8 @@ class TeamServerTest {
         var edge: TransportResponse? = null
         /** Tokens of a member without a profile: everything but health, profile and discovery is a 401. */
         val noProfile = mutableSetOf<String>()
+        /** Tokens of a member without a profile on a cluster after 7333447: a 403 `profile_required` instead of the 401. */
+        val noProfile403 = mutableSetOf<String>()
         val calls = mutableListOf<Pair<String, String>>()
         /** Set: every request waits on it, after saying so in [held]. */
         @Volatile var hold: CompletableDeferred<Unit>? = null
@@ -98,6 +103,7 @@ class TeamServerTest {
             }
             if (credential !in valid) return happy(401, "unauthorized")
             if (credential in noProfile && path !in setOf("/v0/health", "/v0/profile")) return happy(401, "unauthorized")
+            if (credential in noProfile403 && path !in setOf("/v0/health", "/v0/profile")) return happy(403, "profile_required")
             return when (path) {
                 "/v0/health" -> TransportResponse(200, mapOf("content-type" to "application/json"), """{"healthy":true,"ready":true,"version":{"protocol":33,"daemon":"1"},"capabilities":{"webSocketTunnels":true}}""".toByteArray())
                 // A member may not read the node's configuration.
@@ -130,9 +136,10 @@ class TeamServerTest {
         return connections.addServer(origin, credential, AccessToken("access-1", now + expiresIn), fallbackName = "happy.acme.example")
     }
 
-    private fun client(connections: AgentConnections, id: String) = AgentClient.lazy {
+    /** [id]'s client; with [tellsAccount], its refusals sign the account out as a session's do. */
+    private fun client(connections: AgentConnections, id: String, tellsAccount: Boolean = false) = AgentClient.lazy {
         val credentials = connections.credentials(id)!!
-        AgentClient.Link(daemon, connections.bearer(id, credentials), renew = { stale -> connections.renew(id, stale) })
+        AgentClient.Link(daemon, connections.bearer(id, credentials), renew = { stale -> connections.renew(id, stale) }, signedOut = if (tellsAccount) { profile -> connections.signedOut(id, profile) } else null)
     }
 
     @Test
@@ -197,6 +204,26 @@ class TeamServerTest {
         // Asked, not refreshed.
         assertEquals(0, sso.requestCount)
         assertEquals("access-1", daemon.calls.last { it.first == "/v0/authentication" }.second)
+    }
+
+    @Test
+    fun theDaemons403ProfileRequiredIsTheProfileGate() = runBlocking {
+        val connections = connections()
+        val account = signedIn(connections)
+        daemon.noProfile403 += "access-1"
+        val client = client(connections, account.id, tellsAccount = true)
+        try { client.send("GET", "/v0/projects"); fail() } catch (e: AgentConnectionException) { assertEquals(AgentConnectionException.Reason.ProfileRequired, e.reason) }
+        // No refresh and no sign-in: a name is owed, and the credentials stay.
+        assertEquals(0, sso.requestCount)
+        val owed = connections.accounts.value.single()
+        assertTrue(owed.signInRequired && owed.profileRequired)
+        assertFalse(owed.sessionEnded)
+        assertTrue(connections.credentials(account.id) != null)
+        // The node's name and picture, read the same way, say so too.
+        try { AgentIdentity.refresh(client.requester, "x", oauth = true); fail() } catch (e: AgentConnectionException) { assertEquals(AgentConnectionException.Reason.ProfileRequired, e.reason) }
+        // Any other 403 of the daemon's stays an ordinary refusal.
+        daemon.noProfile403.clear()
+        try { client.send("GET", "/v0/forbidden"); fail() } catch (e: AgentApiException) { assertEquals("forbidden", e.code) }
     }
 
     @Test
@@ -266,6 +293,88 @@ class TeamServerTest {
         dir.deleteRecursively()
     }
 
+    /** At launch, the sessions picked (Happy Cloud's from an earlier build, C9) end as a refused refresh's would; the rest stand. */
+    @Test
+    fun theSessionsALaunchPicksEndAndNoOthers(): Unit = runBlocking {
+        val connections = connections()
+        val beta = AgentOrigin.parse("https://beta.acme.example")
+        val old = connections.addServer(origin, member("u-a", "refresh-old"), AccessToken("access-a", now + 300_000), fallbackName = "happy.acme.example")
+        val kept = connections.addServer(beta, OAuthCredential("jwt", "happy", "https://api.acme.example/token", "refresh-new", "https://beta.acme.example/", userId = "u-b"), AccessToken("access-b", now + 300_000), fallbackName = "beta.acme.example")
+        connections.endSessions { connection, credential -> connection.server == origin.value && credential.refreshUrl != "https://api.acme.example/token" }
+        assertTrue(connections.accounts.value.single { it.id == old.id }.sessionEnded)
+        assertEquals(null, connections.credentials(old.id))
+        assertFalse(connections.accounts.value.single { it.id == kept.id }.signInRequired)
+        assertEquals("refresh-new", connections.credentials(kept.id)?.oauth?.refreshToken)
+        // Nothing was asked of any token endpoint.
+        assertEquals(0, sso.requestCount)
+    }
+
+    @Test
+    fun aSessionEndingLeavesOnlyItsSignInAndNothingOfItsServer(): Unit = runBlocking {
+        val connections = connections()
+        daemon.valid += setOf("access-a", "access-b")
+        val a = connections.addServer(origin, member("u-a", "refresh-a"), AccessToken("access-a", now + 300_000), fallbackName = "happy.acme.example")
+        val other = AgentOrigin.parse("https://happy.other.example")
+        val b = connections.addServer(other, member("u-b", "refresh-b"), AccessToken("access-b", now + 300_000), fallbackName = "happy.other.example")
+        val dir = kotlin.io.path.createTempDirectory("agent-connections").toFile()
+        val staged = kotlin.io.path.createTempDirectory("conversation-media").toFile()
+        // A's catalog, a kept conversation, its outbox and its downloaded files; B's catalog and outbox.
+        val aFiles = listOf("${a.id}.json", "${a.id}.chats.json", "${a.id}.intents.json").map { File(dir, it).apply { writeText("{}") } } +
+            File(dir, "${a.id}.media").apply { mkdirs(); File(this, "photo.jpg").writeText("x") }
+        val bFiles = listOf("${b.id}.json", "${b.id}.intents.json").map { File(dir, it).apply { writeText("{}") } }
+        val opened = File(staged, "vault-1-1").apply { mkdirs(); File(this, "report.pdf").writeText("x") }
+        val sessions = AgentSessions(connections, scope, dir, stagedFiles = staged, openId = MutableStateFlow(a.id), foreground = MutableStateFlow(false), makeTransport = { daemon })
+        val session = sessions.session(a.id)!!
+        delay(200)
+        assertTrue(aFiles.all { it.exists() })
+
+        connections.signedOut(a.id)
+        withTimeout(5_000) { while (aFiles.any { it.exists() } || opened.exists()) delay(10) }
+        // A keeps its entry, for its Sign in, and nothing else: no credentials, no token, no session.
+        val ended = connections.accounts.value.single { it.id == a.id }
+        assertTrue(ended.sessionEnded)
+        assertEquals(null, connections.credentials(a.id))
+        assertEquals(null, sessions.session(a.id))
+        // B, another server, is untouched.
+        assertTrue(bFiles.all { it.exists() })
+        assertEquals("refresh-b", connections.credentials(b.id)?.oauth?.refreshToken)
+        assertFalse(connections.accounts.value.single { it.id == b.id }.signInRequired)
+        assertEquals("access-b", connections.bearer(b.id, connections.credentials(b.id)!!))
+
+        // Signed in again: a new session, from nothing.
+        connections.addServer(origin, member("u-a", "refresh-a2"), AccessToken("access-a", now + 300_000), fallbackName = "happy.acme.example", replacing = a.id)
+        assertFalse(connections.accounts.value.single { it.id == a.id }.sessionEnded)
+        assertTrue(sessions.session(a.id) !== session)
+        dir.deleteRecursively()
+        staged.deleteRecursively()
+    }
+
+    @Test
+    fun aNameOwedIsNotAnEndedSession(): Unit = runBlocking {
+        val connections = connections()
+        daemon.valid += setOf("access-a")
+        val a = connections.addServer(origin, member("u-a", "refresh-a"), AccessToken("access-a", now + 300_000), fallbackName = "happy.acme.example")
+        connections.signedOut(a.id, profileRequired = true)
+        val owed = connections.accounts.value.single()
+        assertTrue(owed.signInRequired && owed.profileRequired)
+        assertFalse(owed.sessionEnded)
+        assertEquals("refresh-a", connections.credentials(a.id)?.oauth?.refreshToken)
+        assertEquals("refresh-a", connections().credentials(a.id)?.oauth?.refreshToken)
+    }
+
+    @Test
+    fun aSessionEndedUnderAnOlderBuildHasItsCredentialsForgottenOnStart(): Unit = runBlocking {
+        val connections = connections()
+        daemon.valid += setOf("access-a")
+        val a = connections.addServer(origin, member("u-a", "refresh-a"), AccessToken("access-a", now + 300_000), fallbackName = "happy.acme.example")
+        // Signed out as builds before did: flagged, the credentials kept.
+        connections.update(a.id) { it.copy(signInRequired = true) }
+        assertEquals("refresh-a", connections.credentials(a.id)?.oauth?.refreshToken)
+        val started = connections()
+        assertTrue(started.accounts.value.single().sessionEnded)
+        assertEquals(null, started.credentials(a.id))
+    }
+
     @Test
     fun aRefreshOfAnOlderGrantIsDroppedWhenASignInLandsFirst(): Unit = runBlocking {
         val connections = connections()
@@ -320,7 +429,6 @@ class TeamServerTest {
         val dir = kotlin.io.path.createTempDirectory("agent-connections").toFile()
         val cache = File(dir, "${a.id}.json").apply { writeText("{}") }
         AgentSessions(connections, scope, dir, openId = MutableStateFlow(null), foreground = MutableStateFlow(false), makeTransport = { daemon })
-        connections.signedOut(a.id)
         daemon.hold = CompletableDeferred()
         val b = scope.async { connections.addServer(origin, member("u-b", "refresh-b"), AccessToken("access-b", now + 300_000), fallbackName = "happy.acme.example", replacing = a.id) }
         withTimeout(5_000) { daemon.held.await() }
@@ -456,9 +564,12 @@ class TeamServerTest {
         sso.enqueue(json("""{"authenticated":true,"userId":null,"methods":[]}"""))
         // The code's installation, checked before the name.
         sso.enqueue(health(INSTANCE))
+        // What the server suggests: the name to start from, and the email saved with it.
+        sso.enqueue(json("""{"profile":{"userId":null,"name":" Steve K ","email":"steve@acme.example"}}"""))
         daemon.valid += access1
         flow.callback("happy://oauth/callback?code=c1&state=$state")
-        withTimeout(5_000) { flow.state.first { it is ServerSignInState.NeedsName } }
+        val asking = withTimeout(5_000) { flow.state.first { it is ServerSignInState.NeedsName } } as ServerSignInState.NeedsName
+        assertEquals("Steve K", asking.suggested)
         // The access token expired while the name was typed: refreshed (rotating) once, and saved.
         sso.enqueue(json("""{"error":"Unauthorized","code":"unauthorized"}""", 401))
         sso.enqueue(json("""{"access_token":"$access2","token_type":"Bearer","expires_in":600,"refresh_token":"refresh-2"}"""))
@@ -474,7 +585,49 @@ class TeamServerTest {
         val requests = (0 until sso.requestCount).map { sso.takeRequest() }
         val patches = requests.filter { it.method == "PATCH" }
         assertEquals(listOf("Bearer $access1", "Bearer $access2"), patches.map { it.headers["Authorization"] })
+        assertEquals("""{"name":"Steve","email":"steve@acme.example"}""", patches.last().body?.utf8())
         assertEquals(listOf("Bearer $access1"), requests.filter { it.target == "/v0/health" }.map { it.headers["Authorization"] })
+    }
+
+    @Test
+    fun aSignInWithATokenFromElsewhereSkipsTheBrowser() = runBlocking {
+        val connections = connections()
+        val server = "https://localhost:${sso.port}"
+        val flow = ServerSignInFlow(scope, connections, auth)
+        val access = jwt(server, tag = "cloud-1")
+        sso.enqueue(json("""{"authenticated":true,"userId":"u-cloud","methods":[]}"""))
+        daemon.valid += access
+        flow.startWith(server) { origin ->
+            assertEquals(server, origin.value)
+            OAuthGrant(AccessToken(access, now + 600_000), "cloud-refresh") to
+                OAuthCredential("happy-accounts", "happy", "https://auth.example/token", "cloud-refresh", "$server/")
+        }
+        val done = withTimeout(5_000) { flow.state.first { it is ServerSignInState.Done || it is ServerSignInState.Failed } }
+        assertTrue(done.toString(), done is ServerSignInState.Done)
+        done as ServerSignInState.Done
+        assertEquals("u-cloud", done.account.userId)
+        val kept = connections.credentials(done.account.id)?.oauth
+        assertEquals("https://auth.example/token", kept?.refreshUrl)
+        assertEquals("cloud-refresh", kept?.refreshToken)
+        // Only the server's check: no discovery, no token endpoint.
+        assertEquals(listOf("GET /v0/authentication"), (0 until sso.requestCount).map { sso.takeRequest().let { r -> "${r.method} ${r.target}" } })
+    }
+
+    @Test
+    fun aTokenThatCannotBeHadFailsAndRetriesTheSameWay() = runBlocking {
+        val connections = connections()
+        val server = "https://localhost:${sso.port}"
+        val flow = ServerSignInFlow(scope, connections, auth)
+        var asked = 0
+        flow.startWith(server) {
+            asked++
+            throw ServerAuthException(ServerAuthException.Reason.Denied)
+        }
+        val failed = withTimeout(5_000) { flow.state.first { it is ServerSignInState.Failed } } as ServerSignInState.Failed
+        assertEquals(ServerAuthException.Reason.Denied, failed.reason)
+        flow.retry()
+        withTimeout(5_000) { while (asked < 2) delay(10) }
+        assertEquals(0, sso.requestCount)
     }
 
     private fun discovery(server: String) =
@@ -528,16 +681,108 @@ class TeamServerTest {
     }
 
     @Test
+    fun closingASignInRecordsHowItEndedOnce() = runBlocking {
+        val recorded = mutableListOf<AnalyticsEvent>()
+        val done = ServerSignInFlow(scope, connections(), auth, expectedInstance = INSTANCE, record = { recorded += it })
+        throughBrowser(done, "u1", health(INSTANCE))
+        withTimeout(5_000) { done.state.first { it is ServerSignInState.Done } }
+        done.close()
+        done.close()
+        val wrong = ServerSignInFlow(scope, connections(), auth, expectedInstance = INSTANCE, record = { recorded += it })
+        throughBrowser(wrong, "u1", health("z9y8x7w6v5u4t3s2r1q0p9o8"))
+        withTimeout(5_000) { wrong.state.first { it is ServerSignInState.Failed } }
+        wrong.close()
+        val left = ServerSignInFlow(scope, connections(), auth, record = { recorded += it })
+        left.close()
+        assertEquals(
+            listOf(
+                AnalyticsEvent.TeamServerSignedIn,
+                AnalyticsEvent.SignInFailed(SignInMethod.TeamServer, SignInError.WrongServer),
+                // Left: nothing.
+            ),
+            recorded,
+        )
+    }
+
+    @Test
     fun aNewMembersHealthBehindTheProfileGateIsCheckedAfterTheName() = runBlocking {
         val connections = connections()
         val flow = ServerSignInFlow(scope, connections, auth, expectedInstance = INSTANCE)
-        throughBrowser(flow, null, json("""{"error":"Unauthorized","code":"unauthorized"}""", 401))
+        throughBrowser(flow, null, json("""{"error":"Unauthorized","code":"unauthorized"}""", 401), json("""{"profile":{}}"""))
         withTimeout(5_000) { flow.state.first { it is ServerSignInState.NeedsName } }
         sso.enqueue(json("""{"profile":{}}"""))
         sso.enqueue(health("z9y8x7w6v5u4t3s2r1q0p9o8"))
         flow.submitName("Steve")
         val failed = withTimeout(5_000) { flow.state.first { it is ServerSignInState.Failed } } as ServerSignInState.Failed
         assertEquals(ServerAuthException.Reason.WrongServer, failed.reason)
+        assertEquals(emptyList<AgentConnection>(), connections.accounts.value)
+    }
+
+    @Test
+    fun aNewMembersPhotoGoesUpAfterTheirNameRefreshedOnce() = runBlocking {
+        val connections = connections()
+        val server = "https://localhost:${sso.port}"
+        val flow = ServerSignInFlow(scope, connections, auth)
+        // No name to suggest: the field starts empty, and no email is sent.
+        throughBrowser(flow, null, json("""{"profile":{"userId":null,"name":null,"email":null}}"""))
+        val asking = withTimeout(5_000) { flow.state.first { it is ServerSignInState.NeedsName } } as ServerSignInState.NeedsName
+        assertEquals(null, asking.suggested)
+        val jpeg = byteArrayOf(-1, -40, -1, 1, 2, 3)
+        flow.choosePhoto(jpeg)
+        assertTrue((flow.state.value as ServerSignInState.NeedsName).photo.contentEquals(jpeg))
+        val access2 = jwt(server, tag = "access-2")
+        sso.enqueue(json("""{"profile":{}}"""))
+        // The photo's token expired: refreshed once, and the photo sent again with the new one.
+        sso.enqueue(json("""{"error":"Unauthorized","code":"unauthorized"}""", 401))
+        sso.enqueue(json("""{"access_token":"$access2","token_type":"Bearer","expires_in":600,"refresh_token":"refresh-2"}"""))
+        sso.enqueue(json("""{"profile":{"photo":{"thumbhash":"abc"}}}"""))
+        sso.enqueue(json("""{"authenticated":true,"userId":"u1","methods":[]}"""))
+        daemon.valid += access2
+        flow.submitName("  Ada  ")
+        assertTrue((flow.state.value as ServerSignInState.NeedsName).saving)
+        val done = withTimeout(5_000) { flow.state.first { it is ServerSignInState.Done || it is ServerSignInState.Failed } }
+        assertTrue(done.toString(), done is ServerSignInState.Done && !done.photoFailed)
+        val requests = (0 until sso.requestCount).map { sso.takeRequest() }
+        val profile = requests.filter { it.target.startsWith("/v0/profile") && it.method != "GET" }
+        assertEquals(listOf("PATCH /v0/profile", "PUT /v0/profile/photo", "PUT /v0/profile/photo"), profile.map { "${it.method} ${it.target}" })
+        assertEquals("""{"name":"Ada"}""", profile[0].body?.utf8())
+        assertEquals("image/jpeg", profile[1].headers["Content-Type"])
+        assertTrue(profile[2].body?.toByteArray()?.contentEquals(jpeg) == true)
+        assertEquals("Bearer $access2", profile[2].headers["Authorization"])
+    }
+
+    @Test
+    fun aPhotoThatWontGoUpStillLands() = runBlocking {
+        val connections = connections()
+        val flow = ServerSignInFlow(scope, connections, auth)
+        throughBrowser(flow, null, json("""{"profile":{"name":"Ada"}}"""))
+        withTimeout(5_000) { flow.state.first { it is ServerSignInState.NeedsName } }
+        flow.choosePhoto(byteArrayOf(1, 2, 3))
+        sso.enqueue(json("""{"profile":{}}"""))
+        sso.enqueue(json("""{"error":"Too large","code":"payload_too_large"}""", 413))
+        sso.enqueue(json("""{"authenticated":true,"userId":"u1","methods":[]}"""))
+        flow.submitName("Ada")
+        val done = withTimeout(5_000) { flow.state.first { it is ServerSignInState.Done || it is ServerSignInState.Failed } }
+        assertTrue(done.toString(), done is ServerSignInState.Done && done.photoFailed)
+        assertEquals(1, connections.accounts.value.size)
+    }
+
+    @Test
+    fun aNameThatWontSaveKeepsThePhotoAndSendsNoPhoto() = runBlocking {
+        val connections = connections()
+        val flow = ServerSignInFlow(scope, connections, auth)
+        throughBrowser(flow, null, json("""{"profile":{"name":"Ada"}}"""))
+        withTimeout(5_000) { flow.state.first { it is ServerSignInState.NeedsName } }
+        val jpeg = byteArrayOf(1, 2, 3)
+        flow.choosePhoto(jpeg)
+        sso.enqueue(json("""{"error":"Bad","code":"invalid_request"}""", 400))
+        flow.submitName("Ada")
+        val failed = withTimeout(5_000) { flow.state.first { it is ServerSignInState.NeedsName && it.failed } } as ServerSignInState.NeedsName
+        assertTrue(failed.photo.contentEquals(jpeg))
+        assertEquals("Ada", failed.suggested)
+        assertFalse(failed.saving)
+        val requests = (0 until sso.requestCount).map { sso.takeRequest() }
+        assertEquals(0, requests.count { it.target == "/v0/profile/photo" })
         assertEquals(emptyList<AgentConnection>(), connections.accounts.value)
     }
 

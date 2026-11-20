@@ -14,6 +14,28 @@ public enum BrowserPolicy {
         return .web
     }
 
+    /// Where a link opens when `connected` says whether an agent
+    /// connection is there to open it through. Without one (a Happy
+    /// account's relay chats, whose legacy CLI has no proxy, or signed
+    /// out) the in-app browser can only fail, so a page goes to the
+    /// system's browser, as happy-app opened every link. A loopback page
+    /// stays: there it would be the phone's own, so it says there is no
+    /// connection instead.
+    public static func route(_ url: URL, connected: Bool) -> Route {
+        guard route(url) == .web, !connected else { return route(url) }
+        guard let authority = Authority(url: url) else { return .system }
+        return isPhoneOwn(authority) ? .web : .system
+    }
+
+    /// The phone's own machine as a link names it: its loopback or `0.0.0.0`.
+    private static func isPhoneOwn(_ authority: Authority) -> Bool {
+        var host = authority.host
+        if host.hasPrefix("::ffff:") { host.removeFirst(7) }
+        if ["localhost", "::1", "0.0.0.0", "::"].contains(host) || host.hasSuffix(".localhost") { return true }
+        let parts = host.split(separator: ".", omittingEmptySubsequences: false)
+        return parts.count == 4 && parts[0] == "127" && parts.allSatisfy { UInt8($0) != nil }
+    }
+
     /// Addresses WebKit resolves inside the page, with nothing to fetch:
     /// a blank or srcdoc frame, data and blob URLs, `javascript:` links.
     public static func isInPage(_ url: URL) -> Bool {
@@ -49,7 +71,47 @@ public enum BrowserPolicy {
                   normalized.utf8.allSatisfy({ (97...122).contains($0) || (48...57).contains($0) || "-._:".utf8.contains($0) }) else { return nil }
             self.host = normalized; self.port = port
         }
-        public var text: String { "\(host.contains(":") ? "[\(host)]" : host):\(port)" }
+        public var text: String { "\(literal):\(port)" }
+        /// The host as a URL or Host field writes it: IPv6 in brackets.
+        public var literal: String { host.contains(":") ? "[\(host)]" : host }
+    }
+
+    /// WebKit connects to the phone's own loopback directly, whatever the
+    /// proxy says, so a page there opens on an alias only the proxy knows,
+    /// and the proxy tunnels the alias to the computer's own loopback.
+    public enum Loopback {
+        private static let aliases = ["127.0.0.1": "ipv4", "::1": "ipv6", "localhost": "name"]
+        private static let suffix = ".happy-loopback.invalid"
+
+        /// `url` on its alias, if it names the loopback; nil for any other.
+        public static func alias(_ url: URL) -> URL? {
+            guard route(url) == .web, let host = url.host, let label = aliases[normalize(host)] else { return nil }
+            return replacingHost(url, with: label + suffix)
+        }
+
+        /// The computer's loopback an alias stands for, at the same port.
+        public static func target(_ authority: Authority) -> Authority? {
+            guard let host = original(authority.host) else { return nil }
+            return URL(string: "http://\(literal(host)):\(authority.port)").flatMap(Authority.init(url:))
+        }
+
+        /// The address as the link gave it, for a person to read or copy.
+        public static func shown(_ url: URL) -> URL {
+            guard let host = url.host.flatMap(original) else { return url }
+            return replacingHost(url, with: literal(host)) ?? url
+        }
+
+        private static func literal(_ host: String) -> String { host.contains(":") ? "[\(host)]" : host }
+
+        private static func original(_ host: String) -> String? {
+            aliases.first { $0.value + suffix == host.lowercased() }?.key
+        }
+
+        private static func replacingHost(_ url: URL, with host: String) -> URL? {
+            guard var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return nil }
+            components.percentEncodedHost = host
+            return components.url
+        }
     }
 
     /// Paths are checked before Foundation can normalize traversal away.
@@ -79,6 +141,14 @@ public enum BrowserPolicy {
             guard path != "/" else { throw BrowserError.forbidden }
             return "/v0/surfaces/vault/\(surfaceId)/files/\(entryId)/versions/\(version)/artifact\(target)"
         }
+    }
+
+    /// A `networkId` (happy-agent API.md): 1 to 128 lowercase letters and
+    /// digits, plus `-` and `_` after the first. Opaque: never parsed.
+    public static func validNetworkID(_ value: String) -> Bool {
+        let bytes = Array(value.utf8)
+        guard (1...128).contains(bytes.count), (97...122).contains(bytes[0]) || (48...57).contains(bytes[0]) else { return false }
+        return bytes.allSatisfy { (97...122).contains($0) || (48...57).contains($0) || $0 == 45 || $0 == 95 }
     }
 
     public static func validID(_ value: String) -> Bool {
@@ -116,6 +186,16 @@ public enum BrowserError: Error, Equatable, Sendable {
     case forbidden, malformed, tooLarge, unavailable, timeout, upstream(Int)
     /// The server's network carries neither CONNECT nor WebSocket tunnels.
     case tunnelsBlocked
+    /// A live artifact's own proxy refused to open: the artifact is gone or
+    /// no longer live, or the network it was made on isn't served now.
+    case liveUnavailable
+    /// The agent's compute is gone (detached, offline or draining): a
+    /// tunnel refused with one of `BrowserCompute.gone`'s codes.
+    case computeGone
+    /// The network refused the destination as one it doesn't carry
+    /// (`403 destination_not_allowed`): Happy Cloud's tunnels reach only
+    /// the computer's loopback.
+    case outsideNetwork
 }
 
 /// A bounded HTTP head, preserving duplicate response fields (notably Set-Cookie).
@@ -160,6 +240,27 @@ public struct BrowserHTTPHead: Sendable {
         var fields = self.fields.filter { !stripped.contains($0.0.lowercased()) }
         fields += [("Host", authority), ("Authorization", "Bearer \(credential)"), ("Connection", value("upgrade") == nil ? (keepAlive ? "keep-alive" : "close") : "Upgrade")]
         return BrowserHTTPHead(line: "\(parts[0]) \(target) HTTP/1.1", fields: fields)
+    }
+
+    /// The page's request as the computer's loopback takes it: the alias in
+    /// Host, Origin and Referer named `host` again, so a dev server that
+    /// checks them (Vite, Next) answers.
+    public func loopbackRequest(alias: String, host: String) -> BrowserHTTPHead {
+        func replacing(_ value: String, from start: String.Index) -> String {
+            guard value[start...].lowercased().hasPrefix(alias) else { return value }
+            let end = value.index(start, offsetBy: alias.count)
+            guard end == value.endIndex || ":/?#".contains(value[end]) else { return value }
+            return value.replacingCharacters(in: start..<end, with: host)
+        }
+        var result = self
+        result.fields = fields.map { name, value in
+            switch name.lowercased() {
+            case "host": return (name, replacing(value, from: value.startIndex))
+            case "origin", "referer": return (name, value.range(of: "://").map { replacing(value, from: $0.upperBound) } ?? value)
+            default: return (name, value)
+            }
+        }
+        return result
     }
 
     public func artifactResponse() -> BrowserHTTPHead {

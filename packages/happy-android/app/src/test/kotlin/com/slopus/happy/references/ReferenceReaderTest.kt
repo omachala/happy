@@ -66,7 +66,7 @@ class ReferenceReaderTest {
         reader.read(text)
         runCurrent()
         assertEquals(listOf("r1", "gone"), fake.asked)
-        assertEquals("See [Q3 revenue report](${HappyReferences.linkPrefix}artifact/r1) and an unavailable artifact.", HappyReferences.markdown(text, reader.references.value))
+        assertEquals("See [Q3 revenue report](happy://artifacts/r1) and an unavailable artifact.", HappyReferences.markdown(text, reader.references.value))
     }
 
     @Test
@@ -118,6 +118,21 @@ class ReferenceReaderTest {
         assertEquals(null, page(""","status":"deleted""""))
         assertEquals(null, page(""","live":{"url":"http://localhost:5173/"}"""))
         assertEquals(null, page(""","entry":null"""))
+    }
+
+    /** Desktop's artifactStartsExpanded: a Gen UI view is drawn inline unless its version asks to stay a title. */
+    @Test
+    fun aGenUiArtifactIsInlineUnlessItAsksNotToBe() {
+        fun page(changes: String = "") = References.page(
+            Json.parseToJsonElement(
+                """{"id":"g1","type":"gen_ui","status":"active","latestVersion":4,"entry":{"path":"index.genui.json"},"display":null,"live":null$changes}""",
+            ) as JsonObject,
+        )
+        assertEquals(References.Page(4, "index.genui.json", genUi = true), page())
+        assertEquals(References.Page(4, "index.genui.json", genUi = true), page(""","display":"inline_expanded""""))
+        for (display in listOf("\"side\"", "\"inline_compact\"")) assertEquals(display, null, page(""","display":$display"""))
+        assertEquals(null, page(""","status":"deleted""""))
+        assertEquals(null, page(""","latestVersion":null"""))
     }
 
     @Test
@@ -189,7 +204,7 @@ class ReferenceReaderTest {
         assertSame(before, reader.references.value)
         catalog.value = catalog.value.copy(bots = mapOf("b1" to bot))
         runCurrent()
-        assertEquals("[Chef](${HappyReferences.linkPrefix}agent/ab)", HappyReferences.markdown("<happy-agent id=\"ab\"/>", reader.references.value))
+        assertEquals("[Chef](happy://agents/ab)", HappyReferences.markdown("<happy-agent id=\"ab\"/>", reader.references.value))
         reader.setWords(ReferenceWords.English.copy(unavailableKinds = mapOf("agent" to "un agente no disponible")))
         runCurrent()
         assertEquals("un agente no disponible", HappyReferences.markdown("<happy-agent id=\"zz\"/>", reader.references.value))

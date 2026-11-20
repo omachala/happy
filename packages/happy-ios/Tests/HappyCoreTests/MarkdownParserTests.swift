@@ -187,6 +187,84 @@ final class MarkdownParserTests: XCTestCase {
         ])
     }
 
+    /// Links and code inside bold or italic keep that style (happy-app reads
+    /// the run as flat words, its link's Markdown shown raw).
+    func testLinksAndCodeInsideBoldOrItalicAreStyled() {
+        let share = "https://link.happy.page/#1/k3x9q2m7p0a4b8c1d5e6f7g2/agents/a1?as=task"
+        XCTAssertEqual(LegacyMarkdown.parseSpans("**[X](\(share))**", header: false), [MarkdownSpan(styles: [.bold], text: "X", url: share)])
+        XCTAssertEqual(LegacyMarkdown.parseSpans("*see [docs](https://a.io) and `x`*", header: false), [
+            MarkdownSpan(styles: [.italic], text: "see "),
+            MarkdownSpan(styles: [.italic], text: "docs", url: "https://a.io"),
+            MarkdownSpan(styles: [.italic], text: " and "),
+            MarkdownSpan(styles: [.code, .italic], text: "x"),
+        ])
+        XCTAssertEqual(LegacyMarkdown.parseSpans("**a *b* c**", header: false), [
+            MarkdownSpan(styles: [.bold], text: "a "), MarkdownSpan(styles: [.italic, .bold], text: "b"), MarkdownSpan(styles: [.bold], text: " c"),
+        ])
+        // A heading keeps no inline style, its links still links.
+        XCTAssertEqual(LegacyMarkdown.parseSpans("**[X](happy://agents/a1)**", header: true), [MarkdownSpan(text: "X", url: "happy://agents/a1")])
+    }
+
+    func testALinksTitleIsApartFromItsDestination() {
+        XCTAssertEqual(LegacyMarkdown.parseSpans(#"[a](https://x.dev "Docs") [b](<https://y.dev/a b>) [c](https://w.dev/Foo_(bar))"#, header: false), [
+            MarkdownSpan(text: "a", url: "https://x.dev"), MarkdownSpan(text: " "),
+            MarkdownSpan(text: "b", url: "https://y.dev/a b"), MarkdownSpan(text: " "),
+            MarkdownSpan(text: "c", url: "https://w.dev/Foo_(bar)"),
+        ])
+    }
+
+    func testHappyLinksTitledButtonAreLiftedUnderTheirBlock() {
+        let md = #"Add your keys. [Add your team's tokens](happy://settings/providers "button") then [Usage](happy://settings/usage 'button') and go."#
+        XCTAssertEqual(LegacyMarkdown.parse(md), [
+            // The words either side meet with one space between them.
+            .text([MarkdownSpan(text: "Add your keys. "), MarkdownSpan(text: "then "), MarkdownSpan(text: "and go.")]),
+            .buttons([
+                MarkdownSpan(text: "Add your team's tokens", url: "happy://settings/providers", button: true),
+                MarkdownSpan(text: "Usage", url: "happy://settings/usage", button: true),
+            ]),
+        ])
+        // A paragraph of nothing but buttons leaves only them.
+        XCTAssertEqual(LegacyMarkdown.parse("[Keys](happy://settings/providers (button))"), [
+            .buttons([MarkdownSpan(text: "Keys", url: "happy://settings/providers", button: true)]),
+        ])
+        // A list item keeps its place, its button under the list.
+        XCTAssertEqual(LegacyMarkdown.parse(#"- one [Go](happy://settings/general "button")"#), [
+            .list([MarkdownListItem(depth: 0, spans: [MarkdownSpan(text: "one")])]),
+            .buttons([MarkdownSpan(text: "Go", url: "happy://settings/general", button: true)]),
+        ])
+    }
+
+    func testOnlyAWellFormedHappyLinkIsAButton() {
+        // Another title, or a web link titled button: an ordinary link.
+        XCTAssertEqual(LegacyMarkdown.parse(#"[Keys](happy://settings/providers "Button") [Web](https://x.dev "button")"#), [
+            .text([MarkdownSpan(text: "Keys", url: "happy://settings/providers"), MarkdownSpan(text: " "), MarkdownSpan(text: "Web", url: "https://x.dev")]),
+        ])
+        // A malformed Happy button, a malformed settings link, and a settings link with a blank label are their words.
+        XCTAssertEqual(LegacyMarkdown.parseSpans(#"[Bad](happy://agents/ "button") [Bill](happy://settings/billing) [ ](happy://settings/general)"#, header: false), [
+            MarkdownSpan(text: "Bad"), MarkdownSpan(text: " "), MarkdownSpan(text: "Bill"), MarkdownSpan(text: " "), MarkdownSpan(text: " "),
+        ])
+    }
+
+    func testSettingsLinksOpenWhereThePhoneHasThePage() {
+        let cloud = "https://acme.happy-clusters.com"
+        XCTAssertEqual(SettingsLinkPlace.place(.general, server: nil), .general)
+        XCTAssertEqual(SettingsLinkPlace.place(.account, server: cloud), .profile)
+        XCTAssertEqual(SettingsLinkPlace.place(.voice, server: nil), .voice)
+        XCTAssertEqual(SettingsLinkPlace.place(.servers, server: cloud), .servers)
+        XCTAssertEqual(SettingsLinkPlace.place(.servers, server: "https://team.example"), .general)
+        // The phone has its own providers screens; importing falls back to adding.
+        XCTAssertEqual(SettingsLinkPlace.place(.providers, server: cloud), .providers(.providers))
+        XCTAssertEqual(SettingsLinkPlace.place(.providersAddOpenAI, server: cloud), .providers(.providersAddOpenAI))
+        XCTAssertEqual(SettingsLinkPlace.place(.providersImport, server: cloud), .providers(.providersAdd))
+        XCTAssertEqual(SettingsLinkPlace.place(.members, server: cloud), .web(URL(string: "https://acme.happybases.com/#/settings/members")!))
+        XCTAssertNil(SettingsLinkPlace.place(.providers, server: nil))
+        XCTAssertNil(SettingsLinkPlace.place(.providers, server: "https://team.example"))
+        XCTAssertTrue(SettingsLinkPlace.opens("happy://settings/providers", server: cloud))
+        XCTAssertFalse(SettingsLinkPlace.opens("happy://settings/providers", server: nil))
+        XCTAssertFalse(SettingsLinkPlace.opens("happy://k3x9q2m7p0a4b8c1d5e6f7g2/settings/general", server: cloud))
+        XCTAssertFalse(SettingsLinkPlace.opens("happy://agents/a1", server: cloud))
+    }
+
     func testUnclosedMarkersRunToTheEnd() {
         XCTAssertEqual(LegacyMarkdown.parseSpans("x **bold", header: false), [
             MarkdownSpan(text: "x "), MarkdownSpan(styles: [.bold], text: "bold"),
@@ -219,6 +297,100 @@ final class MarkdownParserTests: XCTestCase {
             MarkdownSpan(styles: [.bold], text: "ok"),
             MarkdownSpan(text: " 👍🏽 "),
             MarkdownSpan(styles: [.code], text: "x"),
+        ])
+    }
+
+    // MARK: Frontmatter
+
+    private static let frontmatter = [
+        "---",
+        "name: alexa_smart_home_get_device",
+        "input:",
+        "  endpointId:",
+        "    type: string",
+        "    pattern: ^amzn1.alexa.endpoint.[A-Za-z0-9-]+$",
+        "---",
+        "",
+        "Read the live state of one device.",
+    ].joined(separator: "\n")
+
+    private static let yaml = "name: alexa_smart_home_get_device\ninput:\n  endpointId:\n    type: string\n    pattern: ^amzn1.alexa.endpoint.[A-Za-z0-9-]+$"
+
+    func testDocumentFrontmatterIsAYamlCodeBlock() {
+        XCTAssertEqual(LegacyMarkdown.parse(Self.frontmatter, frontmatter: true), [
+            .codeBlock(language: "yaml", content: Self.yaml),
+            .text(plain("Read the live state of one device.")),
+        ])
+    }
+
+    func testFrontmatterClosedByDots() {
+        XCTAssertEqual(LegacyMarkdown.parse("---\na: 1\n...\n# Title", frontmatter: true), [
+            .codeBlock(language: "yaml", content: "a: 1"),
+            .header(level: 1, plain("Title")),
+        ])
+    }
+
+    func testDocumentWithoutFrontmatterIsUnchanged() {
+        let markdown = "# Title\n\nWords.\n\n- one\n- two"
+        XCTAssertEqual(LegacyMarkdown.parse(markdown, frontmatter: true), LegacyMarkdown.parse(markdown))
+        XCTAssertNil(MarkdownFrontmatter.split(markdown))
+    }
+
+    func testUnclosedFrontmatterIsNotFrontmatter() {
+        let markdown = "---\nname: x\n\nWords."
+        XCTAssertEqual(LegacyMarkdown.parse(markdown, frontmatter: true), [
+            .horizontalRule, .text(plain("name: x")), .text(plain("Words.")),
+        ])
+        XCTAssertEqual(LegacyMarkdown.parse("---", frontmatter: true), [.horizontalRule])
+    }
+
+    func testRulesMidDocumentStayRules() {
+        let markdown = "Intro\n---\nname: x\n---\nOutro"
+        let expected: [MarkdownBlock] = [.text(plain("Intro")), .horizontalRule, .text(plain("name: x")), .horizontalRule, .text(plain("Outro"))]
+        XCTAssertEqual(LegacyMarkdown.parse(markdown, frontmatter: true), expected)
+        // Nor does a blank first line, or an indented or longer rule, open one.
+        XCTAssertEqual(LegacyMarkdown.parse("\n---\na: 1\n---", frontmatter: true), [.horizontalRule, .text(plain("a: 1")), .horizontalRule])
+        XCTAssertEqual(LegacyMarkdown.parse(" ---\na: 1\n---", frontmatter: true), [.horizontalRule, .text(plain("a: 1")), .horizontalRule])
+        XCTAssertNil(MarkdownFrontmatter.split("----\na: 1\n---"))
+        // Only the first closing line closes; the rest of the document is as before.
+        XCTAssertEqual(LegacyMarkdown.parse("---\na: 1\n---\nBody\n---\nMore", frontmatter: true), [
+            .codeBlock(language: "yaml", content: "a: 1"), .text(plain("Body")), .horizontalRule, .text(plain("More")),
+        ])
+    }
+
+    func testEmptyFrontmatterDrawsNothing() {
+        XCTAssertEqual(LegacyMarkdown.parse("---\n---\nBody", frontmatter: true), [.text(plain("Body"))])
+        XCTAssertEqual(LegacyMarkdown.parse("---\n\n  \n---\nBody", frontmatter: true), [.text(plain("Body"))])
+    }
+
+    func testFrontmatterWithCRLFLineEndings() {
+        XCTAssertEqual(LegacyMarkdown.parse("---\r\nname: x\r\nkind: y\r\n---\r\n\r\nBody\r\n", frontmatter: true), [
+            .codeBlock(language: "yaml", content: "name: x\nkind: y"),
+            .text(plain("Body")),
+        ])
+    }
+
+    func testFrontmatterAfterAByteOrderMark() {
+        XCTAssertEqual(LegacyMarkdown.parse("\u{FEFF}---\na: 1\n---\nBody", frontmatter: true), [
+            .codeBlock(language: "yaml", content: "a: 1"), .text(plain("Body")),
+        ])
+    }
+
+    func testAMessageThatOpensWithARuleIsNotFrontmatter() {
+        // A conversation's parse: the same text is rules and paragraphs, at every length it streams through.
+        XCTAssertEqual(LegacyMarkdown.parse("---\nname: x\n---\nBody"), [
+            .horizontalRule, .text(plain("name: x")), .horizontalRule, .text(plain("Body")),
+        ])
+        for end in Self.frontmatter.indices {
+            let blocks = LegacyMarkdown.parse(String(Self.frontmatter[..<end]))
+            XCTAssertFalse(blocks.contains { if case .codeBlock = $0 { true } else { false } })
+        }
+    }
+
+    func testFrontmatterKeepsYamlThatReadsAsMarkdown() {
+        let markdown = "---\n# comment\nlist:\n  - a\n```\n| x | y |\n---\nBody"
+        XCTAssertEqual(LegacyMarkdown.parse(markdown, frontmatter: true), [
+            .codeBlock(language: "yaml", content: "# comment\nlist:\n  - a\n```\n| x | y |"), .text(plain("Body")),
         ])
     }
 }

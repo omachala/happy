@@ -18,12 +18,14 @@ import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.coroutines.resume
 
 /**
- * A subscription the store holds for this device's store account. [account]:
- * the customer id it was bought for, as [SubscriptionStore.buy] gave it
- * (Play's obfuscated account id); null for one bought without one.
+ * A subscription the store holds for this device's store account, bought
+ * on this phone or another. [account]: Play's obfuscated account id, as
+ * [SubscriptionStore.buy] gave it (the customer itself, see
+ * [Subscription.named]); null for one bought without one.
  */
 data class StorePurchase(
     val token: String,
@@ -100,9 +102,9 @@ class PlayBilling(context: Context) : SubscriptionStore {
         val params = QueryProductDetailsParams.newBuilder().setProductList(
             listOf(QueryProductDetailsParams.Product.newBuilder().setProductId(product).setProductType(BillingClient.ProductType.SUBS).build()),
         ).build()
-        val details = suspendCancellableCoroutine<ProductDetails?> { continuation ->
+        val details = firstAnswer<ProductDetails?> { answer ->
             client.queryProductDetailsAsync(params) { result, found ->
-                continuation.resume(found.productDetailsList.takeIf { result.ok }?.firstOrNull { it.productId == product })
+                answer(found.productDetailsList.takeIf { result.ok }?.firstOrNull { it.productId == product })
             }
         } ?: return null
         // The base plan itself (no offer id), renewing every month.
@@ -114,9 +116,9 @@ class PlayBilling(context: Context) : SubscriptionStore {
 
     override suspend fun owned(): List<StorePurchase>? {
         if (!connect()) return null
-        return suspendCancellableCoroutine { continuation ->
+        return firstAnswer { answer ->
             client.queryPurchasesAsync(QueryPurchasesParams.newBuilder().setProductType(BillingClient.ProductType.SUBS).build()) { result, purchases ->
-                continuation.resume(purchases.takeIf { result.ok }?.map(::purchase))
+                answer(purchases.takeIf { result.ok }?.map(::purchase))
             }
         }
     }
@@ -132,24 +134,31 @@ class PlayBilling(context: Context) : SubscriptionStore {
 
     override suspend fun acknowledge(token: String): Boolean {
         if (!connect()) return false
-        return suspendCancellableCoroutine { continuation ->
-            client.acknowledgePurchase(AcknowledgePurchaseParams.newBuilder().setPurchaseToken(token).build()) { continuation.resume(it.ok) }
+        return firstAnswer { answer ->
+            client.acknowledgePurchase(AcknowledgePurchaseParams.newBuilder().setPurchaseToken(token).build()) { answer(it.ok) }
         }
     }
 
     private suspend fun connect(): Boolean = connecting.withLock {
         if (client.isReady) return@withLock true
-        suspendCancellableCoroutine { continuation ->
+        firstAnswer { answer ->
             client.startConnection(object : BillingClientStateListener {
-                override fun onBillingSetupFinished(result: BillingResult) {
-                    if (continuation.isActive) continuation.resume(result.ok)
-                }
+                override fun onBillingSetupFinished(result: BillingResult) = answer(result.ok)
 
-                override fun onBillingServiceDisconnected() {
-                    if (continuation.isActive) continuation.resume(false)
-                }
+                override fun onBillingServiceDisconnected() = answer(false)
             })
         }
+    }
+
+    /**
+     * Play's first answer to one request. Play can answer twice: when it
+     * hasn't answered in 28.5 s, its timeout (on the main thread) cancels the
+     * request and answers that it timed out, while the request it cancelled
+     * answers too (on Play's worker), and a second resume throws.
+     */
+    private suspend fun <T> firstAnswer(ask: (answer: (T) -> Unit) -> Unit): T = suspendCancellableCoroutine { continuation ->
+        val answered = AtomicBoolean()
+        ask { if (answered.compareAndSet(false, true)) continuation.resume(it) }
     }
 
     private val BillingResult.ok get() = responseCode == BillingClient.BillingResponseCode.OK

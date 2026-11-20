@@ -15,9 +15,12 @@ extension Palette {
     public static let groupedGround = surface
     /// A card: a breath off the ground.
     public static let groupedCard = ColorToken("#f6f6f8", "#1f1f21")
-    /// Between rows in a card, and a row pressed or open.
+    /// Between rows in a card.
     public static let groupedSeparator = ColorToken("#e6e6ea", "#2e2e31")
-    public static let groupedCellHighlight = ColorToken("#ebebef", "#2b2b2e")
+    /// A row pressed or open: iOS's own cell highlight (systemGray4). It
+    /// stands off the card and off every ground under it, the phone's
+    /// surface and the iPad sidebar's glass (#e6e6e6, #292929) alike.
+    public static let groupedCellHighlight = ColorToken("#d1d1d6", "#3a3a3c")
 
     /// A glyph tile's ink and its fill: iOS's system colours, the fill
     /// the same colour very light.
@@ -69,6 +72,14 @@ public enum GroupedSidebarMetrics {
     public static let contentBottom: CGFloat = 24
     /// A glyph's tile: the mark's square, rounded as Settings' tiles are
     /// for their size, the glyph smaller inside it; a picture's rounding.
+    /// A row with a line under its title (a search result's snippet): the
+    /// title's box from the row's top, the gap, and the line's box.
+    public static let detailRowHeight: CGFloat = 64
+    public static let detailTitleTop: CGFloat = 6
+    public static let detailTitleHeight: CGFloat = 30
+    public static let detailGap: CGFloat = 0
+    public static let detailLine: CGFloat = 20
+    public static let detailSize: CGFloat = 14
     public static let tileRadius: CGFloat = 8
     public static let tileGlyph: CGFloat = 18
 }

@@ -5,6 +5,8 @@ import Foundation
 /// account kinds work it out from their own sources: the agent from its
 /// connection and sync snapshot, the legacy account from its socket and
 /// catch-up; home's title and every chat's subtitle read the same one.
+/// No link is ever offline: one not connected is asked again with backoff
+/// for as long as the account is there, so it is connecting.
 public enum LinkState: CaseIterable, Equatable, Sendable {
     /// Connected and caught up.
     case online
@@ -12,11 +14,28 @@ public enum LinkState: CaseIterable, Equatable, Sendable {
     case syncing
     /// Reaching the server or computer ("connecting…").
     case connecting
-    /// Not reaching it, for a reason a screen says on its own: a computer
-    /// that did not answer, a revoked pairing, the app in the background.
-    case offline
     /// No network path at all ("waiting for network…").
     case waitingForNetwork
+}
+
+extension LinkState {
+    /// Home's: connecting until the stream's hello (`live`), then updating
+    /// until home's bootstrap verified the computer (`syncing`). No link is
+    /// ever offline: one not connected is asked again with backoff for as
+    /// long as it is there, so it is connecting, whatever kept it away.
+    public static func home(_ snapshot: HomeSnapshot, network: Bool = true) -> LinkState {
+        if !network { return .waitingForNetwork }
+        guard snapshot.live else { return .connecting }
+        return snapshot.loaded && !snapshot.syncing ? .online : .syncing
+    }
+
+    /// A chat's: home's until the stream's hello, then updating only until
+    /// the chat's own history read lands (`historyRead`). Home's bootstrap
+    /// and what waits for it never keep a chat updating.
+    public static func chat(home: LinkState, historyRead: Bool) -> LinkState {
+        guard home == .online || home == .syncing else { return home }
+        return historyRead ? .online : .syncing
+    }
 }
 
 /// What a header shows of a `LinkState` that keeps changing, as Telegram's

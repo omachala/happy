@@ -1,4 +1,5 @@
 import Foundation
+import HappyWire
 
 // A port of happy-app's components/markdown/parseMarkdown.ts,
 // parseMarkdownBlock.ts, parseMarkdownSpans.ts and linkUtils.ts. The chat,
@@ -18,11 +19,15 @@ public struct MarkdownSpan: Equatable, Hashable, Sendable {
     public var styles: [Style]
     public var text: String
     public var url: String?
+    /// A Happy link titled exactly `button` (API.md, "Buttons"): lifted
+    /// out of its block into a `.buttons` after it.
+    public var button: Bool
 
-    public init(styles: [Style] = [], text: String, url: String? = nil) {
+    public init(styles: [Style] = [], text: String, url: String? = nil, button: Bool = false) {
         self.styles = styles
         self.text = text
         self.url = url
+        self.button = button
     }
 }
 
@@ -60,12 +65,20 @@ public enum MarkdownBlock: Equatable, Hashable, Sendable {
     case options([String])
     case table(headers: [[MarkdownSpan]], rows: [[[MarkdownSpan]]])
     case image(alt: String, url: String)
+    /// The Happy links titled `button` in the block before, lifted out of
+    /// it, in order: one button each.
+    case buttons([MarkdownSpan])
 }
 
 public enum LegacyMarkdown {
     /// parseMarkdown.ts.
-    public static func parse(_ markdown: String) -> [MarkdownBlock] {
-        parseBlocks(markdown)
+    /// `frontmatter`: the text is a whole document (a file, an artifact),
+    /// whose opening YAML frontmatter is read as a `yaml` code block
+    /// (`MarkdownFrontmatter`). A conversation's messages leave it off: one
+    /// that opens with a rule is not a document, and would change shape as
+    /// it streams once a second rule arrived.
+    public static func parse(_ markdown: String, frontmatter: Bool = false) -> [MarkdownBlock] {
+        parseBlocks(markdown, frontmatter: frontmatter)
     }
 
     /// linkUtils.ts `isHttpMarkdownLink`: only http(s) links open.
@@ -82,17 +95,23 @@ public enum LegacyMarkdown {
 
     // MARK: Blocks (parseMarkdownBlock.ts)
 
-    static func parseBlocks(_ markdown: String) -> [MarkdownBlock] {
+    static func parseBlocks(_ markdown: String, frontmatter: Bool = false) -> [MarkdownBlock] {
         var blocks: [MarkdownBlock] = []
         let lines = markdown.jsSplit("\n")
         var index = 0
+        if frontmatter, let close = MarkdownFrontmatter.closingLine(lines) {
+            let yaml = MarkdownFrontmatter.content(lines, close: close)
+            // Frontmatter that says nothing draws nothing.
+            if !trim(yaml).isEmpty { blocks.append(.codeBlock(language: "yaml", content: yaml)) }
+            index = close + 1
+        }
         outer: while index < lines.count {
             let line = lines[index]
             index += 1
 
             for level in 1...6 where line.hasPrefix(String(repeating: "#", count: level) + " ") {
                 let content = trim(String(line.utf16Dropping(level + 1)))
-                blocks.append(.header(level: level, parseSpans(content, header: true)))
+                addLifting(&blocks, .header(level: level, parseSpans(content, header: true)))
                 continue outer
             }
 
@@ -160,7 +179,7 @@ public enum LegacyMarkdown {
                     index += 1
                 }
                 let base = rows.map(\.indent).min() ?? 0
-                blocks.append(.numberedList(rows.map {
+                addLifting(&blocks, .numberedList(rows.map {
                     MarkdownNumberedItem(number: $0.number, depth: floorHalf($0.indent - base), spans: parseSpans($0.content, header: false))
                 }))
                 continue
@@ -181,7 +200,7 @@ public enum LegacyMarkdown {
                     index += 1
                 }
                 let base = rows.map(\.indent).min() ?? 0
-                blocks.append(.list(rows.map {
+                addLifting(&blocks, .list(rows.map {
                     MarkdownListItem(depth: floorHalf($0.indent - base), spans: parseSpans($0.content, header: false))
                 }))
                 continue
@@ -197,7 +216,7 @@ public enum LegacyMarkdown {
             }
 
             if !trimmed.isEmpty {
-                blocks.append(.text(parseSpans(trimmed, header: false)))
+                addLifting(&blocks, .text(parseSpans(trimmed, header: false)))
             }
         }
         return blocks
@@ -255,15 +274,13 @@ public enum LegacyMarkdown {
                 pushText(&spans, source.substring(with: NSRange(location: last, length: match.range.location - last)), styles: [])
             }
             if match.has(1) {
-                let text = match.group(2, in: markdown) ?? ""
-                pushText(&spans, text, styles: header ? [] : [.bold])
+                spans += styled(parseSpans(match.group(2, in: markdown) ?? "", header: header), header ? nil : .bold)
             } else if match.has(3) {
-                let text = match.group(4, in: markdown) ?? ""
-                pushText(&spans, text, styles: header ? [] : [.italic])
+                spans += styled(parseSpans(match.group(4, in: markdown) ?? "", header: header), header ? nil : .italic)
             } else if match.has(5) {
                 let label = match.group(6, in: markdown) ?? ""
-                if let url = match.group(7, in: markdown), !url.isEmpty {
-                    spans.append(MarkdownSpan(text: label, url: url))
+                if let target = match.group(7, in: markdown), !target.isEmpty {
+                    spans.append(link(label, target: target))
                 } else {
                     // A link without its URL part reads as the bracketed text.
                     pushText(&spans, "[\(label)]", styles: [])
@@ -277,6 +294,83 @@ public enum LegacyMarkdown {
             pushText(&spans, source.substring(from: last), styles: [])
         }
         return spans
+    }
+
+    /// What a bold or italic run holds, its links and code included, in
+    /// that style as well (happy-app reads the run as flat words).
+    static func styled(_ spans: [MarkdownSpan], _ style: MarkdownSpan.Style?) -> [MarkdownSpan] {
+        guard let style else { return spans }
+        return spans.map { span in
+            var span = span
+            if !span.styles.contains(style) { span.styles.append(style) }
+            return span
+        }
+    }
+
+    /// `[label](target)` as a span: the destination, bare or in `<>`, apart
+    /// from its title. A Happy link titled `button` is one; a settings link
+    /// that is malformed or has a blank label, and a malformed Happy link
+    /// asking to be a button, are their label as inert text (API.md,
+    /// "Buttons", "Settings links").
+    static func link(_ label: String, target: String) -> MarkdownSpan {
+        let trimmed = trim(target)
+        var url = trimmed
+        var title: String?
+        if let match = Patterns.linkTarget.firstMatch(in: trimmed) {
+            url = match.group(1, in: trimmed) ?? match.group(2, in: trimmed) ?? trimmed
+            title = match.group(3, in: trimmed) ?? match.group(4, in: trimmed) ?? match.group(5, in: trimmed)
+        }
+        let link = HappyLink(url)
+        let button = title == "button" && HappyLink.owns(url)
+        let settings = Patterns.settingsHost.firstMatch(in: url) != nil
+        if (button && link == nil) || (settings && (link == nil || trim(label).isEmpty)) {
+            return MarkdownSpan(text: label)
+        }
+        return MarkdownSpan(text: label, url: url, button: button)
+    }
+
+    /// `block` added to `blocks`, its buttons lifted out after it
+    /// (`.buttons`); a block that was nothing but buttons leaves only them.
+    static func addLifting(_ blocks: inout [MarkdownBlock], _ block: MarkdownBlock) {
+        var buttons: [MarkdownSpan] = []
+        func keep(_ spans: [MarkdownSpan]) -> [MarkdownSpan] {
+            guard spans.contains(where: \.button) else { return spans }
+            var kept: [MarkdownSpan] = []
+            var lifted = false
+            for span in spans {
+                if span.button {
+                    buttons.append(span)
+                    lifted = true
+                    continue
+                }
+                // The words either side of a lifted button meet with one space between them.
+                var joined = span
+                if lifted, kept.last.map({ $0.text.last?.isWhitespace == true }) ?? true {
+                    joined.text = String(joined.text.drop { $0.isWhitespace })
+                }
+                if !joined.text.isEmpty { kept.append(joined) }
+                lifted = lifted && joined.text.isEmpty
+            }
+            if !kept.isEmpty { kept[0].text = String(kept[0].text.drop { $0.isWhitespace }) }
+            if let last = kept.indices.last {
+                kept[last].text = String(kept[last].text.reversed().drop { $0.isWhitespace }.reversed())
+            }
+            return kept.filter { !$0.text.isEmpty }
+        }
+        func shown(_ spans: [MarkdownSpan]) -> [MarkdownSpan]? {
+            let kept = keep(spans)
+            return kept.contains { !trim($0.text).isEmpty } ? kept : nil
+        }
+        let kept: MarkdownBlock? = switch block {
+        case .text(let spans): shown(spans).map(MarkdownBlock.text)
+        case .header(let level, let spans): shown(spans).map { .header(level: level, $0) }
+        case .list(let items): .list(items.map { MarkdownListItem(depth: $0.depth, spans: keep($0.spans)) })
+        case .numberedList(let items): .numberedList(items.map { MarkdownNumberedItem(number: $0.number, depth: $0.depth, spans: keep($0.spans)) })
+        default: block
+        }
+        guard !buttons.isEmpty else { return blocks.append(block) }
+        if let kept { blocks.append(kept) }
+        blocks.append(.buttons(buttons))
     }
 
     /// Plain text with bare http(s) URLs turned into links, trailing
@@ -331,10 +425,52 @@ public enum LegacyMarkdown {
     }
 }
 
+/// YAML frontmatter: a document whose very first line is exactly `---`,
+/// closed by a later line that is exactly `---` or `...`. Read by
+/// CommonMark it is a rule and a setext heading holding every line of the
+/// YAML; the renderers show it as a `yaml` code block instead. Only the
+/// start of a document opens one, and one that never closes is not one.
+/// Android's `MarkdownFrontmatter` is the same rules.
+public enum MarkdownFrontmatter {
+    /// The index of the line closing the frontmatter `lines` (a document
+    /// split on "\n") open with, nil when they open with none.
+    public static func closingLine(_ lines: [String]) -> Int? {
+        guard let first = lines.first, bare(first.unicodeScalars.first == "\u{FEFF}" ? String(first.unicodeScalars.dropFirst()) : first) == "---" else { return nil }
+        return lines.indices.dropFirst().first { index in
+            let line = bare(lines[index])
+            return line == "---" || line == "..."
+        }
+    }
+
+    /// The YAML between the opening line and the one at `close`.
+    public static func content(_ lines: [String], close: Int) -> String {
+        lines[1..<close].map(bare).joined(separator: "\n")
+    }
+
+    /// The document's frontmatter, fences included and as written, and what
+    /// follows it; nil when it has none. For the passes that rewrite a
+    /// document's Markdown before it is parsed, which leave YAML alone.
+    public static func split(_ markdown: String) -> (frontmatter: String, body: String)? {
+        let lines = markdown.jsSplit("\n")
+        guard let close = closingLine(lines) else { return nil }
+        return (lines[...close].joined(separator: "\n"), lines[(close + 1)...].joined(separator: "\n"))
+    }
+
+    /// A line without the "\r" a CRLF file leaves at its end.
+    static func bare(_ line: String) -> String {
+        line.unicodeScalars.last == "\r" ? String(line.unicodeScalars.dropLast()) : line
+    }
+}
+
 /// happy-app's regular expressions. NSRegularExpression is immutable and
 /// safe to share between threads.
 enum Patterns {
-    nonisolated(unsafe) static let spans = regex(#"(\*\*(.*?)(?:\*\*|$))|(\*(.*?)(?:\*|$))|(\[([^\]]+)\](?:\(([^)]+)\))?)|(`(.*?)(?:`|$))"#)
+    nonisolated(unsafe) static let spans = regex(#"(\*\*(.*?)(?:\*\*|$))|(\*(.*?)(?:\*|$))|(\[([^\]]+)\](?:\(((?:[^()]|\([^()]*\))+)\))?)|(`(.*?)(?:`|$))"#)
+    /// A link's destination, bare or in `<>`, then an optional title in
+    /// `"`, `'` or parentheses.
+    nonisolated(unsafe) static let linkTarget = regex(#"^(?:<([^<>\n]*)>|(\S+))(?:\s+(?:"([^"]*)"|'([^']*)'|\(([^()]*)\)))?$"#)
+    /// A settings link's host, internal or in an instance link, well-formed or not.
+    nonisolated(unsafe) static let settingsHost = regex(#"^happy://(?:[a-z][a-z0-9]{23}/)?settings(?:[/?#]|$)"#)
     nonisolated(unsafe) static let url = regex(#"https?://[^\s<]+"#)
     nonisolated(unsafe) static let option = regex(#"<option>(.*?)</option>"#)
     nonisolated(unsafe) static let image = regex(#"^!\[([^\]]*)\]\(([^)]+)\)$"#)

@@ -107,7 +107,8 @@ final class HostedHeaderBarTests: XCTestCase {
             XCTAssertTrue(switcher.bounds.contains(child.frame), "\(child) is cut by the bar")
         }
         let right = item.rightBarButtonItems?.map(\.accessibilityIdentifier) ?? []
-        XCTAssertEqual(right, ["settings"])
+        // Right to left: Settings, then the call.
+        XCTAssertEqual(right, ["settings", "voice-call"])
         XCTAssertTrue(home.toolbarItems?.contains { $0.accessibilityIdentifier == "compose" } == true)
         let bar = try XCTUnwrap(home.navigationController?.navigationBar)
         Self.assertClear(bar)
@@ -304,9 +305,11 @@ final class HostedHeaderBarTests: XCTestCase {
         // The button draws the first active one, so the tick belongs there.
         let shown = try XCTUnwrap(accounts.first(where: \.isActive))
         XCTAssertEqual(ticked.first?.accessibilityIdentifier, "account-\(shown.id)")
-        // Every account is still offered, with Add; Manage Accounts is
-        // gone (Settings' accounts card signs one out from its row).
-        XCTAssertEqual(actions.count, accounts.count + 1)
+        // Every account is still offered, with Add and, in a preview build,
+        // Happy Cloud; Manage Accounts is gone (Settings' accounts card
+        // signs one out from its row).
+        XCTAssertEqual(actions.dropFirst(accounts.count).map(\.accessibilityIdentifier), ["account-add", "account-cloud"])
+        XCTAssertEqual(actions.count, accounts.count + 2)
         XCTAssertFalse(actions.contains { $0.accessibilityIdentifier == "account-manage" })
     }
 

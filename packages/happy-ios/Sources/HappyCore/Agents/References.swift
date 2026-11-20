@@ -38,6 +38,21 @@ public struct References: Equatable, Sendable {
         }
     }
 
+    /// A `gen_ui` artifact a conversation draws inline: its latest
+    /// version, the render document its daemon compiled, and the agent
+    /// that made the version (`ArtifactVersion.origin`), if read.
+    public struct GenUI: Equatable, Sendable {
+        public var version: Int
+        public var document: GenUIRenderDocument
+        public var origin: String?
+
+        public init(version: Int, document: GenUIRenderDocument, origin: String? = nil) {
+            self.version = version
+            self.document = document
+            self.origin = origin
+        }
+    }
+
     public enum View: Equatable, Sendable {
         /// Opens: a name to tap. `reading` while an artifact's title is on its way.
         case link(String, reading: Bool = false)
@@ -63,6 +78,10 @@ public struct References: Equatable, Sendable {
     /// (`ArtifactPageMode`), by ID: that version. An app is never run in
     /// the conversation; its card opens it full screen.
     public var apps: [String: Int] = [:]
+    /// The `gen_ui` artifacts read so far that a conversation draws, by ID.
+    public var genUI: [String: GenUI] = [:]
+    /// What the server runs of their actions.
+    public var genUIServed = GenUIServed()
     /// The conversation's own subagents, by ID, as titled ("" untitled):
     /// a hidden one reads as its title, and opens nothing.
     public var subagents: [String: String] = [:]
@@ -72,6 +91,15 @@ public struct References: Equatable, Sendable {
     public var me: String?
     /// People the daemon doesn't know; any other unnamed one is still being read.
     public var missingUsers: Set<String> = []
+    /// The Surfaces the person is in, by ID: a Surface link opens one.
+    public var surfaces: [String: AgentWire.Surface] = [:]
+    /// The installation the conversation is on (health `instanceId`): a
+    /// Happy link naming another one reads as its words.
+    public var instanceId: String?
+    /// File links (canonical URLs) found not to open here: their words.
+    public var closedFiles: Set<String> = []
+    /// The agents whose work runs now, by ID: a link to one shimmers.
+    public var busy: Set<String> = []
 
     public init(agents: [String: Entity] = [:], workspaces: [String: Entity] = [:], artifacts: [String: Artifact] = [:]) {
         self.agents = agents
@@ -141,6 +169,16 @@ public struct References: Equatable, Sendable {
         return (Int(version), path)
     }
 
+    /// The latest version of an active `gen_ui` artifact a conversation
+    /// draws: any whose `display` is not `inline_compact` or `side`, as
+    /// desktop starts it. Nil for anything else, which stays a card.
+    public static func genUIVersion(_ object: JSONValue) -> Int? {
+        guard object["status"]?.stringValue != "deleted", object["type"]?.stringValue == "gen_ui",
+              !["inline_compact", "side"].contains(object["display"]?.stringValue ?? ""),
+              let version = object["latestVersion"]?.numberValue else { return nil }
+        return Int(version)
+    }
+
     /// Whether `artifact`, as a message shows it, opens as an app.
     public func isApp(_ artifactId: String, version: Int, opensLatest: Bool) -> Bool {
         guard let app = apps[artifactId] else { return false }
@@ -149,21 +187,65 @@ public struct References: Equatable, Sendable {
 
     /// The artifacts `text` names whose titles haven't been read.
     public func unread(in text: String) -> [String] {
-        guard Self.holds(text, "<happy-artifact") else { return [] }
         var ids: [String] = []
-        for case .reference(let reference, _) in HappyReferences.parse(text) where reference.kind == "artifact" && artifacts[reference.id] == nil && !ids.contains(reference.id) {
-            ids.append(reference.id)
+        if Self.holds(text, "<happy-artifact") {
+            for case .reference(let reference, _) in HappyReferences.parse(text) where reference.kind == "artifact" && artifacts[reference.id] == nil && !ids.contains(reference.id) {
+                ids.append(reference.id)
+            }
         }
+        for id in linked(.artifact, in: text) where artifacts[id] == nil && !ids.contains(id) { ids.append(id) }
         return ids
+    }
+
+    /// The IDs of `kind` the Happy links in `text` name on this
+    /// installation: Markdown links and share links written out bare.
+    private func linked(_ kind: HappyLink.Kind, in text: String) -> [String] {
+        linked(in: text).compactMap { $0.kind == kind ? $0.id : nil }
+    }
+
+    private func linked(in text: String) -> [HappyLink.Reference] {
+        guard Self.holds(text, "happy://") || Self.holds(text, "https://link.happy.page/#") else { return [] }
+        let links = HappyMarkdownLinks.matches(text).compactMap(\.link) + HappyShareLink.bare(in: text).compactMap { ChatLinks.happyLink($0.url) }
+        return links.compactMap { link in
+            guard link.instanceId == nil || link.instanceId == instanceId, case .reference(let reference) = link.target else { return nil }
+            return reference
+        }
+    }
+
+    /// The conversations `text` names, by tag or link, as the agents
+    /// that hold them: the ones whose work its links show.
+    public func agents(in text: String) -> Set<String> {
+        var named: [HappyReferences.Reference] = []
+        if Self.holds(text, "<happy-agent") || Self.holds(text, "<happy-workspace") {
+            for case .reference(let reference, _) in HappyReferences.parse(text) { named.append(reference) }
+        }
+        named += linked(in: text).map { HappyReferences.Reference(kind: $0.kind.rawValue, id: $0.id) }
+        return Set(named.compactMap { entity($0)?.agentId })
+    }
+
+    /// The agents of the rows the sidebar shows at work, as `busy` takes them.
+    public static func busy(in rows: [Row]) -> Set<String> {
+        Set(rows.compactMap { $0.status == .working ? $0.agentId : nil })
+    }
+
+    /// Whether the conversation `reference` opens is at work now.
+    public func busy(_ reference: HappyReferences.Reference) -> Bool {
+        entity(reference).map { busy.contains($0.agentId) } ?? false
+    }
+
+    /// Whether a file link may still open: one not yet found missing.
+    public func opens(_ file: HappyLink.File) -> Bool {
+        HappyLink(.file(file)).url.map { !closedFiles.contains($0) } ?? false
     }
 
     /// The people `text` mentions whose names haven't been read.
     public func unknownUsers(in text: String) -> [String] {
-        guard Self.holds(text, "<happy-user") else { return [] }
         var ids: [String] = []
+        guard Self.holds(text, "<happy-user") || Self.holds(text, "happy://") || Self.holds(text, "https://link.happy.page/#") else { return [] }
         for case .reference(let reference, _) in HappyReferences.parse(text) where reference.kind == "user" && users[reference.id] == nil && !ids.contains(reference.id) {
             ids.append(reference.id)
         }
+        for id in linked(.user, in: text) where users[id] == nil && !ids.contains(id) { ids.append(id) }
         return ids
     }
 
@@ -197,6 +279,10 @@ public struct References: Equatable, Sendable {
                 return missingUsers.contains(reference.id) ? inert : .mention("@…", me: reference.id == me)
             }
             return .mention("@" + name, me: reference.id == me)
+        case "surface":
+            guard let surface = surfaces[reference.id] else { return inert }
+            let name = surface.name.trimmingCharacters(in: .whitespacesAndNewlines)
+            return .link(name.isEmpty ? "Untitled \(surface.type.replacingOccurrences(of: "_", with: " "))" : name)
         default:
             // Projects aren't on this phone; services open nowhere yet.
             return inert

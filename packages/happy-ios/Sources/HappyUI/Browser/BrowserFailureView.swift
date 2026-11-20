@@ -59,8 +59,8 @@ final class BrowserFailureView: UIView {
 
     static func glyph(_ problem: BrowserProblem) -> Icon {
         switch problem {
-        case .noNetwork, .computerUnreachable: .ionicons("cloud-offline-outline")
-        case .unavailable: .ionicons("laptop-outline")
+        case .noNetwork, .computerUnreachable, .computeDisconnected: .ionicons("cloud-offline-outline")
+        case .unavailable, .liveUnavailable: .ionicons("laptop-outline")
         case .hostNotFound: .ionicons("globe-outline")
         case .serverNotResponding: .ionicons("server-outline")
         case .timedOut: .ionicons("time-outline")

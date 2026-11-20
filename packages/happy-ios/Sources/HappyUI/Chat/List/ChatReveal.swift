@@ -29,7 +29,7 @@ enum ChatRevealMapping {
                 lines += layout.revealLines(at: frame.origin)
             case .box(let box):
                 boxes.append(box.frame)
-            case .icon:
+            case .icon, .sheen:
                 continue
             case .scroller(let content, let frame, _, _):
                 lines.append(RevealMap.Line(block: card(frame, boxes), length: textLength(content)))
@@ -100,8 +100,8 @@ final class ChatRevealDriver: NSObject {
     /// takes its words as whole: Telegram's draft ending.
     static let quiet = 1.0
 
-    /// Reduce Motion shows replies as they come.
-    static var enabled: Bool { !UIAccessibility.isReduceMotionEnabled && !off }
+    /// Reduce Motion and Low Power Mode show replies as they come.
+    static var enabled: Bool { !UIAccessibility.isReduceMotionEnabled && !ProcessInfo.processInfo.isLowPowerModeEnabled && !off }
     /// Replies show as they come, as before the reveal: for comparing.
     static var off = ProcessInfo.processInfo.environment["HAPPY_REVEAL_OFF"] != nil
     #if DEBUG || HAPPY_FIXTURES

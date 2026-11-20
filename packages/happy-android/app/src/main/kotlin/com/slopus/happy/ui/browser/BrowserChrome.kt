@@ -102,6 +102,11 @@ object BrowserSpec {
     const val PROGRESS_FADE_DELAY_MILLIS = 100L
     const val PROGRESS_FADE_MILLIS = 250
     const val PROGRESS_HIDE_MILLIS = 200
+    /** A page closed for its compute asks whether it is back after 3 s, then twice as long each time, up to 30 s (iOS's `probeCompute`). */
+    const val COMPUTE_PROBE_FIRST_MILLIS = 3_000L
+    const val COMPUTE_PROBE_MAX_MILLIS = 30_000L
+    /** A page opened again for its compute whose server isn't answering yet tries again after these, then leaves it to Try Again. */
+    val REOPEN_RETRY_MILLIS = longArrayOf(2_000L, 4_000L, 8_000L, 15_000L)
 }
 
 /**
@@ -166,6 +171,8 @@ fun browserProblemWords(problem: BrowserProblem, computer: String, host: String?
     BrowserProblem.ComputerUnreachable ->
         stringResource(R.string.browser_problem_unreachable_title, computer) to stringResource(R.string.browser_problem_unreachable_message, computer)
     BrowserProblem.Unavailable -> stringResource(R.string.browser_problem_unavailable_title) to stringResource(R.string.browser_problem_unavailable_message)
+    BrowserProblem.LiveUnavailable -> stringResource(R.string.browser_problem_live_unavailable_title) to stringResource(R.string.browser_problem_live_unavailable_message)
+    BrowserProblem.ComputeDisconnected -> stringResource(R.string.browser_problem_compute_disconnected_title) to stringResource(R.string.browser_problem_compute_disconnected_message)
     BrowserProblem.HostNotFound -> stringResource(R.string.browser_problem_host_not_found_title) to
         (if (host != null) stringResource(R.string.browser_problem_host_not_found_message, computer, host) else stringResource(R.string.browser_problem_host_not_found_message_no_host, computer))
     BrowserProblem.ServerNotResponding -> stringResource(R.string.browser_problem_server_title) to
@@ -186,8 +193,8 @@ fun browserProblemWords(problem: BrowserProblem, computer: String, host: String?
 
 /** The error page's glyph for [problem] (iOS's `BrowserFailureView.glyph`). */
 fun browserProblemGlyph(problem: BrowserProblem): Ionicon = when (problem) {
-    BrowserProblem.NoNetwork, BrowserProblem.ComputerUnreachable -> Ionicon.CloudOfflineOutline
-    BrowserProblem.Unavailable -> Ionicon.LaptopOutline
+    BrowserProblem.NoNetwork, BrowserProblem.ComputerUnreachable, BrowserProblem.ComputeDisconnected -> Ionicon.CloudOfflineOutline
+    BrowserProblem.Unavailable, BrowserProblem.LiveUnavailable -> Ionicon.LaptopOutline
     BrowserProblem.HostNotFound -> Ionicon.GlobeOutline
     BrowserProblem.ServerNotResponding -> Ionicon.ServerOutline
     BrowserProblem.TimedOut -> Ionicon.TimeOutline
@@ -355,7 +362,8 @@ private fun HistoryButton(state: BrowserState, forward: Boolean) {
 /**
  * Share…, Copy Link, and Open in browser (outside proxy) (iOS's
  * `shareActions`). A bundled artifact's origin exists only in this app: its
- * external Happy link is what is shared, and it is never copied or opened outside.
+ * share link is what is shared and copied (Copy link to artifact), and it
+ * is never opened outside.
  */
 @Composable
 private fun ShareButton(state: BrowserState) {
@@ -363,7 +371,7 @@ private fun ShareButton(state: BrowserState) {
     var open by remember { mutableStateOf(false) }
     val page = state.page
     val synthetic = page?.synthetic == true
-    // A bundled artifact's origin exists only here: its external Happy link is what can be shared, if its server has one.
+    // A bundled artifact's origin exists only here: its share link is what can be shared, if its server has one.
     val shareUrl = if (synthetic) page.artifactId?.let(state.artifactLink) else if (page?.artifactId == null) state.currentUrl else page.url
     Box {
         IconButton(onClick = { open = true }, enabled = page != null && shareUrl != null, modifier = Modifier.testTag(BrowserTags.SHARE)) {
@@ -377,12 +385,12 @@ private fun ShareButton(state: BrowserState) {
                     val send = Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_TEXT, shareUrl)
                     context.startActivity(Intent.createChooser(send, null).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
                 }
-            }
-            if (!synthetic && shareUrl != null) {
-                ShareItem(stringResource(R.string.link_menu_copy), MaterialSymbols.ContentCopy) {
+                ShareItem(stringResource(if (synthetic) R.string.share_link_copy_artifact else R.string.link_menu_copy), MaterialSymbols.ContentCopy) {
                     open = false
                     copy(context, shareUrl)
                 }
+            }
+            if (!synthetic && shareUrl != null) {
                 ShareItem(stringResource(R.string.browser_open_outside), MaterialSymbols.OpenInNew) {
                     open = false
                     openOutside(context, shareUrl)

@@ -14,7 +14,7 @@ private actor SyncFixture: AgentTransport {
      "tasks":[{"id":"unjoined","name":"Not joined","agent":{"id":"unjoined-agent","workspaceId":"x","status":"idle"}},
        {"id":"first","name":"First created","agent":{"id":"first-agent","workspaceId":"one","status":"idle"}},
        {"id":"last","name":"Last created","agent":{"id":"last-agent","workspaceId":"two","status":"idle"}}],
-     "taskMemberships":[{"taskId":"last"},{"taskId":"first"}],
+     "taskMemberships":[{"taskId":"last","orderKey":"a"},{"taskId":"first","orderKey":"b"}],
      "surfaces":[{"id":"other","name":"Other person's document","type":"document","members":[{"userId":"other-user","orderKey":"a"}]},
        {"id":"todo","name":"Groceries","type":"todo","members":[{"userId":null,"orderKey":"b"}]},
        {"id":"doc","name":"Notes","type":"document","members":[{"userId":null,"orderKey":"a"}]}]}
@@ -31,6 +31,9 @@ private actor SyncFixture: AgentTransport {
     /// Intents heard: `read:<agent>`, `archive:<task>`.
     var acts: [String] = []
     var refuseArchive = false
+    var closedStreams: Set<Int> = []
+    func closedStreamCount() -> Int { closedStreams.count }
+    func streamClosed(_ id: Int) { closedStreams.insert(id) }
 
     func heardActs() -> [String] { acts }
     func refuseArchives() { refuseArchive = true }
@@ -53,6 +56,68 @@ private actor SyncFixture: AgentTransport {
     func savedWrites() -> [JSONValue] { writes }
     func savedSends() -> [JSONValue] { sends }
     func loseNextSendAcknowledgement() { loseSendAck = true }
+    /// Each of the next `reads` bootstrap reads has news come while it is
+    /// on its way, as when agents work.
+    var newsDuringReads = 0
+    /// The process every hello names; nil as an older daemon's.
+    var daemonId: String?
+    var nextHelloGap = false
+    /// The next bootstrap read waits, deaf to cancellation, until `release`.
+    var holdNextRead = false
+    var held: CheckedContinuation<Void, Never>?
+    func holdNextBootstrap() { holdNextRead = true }
+    func isHolding() -> Bool { held != nil }
+    func streamsOpened() -> Int { streamHeaders.count }
+    func release() { held?.resume(); held = nil }
+    var resets: [RequestCategory] = []
+    var wakes = 0
+    /// The stream's tunnel let go of: it ends, as a closed tunnel's does.
+    /// The next stream's hello waits until `releaseHello`.
+    var holdHello = false
+    var heldHello: AsyncThrowingStream<Data, Error>.Continuation?
+    func holdNextHello() { holdHello = true }
+    func releaseHello() {
+        let process = daemonId.map { ",\"daemonId\":\"\($0)\"" } ?? ""
+        heldHello?.yield(Data("event: hello\ndata: {\"cursor\":\"cursor-1\",\"resumed\":true,\"gap\":false\(process)}\n\n".utf8))
+        heldHello = nil
+    }
+    /// The next reset waits, as a tunnel slow to close, until `releaseReset`.
+    var holdReset = false
+    var heldReset: CheckedContinuation<Void, Never>?
+    func holdNextReset() { holdReset = true }
+    func isHoldingReset() -> Bool { heldReset != nil }
+    func releaseReset() { heldReset?.resume(); heldReset = nil }
+    func reset(_ category: RequestCategory) async {
+        if holdReset { holdReset = false; await withCheckedContinuation { heldReset = $0 } }
+        resets.append(category); if category == .realtime { drop() }
+    }
+    func resumed() { wakes += 1 }
+    func heardResets() -> [RequestCategory] { resets }
+    func heardWakes() -> Int { wakes }
+    func setDaemon(_ id: String?) { daemonId = id }
+    func gapNextHello() { nextHelloGap = true }
+    func bootstrapReads() -> Int { requested.filter { $0 == "/v0/bootstrap/desktop" }.count }
+    func lastStreamCursor() -> String? { streamHeaders.last?["Last-Event-ID"] }
+    /// Ends the open streams, as a network that drops.
+    func drop() { continuations.forEach { $0.finish() }; continuations.removeAll() }
+    func emit(id: String, _ event: JSONValue) {
+        let json = String(data: try! JSONEncoder().encode(event), encoding: .utf8)!
+        continuations.forEach { $0.yield(Data("id: \(id)\nevent: message\ndata: \(json)\n\n".utf8)) }
+    }
+    func dropStreams() { continuations.forEach { $0.finish(throwing: URLError(.networkConnectionLost)) } }
+    func emitHeld(id: String, _ event: JSONValue) {
+        let json = String(data: try! JSONEncoder().encode(event), encoding: .utf8)!
+        continuations.first?.yield(Data("id: \(id)\nevent: message\ndata: \(json)\n\n".utf8))
+    }
+    func renameProject(withNewsDuringReads reads: Int) {
+        newsDuringReads = reads
+        var object = value.objectValue!
+        var project = object["projects"]!.arrayValue!.first!.objectValue!
+        project["name"] = .string("Renamed while busy")
+        object["projects"] = .array([.object(project)])
+        value = .object(object)
+        emit(.object(["type": .string("project.updated"), "payload": .object(["projectId": .string("p")])]))
+    }
     func renameProjectAfterOneFailedRead() {
         bootstrapFailures = 1
         var object = value.objectValue!
@@ -71,6 +136,9 @@ private actor SyncFixture: AgentTransport {
         emit(.object(["type": .string("user_settings.updated"), "payload": .object(["setting": setting])]))
     }
     var requested: [String] = []
+    /// What health reports; nil answers it as an older daemon's missing route.
+    var capabilities: JSONValue?
+    func report(_ capabilities: JSONValue) { self.capabilities = capabilities }
     func requestedPaths() -> [String] { requested }
     /// The retired Stem Cells experiment turned on from the computer.
     func turnOnStemCells() {
@@ -90,7 +158,22 @@ private actor SyncFixture: AgentTransport {
         requested.append(path)
         if path == "/v0/bootstrap/desktop" {
             if bootstrapFailures > 0 { bootstrapFailures -= 1; throw URLError(.timedOut) }
-            return .init(status: 200, body: try JSONEncoder().encode(value))
+            if holdNextRead {
+                holdNextRead = false
+                await withCheckedContinuation { held = $0 }
+            }
+            var served = value
+            if let capabilities, case .object(var fields) = served {
+                fields["health"] = .object(["ready": .bool(true), "capabilities": capabilities])
+                served = .object(fields)
+            }
+            let read = try JSONEncoder().encode(served)
+            if newsDuringReads > 0 {
+                newsDuringReads -= 1
+                emit(.object(["type": .string("workspace.updated"), "payload": .object(["workspaceId": .string("work")])]))
+                try await Task.sleep(for: .milliseconds(50))
+            }
+            return .init(status: 200, body: read)
         }
         if method == "PUT", path.hasPrefix("/v0/user-settings/") {
             let request = try JSONDecoder().decode(JSONValue.self, from: body!)
@@ -113,6 +196,19 @@ private actor SyncFixture: AgentTransport {
             acts.append("archive:" + path.split(separator: "/")[2])
             return .init(status: 200, body: Data("{}".utf8))
         }
+        if method == "POST", path.hasPrefix("/v0/surfaces/"), path.hasSuffix("/join") {
+            let id = String(path.split(separator: "/")[2])
+            acts.append("join:" + id)
+            var object = value.objectValue!
+            object["surfaces"] = .array(object["surfaces"]!.arrayValue!.map { surface in
+                guard surface["id"]?.stringValue == id, var whole = surface.objectValue else { return surface }
+                whole["members"] = .array((whole["members"]?.arrayValue ?? []) + [.object(["userId": .null, "orderKey": .string("z")])])
+                return .object(whole)
+            })
+            value = .object(object)
+            emit(.object(["type": .string("surface.updated"), "payload": .object(["surfaceId": .string(id)])]))
+            return .init(status: 200, body: Data("{}".utf8))
+        }
         if method == "POST", path.hasSuffix("/send") {
             sends.append(try JSONDecoder().decode(JSONValue.self, from: body!))
             if loseSendAck { loseSendAck = false; throw URLError(.networkConnectionLost) }
@@ -124,14 +220,194 @@ private actor SyncFixture: AgentTransport {
         guard online else { throw URLError(.notConnectedToInternet) }
         streamHeaders.append(headers)
         let (body, continuation) = AsyncThrowingStream<Data, Error>.makeStream()
+        let streamID = streamHeaders.count
+        continuation.onTermination = { [weak self] _ in Task { await self?.streamClosed(streamID) } }
         continuations.append(continuation)
-        continuation.yield(Data("event: hello\ndata: {\"cursor\":\"cursor-1\",\"resumed\":true}\n\n".utf8))
+        let process = daemonId.map { ",\"daemonId\":\"\($0)\"" } ?? ""
+        let gap = nextHelloGap ? "true" : "false"
+        nextHelloGap = false
+        if holdHello { holdHello = false; heldHello = continuation; return .init(status: 200, body: body) }
+        continuation.yield(Data("event: hello\ndata: {\"cursor\":\"cursor-1\",\"resumed\":true,\"gap\":\(gap)\(process)}\n\n".utf8))
         return .init(status: 200, body: body)
     }
     func close() { continuations.forEach { $0.finish() }; continuations.removeAll() }
 }
 
 final class SyncEngineTests: XCTestCase {
+    private actor StreamLease {
+        var expired: (@Sendable () -> Void)?
+        var releases = 0
+        func acquire(_ expired: @escaping @Sendable () -> Void) -> (@Sendable () async -> Void)? {
+            self.expired = expired
+            return { await self.release() }
+        }
+        func release() { releases += 1 }
+        func expire() { expired?() }
+        func releaseCount() -> Int { releases }
+    }
+
+    func testShortBackgroundHoldsThenRacesFreshStream() async throws {
+        let transport = SyncFixture(), lease = StreamLease()
+        await transport.setDaemon("d1")
+        let engine = SyncEngine(client: AgentClient(transport: transport, token: "test"), directory: nil,
+                                streamHold: { await lease.acquire($0) })
+        await engine.start()
+        _ = try await wait(engine) { $0.live && !$0.syncing }
+        let reads = await transport.bootstrapReads()
+        await engine.background()
+        let closed = await transport.closedStreamCount()
+        XCTAssertEqual(closed, 0)
+        let delivering = await engine.deliveryAllowed
+        XCTAssertFalse(delivering)
+        await engine.foreground()
+        try await eventually { await transport.streamsOpened() == 2 }
+        _ = try await wait(engine) { $0.live && !$0.syncing }
+        let after = await transport.bootstrapReads()
+        XCTAssertEqual(after, reads, "same daemon resumes without rereading bootstrap")
+        try await eventually { await transport.closedStreamCount() == 1 }
+        await engine.stop()
+    }
+
+    func testBackgroundLeaseExpirationClosesHeldStream() async throws {
+        let transport = SyncFixture(), lease = StreamLease()
+        let engine = SyncEngine(client: AgentClient(transport: transport, token: "test"), directory: nil,
+                                streamHold: { await lease.acquire($0) })
+        await engine.start()
+        _ = try await wait(engine) { $0.live && !$0.syncing }
+        await engine.background()
+        await lease.expire()
+        try await eventually { await transport.closedStreamCount() == 1 }
+        try await eventually { await lease.releaseCount() == 1 }
+        await engine.foreground()
+        try await eventually { await transport.streamsOpened() == 2 }
+        await engine.stop()
+    }
+
+    func testHeldFrameWinsAndResumesQueuedDeliveryWithoutFreshHello() async throws {
+        let transport = SyncFixture(), lease = StreamLease()
+        await transport.setDaemon("d1")
+        let engine = SyncEngine(client: AgentClient(transport: transport, token: "test"), directory: nil,
+                                streamHold: { await lease.acquire($0) })
+        await engine.start()
+        _ = try await wait(engine) { $0.live && !$0.syncing }
+        let reads = await transport.bootstrapReads()
+        await engine.background()
+        await engine.markRead("last-agent")
+        let before = await transport.heardActs()
+        XCTAssertTrue(before.isEmpty)
+        await transport.holdNextHello()
+        await engine.foreground()
+        try await eventually { await transport.streamsOpened() == 2 }
+        let unproven = await engine.deliveryAllowed
+        XCTAssertFalse(unproven)
+        let reconnected = await transport.bootstrapReads()
+        XCTAssertEqual(reconnected, reads)
+        await transport.emitHeld(id: "held", .object(["type": .string("git.updated"), "payload": .object([:])]))
+        try await eventually { await transport.heardActs().contains("read:last-agent") }
+        _ = try await wait(engine) { $0.live && !$0.syncing }
+        await engine.stop()
+    }
+
+    func testBackgroundDeadlineClosesHeldStreamWithoutExpirationCallback() async throws {
+        let transport = SyncFixture(), lease = StreamLease()
+        let engine = SyncEngine(client: AgentClient(transport: transport, token: "test"), directory: nil,
+                                streamHold: { await lease.acquire($0) }, streamHoldDuration: .milliseconds(30))
+        await engine.start()
+        _ = try await wait(engine) { $0.live && !$0.syncing }
+        await engine.background()
+        try await eventually { await transport.closedStreamCount() == 1 }
+        _ = try await wait(engine) { !$0.live }
+        await engine.foreground()
+        try await eventually { await transport.streamsOpened() == 2 }
+        await engine.stop()
+    }
+
+    func testMoveWhileBackgroundedDropsHeldFlowWithoutOpeningAnother() async throws {
+        let transport = SyncFixture(), lease = StreamLease()
+        let engine = SyncEngine(client: AgentClient(transport: transport, token: "test"), directory: nil,
+                                streamHold: { await lease.acquire($0) })
+        await engine.start()
+        _ = try await wait(engine) { $0.live && !$0.syncing }
+        await engine.background()
+        await engine.moved()
+        let count = await transport.streamsOpened()
+        XCTAssertEqual(count, 1)
+        await engine.foreground()
+        try await eventually { await transport.streamsOpened() == 2 }
+        await engine.stop()
+    }
+
+    func testHeldFlowLostWhileBackgroundedReconnectsOnForeground() async throws {
+        let transport = SyncFixture(), lease = StreamLease()
+        let engine = SyncEngine(client: AgentClient(transport: transport, token: "test"), directory: nil,
+                                streamHold: { await lease.acquire($0) })
+        await engine.start()
+        _ = try await wait(engine) { $0.live && !$0.syncing }
+        await engine.background()
+        await transport.dropStreams()
+        _ = try await wait(engine) { !$0.live }
+        await engine.foreground()
+        try await eventually { await transport.streamsOpened() == 2 }
+        _ = try await wait(engine) { $0.live && !$0.syncing }
+        await engine.stop()
+    }
+
+    func testSilentRaceClosesBothAndReconnects() async throws {
+        let transport = SyncFixture(), lease = StreamLease()
+        let engine = SyncEngine(client: AgentClient(transport: transport, token: "test"), directory: nil,
+                                streamHold: { await lease.acquire($0) })
+        await engine.start()
+        _ = try await wait(engine) { $0.live && !$0.syncing }
+        await engine.background()
+        await transport.configure(online: false)
+        await engine.foreground()
+        // Nothing wins within the race's few seconds: the held flow is
+        // closed, the tunnel reset, and the stream opened as after any loss.
+        for _ in 0..<200 where await !transport.heardResets().contains(.realtime) {
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        let closed = await transport.closedStreamCount()
+        XCTAssertEqual(closed, 1)
+        await transport.configure(online: true)
+        _ = try await wait(engine) { $0.live && !$0.syncing && !$0.reconnecting }
+        let delivering = await engine.deliveryAllowed
+        XCTAssertTrue(delivering)
+        await engine.stop()
+    }
+
+    func testFreshHelloAfterBackgroundDetectsDaemonRestart() async throws {
+        let transport = SyncFixture(), lease = StreamLease()
+        await transport.setDaemon("d1")
+        let engine = SyncEngine(client: AgentClient(transport: transport, token: "test"), directory: nil,
+                                streamHold: { await lease.acquire($0) })
+        await engine.start()
+        _ = try await wait(engine) { $0.live && !$0.syncing }
+        let reads = await transport.bootstrapReads()
+        await engine.background()
+        await transport.setDaemon("d2")
+        await engine.foreground()
+        try await eventually { await transport.bootstrapReads() > reads }
+        await engine.stop()
+    }
+
+    func testRepeatedEventIDIsDeliveredOnlyOnce() async throws {
+        let transport = SyncFixture()
+        let engine = SyncEngine(client: AgentClient(transport: transport, token: "test"), directory: nil, rereadInterval: .zero)
+        await engine.start()
+        _ = try await wait(engine) { $0.live && !$0.syncing }
+        let reads = await transport.bootstrapReads()
+        let event: JSONValue = .object(["type": .string("workspace.updated"), "payload": .object([:])])
+        await transport.emit(id: "once", event)
+        try await eventually { await transport.bootstrapReads() > reads }
+        _ = try await wait(engine) { !$0.syncing }
+        let after = await transport.bootstrapReads()
+        await transport.emit(id: "once", event)
+        try await Task.sleep(for: .milliseconds(100))
+        let duplicated = await transport.bootstrapReads()
+        XCTAssertEqual(duplicated, after)
+        await engine.stop()
+    }
+
     private struct Timeout: Error {}
     private func wait(_ engine: SyncEngine, _ predicate: @escaping @Sendable (HomeSnapshot) -> Bool) async throws -> HomeSnapshot {
         try await withThrowingTaskGroup(of: HomeSnapshot.self) { group in
@@ -148,7 +424,7 @@ final class SyncEngineTests: XCTestCase {
 
     func testTransientReconcileFailureRetriesWithoutAnotherEvent() async throws {
         let transport = SyncFixture()
-        let engine = SyncEngine(client: AgentClient(transport: transport, token: "test"), directory: nil)
+        let engine = SyncEngine(client: AgentClient(transport: transport, token: "test"), directory: nil, rereadInterval: .zero)
         await engine.start()
         _ = try await wait(engine) { $0.live }
         await transport.renameProjectAfterOneFailedRead()
@@ -157,15 +433,166 @@ final class SyncEngineTests: XCTestCase {
         await engine.stop()
     }
 
+    /// What a computer's health says it serves reaches the conversations
+    /// with each read of home: Gen UI's secret and plugin actions.
+    func testHealthSaysWhichGenUIActionsTheComputerRuns() async throws {
+        let transport = SyncFixture()
+        await transport.report(.object(["artifactSecretActions": .bool(true), "plugins": .bool(false)]))
+        let engine = SyncEngine(client: AgentClient(transport: transport, token: "test"), directory: nil, rereadInterval: .zero)
+        let updates = engine.spaces.updates
+        await engine.start()
+        let served = try await withThrowingTaskGroup(of: GenUIServed.self) { group in
+            group.addTask {
+                for await snapshot in updates where snapshot.references.genUIServed != GenUIServed() { return snapshot.references.genUIServed }
+                throw Timeout()
+            }
+            group.addTask { try await Task.sleep(for: .seconds(4)); throw Timeout() }
+            defer { group.cancelAll() }
+            return try await group.next()!
+        }
+        XCTAssertEqual(served, GenUIServed(secretActions: true, plugins: false))
+        await engine.stop()
+    }
+
+    /// News during every read, as while agents work: each read is still
+    /// taken, so home moves at once rather than when the news stops.
+    func testNewsDuringEveryReadStillMovesHome() async throws {
+        let transport = SyncFixture()
+        let engine = SyncEngine(client: AgentClient(transport: transport, token: "test"), directory: nil, rereadInterval: .zero)
+        await engine.start()
+        _ = try await wait(engine) { $0.live }
+        await transport.renameProject(withNewsDuringReads: 1_000)
+        let changed = try await wait(engine) { $0.rows.contains { $0.label == "Renamed while busy" } }
+        XCTAssertTrue(changed.live)
+        await engine.stop()
+    }
+
+    /// A dropped stream that comes back to the same process with nothing
+    /// missed picks up after the last event and reads nothing again; a gap
+    /// or another process reads home first.
+    func testAReconnectReadsOnlyWhatItMissed() async throws {
+        let transport = SyncFixture()
+        await transport.setDaemon("d1")
+        let engine = SyncEngine(client: AgentClient(transport: transport, token: "test"), directory: nil, rereadInterval: .zero)
+        await engine.start()
+        _ = try await wait(engine) { $0.live && !$0.syncing }
+        let first = await transport.bootstrapReads()
+        await transport.emit(id: "cursor-2", .object(["type": .string("git.updated"), "payload": .object([:])]))
+        try await Task.sleep(for: .milliseconds(100))
+
+        await transport.drop()
+        _ = try await wait(engine) { !$0.live }
+        _ = try await wait(engine) { $0.live && !$0.syncing }
+        let resumed = await transport.bootstrapReads()
+        XCTAssertEqual(resumed, first, "back on the same process with nothing stale: no read")
+        let resumedFrom = await transport.lastStreamCursor()
+        XCTAssertEqual(resumedFrom, "cursor-2", "picked up after the last event taken in")
+
+        await transport.gapNextHello()
+        await transport.drop()
+        _ = try await wait(engine) { !$0.live }
+        try await eventually { await transport.bootstrapReads() > resumed }
+
+        let afterGap = await transport.bootstrapReads()
+        await transport.setDaemon("d2")
+        await transport.drop()
+        _ = try await wait(engine) { !$0.live }
+        try await eventually { await transport.bootstrapReads() > afterGap }
+        await engine.stop()
+    }
+
+    /// A pause whose tasks wind down slowly, overtaken by a start that
+    /// comes back live, leaves the outbox to that start: what the person
+    /// does next still goes out.
+    func testALatePauseDoesNotTakeALiveEngineOffline() async throws {
+        let transport = SyncFixture()
+        let engine = SyncEngine(client: AgentClient(transport: transport, token: "test"), directory: nil, rereadInterval: .zero)
+        await engine.start()
+        _ = try await wait(engine) { $0.live && !$0.syncing }
+        await transport.holdNextBootstrap()
+        await transport.emit(.object(["type": .string("workspace.updated"), "payload": .object(["workspaceId": .string("work")])]))
+        try await eventually { await transport.isHolding() }
+
+        // The pause waits on that read; a start gets in once it let go of the run.
+        let pausing = Task { await engine.pause() }
+        try await eventually {
+            await engine.start()
+            return await transport.streamsOpened() == 2
+        }
+        await transport.release()
+        await pausing.value
+
+        await engine.markRead("last-agent")
+        try await eventually { await transport.heardActs().contains("read:last-agent") }
+        await engine.stop()
+    }
+
+    /// Wi-Fi to cellular: the stream, live over the old way, is opened
+    /// again at once on a new tunnel, every tunnel woken, and home says it
+    /// is reconnecting until the stream answers, then picks up where it was.
+    func testAMoveOpensTheStreamAgainAtOnce() async throws {
+        let transport = SyncFixture()
+        await transport.setDaemon("d1")
+        let engine = SyncEngine(client: AgentClient(transport: transport, token: "test"), directory: nil, rereadInterval: .zero)
+        await engine.start()
+        _ = try await wait(engine) { $0.live && !$0.syncing }
+        let reads = await transport.bootstrapReads()
+        // The new stream's hello waits, so the step between is seen.
+        await transport.holdNextHello()
+
+        await engine.moved()
+        let between = try await wait(engine) { !$0.live && $0.reconnecting }
+        XCTAssertNil(between.error, "the header's \"connecting…\" (`Session.headerState`)")
+        try await eventually { await transport.streamsOpened() == 2 }
+        await transport.releaseHello()
+        _ = try await wait(engine) { $0.live && !$0.syncing }
+        let resets = await transport.heardResets()
+        XCTAssertEqual(resets, [.realtime])
+        try await eventually { await transport.heardWakes() == 1 }
+        let after = await transport.bootstrapReads()
+        XCTAssertEqual(after, reads, "the same process with nothing missed: no read")
+        await engine.stop()
+    }
+
+    /// The app goes to the background while a move closes the old tunnel:
+    /// the move doesn't start the engine again behind the pause.
+    func testAMoveDoesNotUndoAPauseThatCameMeanwhile() async throws {
+        let transport = SyncFixture()
+        let engine = SyncEngine(client: AgentClient(transport: transport, token: "test"), directory: nil, rereadInterval: .zero)
+        await engine.start()
+        _ = try await wait(engine) { $0.live && !$0.syncing }
+        await transport.holdNextReset()
+        let moving = Task { await engine.moved() }
+        try await eventually { await transport.isHoldingReset() }
+
+        await engine.pause()
+        await transport.releaseReset()
+        await moving.value
+        try await Task.sleep(for: .milliseconds(200))
+        let streams = await transport.streamsOpened()
+        XCTAssertEqual(streams, 1, "the paused engine opened its stream again")
+        let delivering = await engine.deliveryAllowed
+        XCTAssertFalse(delivering)
+        await engine.stop()
+    }
+
+    private func eventually(_ condition: @escaping @Sendable () async -> Bool) async throws {
+        for _ in 0..<80 {
+            if await condition() { return }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        XCTFail("not in time")
+    }
+
     func testAccountDrainsPersistedSendWithoutOpeningConversation() async throws {
         let directory = folder()
         defer { try? FileManager.default.removeItem(at: directory) }
         let transport = SyncFixture()
         let mode = AgentWire.Mode(providerId: "test", modelId: "test-model", effort: "low", serviceTier: nil, permissionMode: "auto")
-        let first = SyncEngine(client: AgentClient(transport: transport, token: "test"), directory: directory)
+        let first = SyncEngine(client: AgentClient(transport: transport, token: "test"), directory: directory, rereadInterval: .zero)
         try await first.enqueueMessage(.init(id: "stable-message", agentID: "never-opened", text: "Offline text", pictures: [], mode: mode))
         await first.stop()
-        let reopened = SyncEngine(client: AgentClient(transport: transport, token: "test"), directory: directory)
+        let reopened = SyncEngine(client: AgentClient(transport: transport, token: "test"), directory: directory, rereadInterval: .zero)
         await reopened.start()
         _ = try await wait(reopened) { $0.live }
         for _ in 0..<100 {
@@ -185,7 +612,7 @@ final class SyncEngineTests: XCTestCase {
     func testAmbiguousSendAcknowledgementRetainsExactPayloadAndPausesRetries() async throws {
         let transport = SyncFixture()
         await transport.loseNextSendAcknowledgement()
-        let engine = SyncEngine(client: AgentClient(transport: transport, token: "test"), directory: nil)
+        let engine = SyncEngine(client: AgentClient(transport: transport, token: "test"), directory: nil, rereadInterval: .zero)
         await engine.start()
         _ = try await wait(engine) { $0.live }
         let mode = AgentWire.Mode(providerId: "test", modelId: "chosen-model", effort: "high", serviceTier: nil, permissionMode: "auto")
@@ -216,6 +643,8 @@ final class SyncEngineTests: XCTestCase {
         XCTAssertEqual(all.map { $0.kind == .separator ? "—" : $0.label }, ["Artifacts", "Todos", "Notes", "Groceries", "—", "Happy", "Delegated task", "—", "Last created", "First created", "—", "App", "Root chat", "Feature"])
         XCTAssertEqual(all.map(\.id).count, Set(all.map(\.id)).count)
         XCTAssertEqual(all.first { $0.label == "Delegated task" }?.depth, 1)
+        // The task the person isn't in isn't listed, but search finds it, and it opens its conversation.
+        XCTAssertEqual(SidebarRows.unjoinedTasks(desktop).map { [$0.label, $0.agentId ?? "", $0.targetKind ?? ""] }, [["Not joined", "unjoined-agent", "task"]])
         let settings: [String: JSONValue] = [DesktopSettingKeys.projectsVisibility: .object(["projectsHidden": .bool(true)]), "happy-desktop.bot.happy": .object(["hidden": .bool(true)])]
         let hidden = SidebarRows.make(desktop, settings: settings)
         XCTAssertEqual(hidden.map { $0.kind == .separator ? "—" : $0.label }, ["Artifacts", "Todos", "Notes", "Groceries", "—", "—", "Last created", "First created"])
@@ -225,7 +654,7 @@ final class SyncEngineTests: XCTestCase {
         let directory = folder()
         defer { try? FileManager.default.removeItem(at: directory) }
         let transport = SyncFixture()
-        let engine = SyncEngine(client: AgentClient(transport: transport, token: "test"), directory: directory)
+        let engine = SyncEngine(client: AgentClient(transport: transport, token: "test"), directory: directory, rereadInterval: .zero)
         await engine.start()
         _ = try await wait(engine) { $0.live && $0.loaded }
         await engine.pause()
@@ -235,7 +664,7 @@ final class SyncEngineTests: XCTestCase {
         XCTAssertFalse(optimistic.rows.contains { $0.targetKind == "project" })
         await engine.stop()
 
-        let reopened = SyncEngine(client: AgentClient(transport: transport, token: "test"), directory: directory)
+        let reopened = SyncEngine(client: AgentClient(transport: transport, token: "test"), directory: directory, rereadInterval: .zero)
         await reopened.start()
         let offline = try await wait(reopened) { $0.loaded }
         XCTAssertFalse(offline.live)
@@ -250,8 +679,9 @@ final class SyncEngineTests: XCTestCase {
         XCTAssertEqual(writes.count, 1)
         XCTAssertNotNil(writes.first?["mutationId"]?.stringValue)
         XCTAssertNotNil(writes.first?["updatedAt"]?.numberValue)
+        // A relaunch opens the stream from now, home read beside it: no replay.
         let headers = await transport.streamHeaders
-        XCTAssertTrue(headers.allSatisfy { $0["Last-Event-ID"] == "cursor-1" })
+        XCTAssertTrue(headers.allSatisfy { $0["Last-Event-ID"] == nil })
         await reopened.stop()
     }
 
@@ -261,7 +691,7 @@ final class SyncEngineTests: XCTestCase {
     func testAStartedSessionIsKeptInThePersonsSettings() async throws {
         typealias Key = ModelPreferences.Key
         let transport = SyncFixture()
-        let engine = SyncEngine(client: AgentClient(transport: transport, token: "test"), directory: nil)
+        let engine = SyncEngine(client: AgentClient(transport: transport, token: "test"), directory: nil, rereadInterval: .zero)
         await engine.start()
         _ = try await wait(engine) { $0.live && $0.loaded }
         await engine.pause()
@@ -290,7 +720,7 @@ final class SyncEngineTests: XCTestCase {
 
     func testRemoteSettingChangesHomeAndAStaleOfflineEditAdoptsServerWinner() async throws {
         let transport = SyncFixture()
-        let engine = SyncEngine(client: AgentClient(transport: transport, token: "test"), directory: nil)
+        let engine = SyncEngine(client: AgentClient(transport: transport, token: "test"), directory: nil, rereadInterval: .zero)
         await engine.start()
         _ = try await wait(engine) { $0.live }
         await transport.setProjectsHidden(true)
@@ -313,7 +743,7 @@ final class SyncEngineTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: directory) }
         let transport = SyncFixture()
         await transport.setUnread(task: "last", true)
-        let engine = SyncEngine(client: AgentClient(transport: transport, token: "test"), directory: directory)
+        let engine = SyncEngine(client: AgentClient(transport: transport, token: "test"), directory: directory, rereadInterval: .zero)
         await engine.start()
         let first = try await wait(engine) { $0.live && $0.loaded }
         XCTAssertEqual(first.rows.first { $0.label == "Last created" }?.unread, true)
@@ -328,7 +758,7 @@ final class SyncEngineTests: XCTestCase {
         await engine.stop()
 
         // Killed and opened again, still offline: as the person left it.
-        let reopened = SyncEngine(client: AgentClient(transport: transport, token: "test"), directory: directory)
+        let reopened = SyncEngine(client: AgentClient(transport: transport, token: "test"), directory: directory, rereadInterval: .zero)
         await reopened.start()
         let offline = try await wait(reopened) { $0.loaded }
         XCTAssertFalse(offline.live)
@@ -353,7 +783,7 @@ final class SyncEngineTests: XCTestCase {
     /// the dot stays off while the read waits.
     func testAStaleReadDoesNotBringTheDotBack() async throws {
         let transport = SyncFixture()
-        let engine = SyncEngine(client: AgentClient(transport: transport, token: "test"), directory: nil)
+        let engine = SyncEngine(client: AgentClient(transport: transport, token: "test"), directory: nil, rereadInterval: .zero)
         await engine.start()
         _ = try await wait(engine) { $0.live && $0.loaded }
         await engine.pause()
@@ -369,11 +799,29 @@ final class SyncEngineTests: XCTestCase {
         await engine.stop()
     }
 
+    /// Opening a Surface the person isn't in joins it, as desktop's
+    /// opening does (de78af49), and home lists it once the computer says
+    /// so; one already in their list, or one home doesn't know, sends nothing.
+    func testOpeningASurfaceThePersonIsntInJoinsIt() async throws {
+        let transport = SyncFixture()
+        let engine = SyncEngine(client: AgentClient(transport: transport, token: "test"), directory: nil, rereadInterval: .zero)
+        await engine.start()
+        let before = try await wait(engine) { $0.live && $0.loaded }
+        XCTAssertFalse(before.rows.contains { $0.label == "Other person's document" })
+        await engine.join(surfaceId: "doc")
+        await engine.join(surfaceId: "missing")
+        await engine.join(surfaceId: "other")
+        _ = try await wait(engine) { $0.rows.contains { $0.label == "Other person's document" } }
+        let heard = await transport.heardActs()
+        XCTAssertEqual(heard, ["join:other"])
+        await engine.stop()
+    }
+
     /// A refused archive rolls back: the row is back, and the list says why.
     func testARefusedArchiveRollsBackWithANotice() async throws {
         let transport = SyncFixture()
         await transport.refuseArchives()
-        let engine = SyncEngine(client: AgentClient(transport: transport, token: "test"), directory: nil)
+        let engine = SyncEngine(client: AgentClient(transport: transport, token: "test"), directory: nil, rereadInterval: .zero)
         await engine.start()
         _ = try await wait(engine) { $0.live && $0.loaded }
         let kept = await engine.archive(kind: "task", id: "first")
@@ -390,7 +838,7 @@ final class SyncEngineTests: XCTestCase {
     /// retired Stem Cells experiment: the spaces sidebar is never read.
     func testStemCellsSettingLeavesHomeClassic() async throws {
         let transport = SyncFixture()
-        let engine = SyncEngine(client: AgentClient(transport: transport, token: "test"), directory: nil)
+        let engine = SyncEngine(client: AgentClient(transport: transport, token: "test"), directory: nil, rereadInterval: .zero)
         await engine.start()
         let classic = try await wait(engine) { $0.live && $0.loaded && !$0.syncing }
         await transport.turnOnStemCells()
@@ -399,6 +847,174 @@ final class SyncEngineTests: XCTestCase {
         try await Task.sleep(for: .milliseconds(100))
         let requested = await transport.requestedPaths()
         XCTAssertFalse(requested.contains("/v0/spaces/sidebar?widgets=true"))
+        await engine.stop()
+    }
+
+    /// A fresh stream (away past `resumeWindow`) paused before its read
+    /// lands, then woken within the window: the wake asks for what came
+    /// after the last event (`Last-Event-ID`) only when the stream came from
+    /// the process an earlier read verified. Another process, or one that
+    /// names none, opens from now and reads.
+    private func wakeAfterAnUnreadStream(daemon first: String?, then second: String?) async throws -> String? {
+        let transport = SyncFixture()
+        await transport.setDaemon(first)
+        let engine = SyncEngine(client: AgentClient(transport: transport, token: "test"), directory: nil, resumeWindow: .milliseconds(400), rereadInterval: .zero)
+        await engine.start()
+        _ = try await wait(engine) { $0.live && !$0.syncing }
+        await engine.pause()
+        try await Task.sleep(for: .milliseconds(500))
+        await transport.setDaemon(second)
+        await transport.holdNextBootstrap()
+        await engine.start()
+        _ = try await wait(engine) { $0.live }
+        try await eventually { await transport.isHolding() }
+        // The read lands only after the pause has let go of it.
+        let release = Task { try await Task.sleep(for: .milliseconds(100)); await transport.release() }
+        await engine.pause()
+        try await release.value
+        let opened = await transport.streamsOpened()
+        await engine.start()
+        try await eventually { await transport.streamsOpened() > opened }
+        let cursor = await transport.lastStreamCursor()
+        await engine.stop()
+        return cursor
+    }
+
+    func testAWakeAfterAnUnreadStreamFromTheSameProcessPicksUp() async throws {
+        let cursor = try await wakeAfterAnUnreadStream(daemon: "d1", then: "d1")
+        XCTAssertEqual(cursor, "cursor-1")
+    }
+
+    func testAWakeAfterAnUnreadStreamFromAnotherProcessOpensFromNow() async throws {
+        let cursor = try await wakeAfterAnUnreadStream(daemon: "d1", then: "d2")
+        XCTAssertNil(cursor)
+    }
+
+    func testAProcessThatNamesNoneNeverPicksUp() async throws {
+        let cursor = try await wakeAfterAnUnreadStream(daemon: nil, then: nil)
+        XCTAssertNil(cursor)
+    }
+
+    // MARK: Task events laid over home
+
+    private static let newTask: JSONValue = .object(["type": .string("task.created"), "payload": .object(["task": .object([
+        "id": .string("new"), "name": .string("Fresh task"), "status": .string("active"), "ownerUserId": .null,
+        "agent": .object(["id": .string("new-agent"), "workspaceId": .string("new-work"), "status": .string("idle")]),
+    ])])])
+    private static let joinedNew: JSONValue = .object(["type": .string("task.joined"), "payload": .object(["membership": .object([
+        "taskId": .string("new"), "orderKey": .string("0"), "userId": .null,
+    ])])])
+    private func taskLabels(_ snapshot: HomeSnapshot) -> [String] { snapshot.rows.filter { $0.targetKind == "task" }.map(\.label) }
+
+    /// A task made on the computer is on home from its own events, first in
+    /// the person's list, with no bootstrap read: reading the whole of it
+    /// again took ten seconds on a poor network.
+    func testANewTaskIsOnHomeFromItsEventsWithoutARead() async throws {
+        let transport = SyncFixture()
+        let engine = SyncEngine(client: AgentClient(transport: transport, token: "test"), directory: nil, rereadInterval: .zero)
+        await engine.start()
+        _ = try await wait(engine) { $0.live && !$0.syncing }
+        let reads = await transport.bootstrapReads()
+        await transport.emit(id: "e2", Self.newTask)
+        await transport.emit(id: "e3", Self.joinedNew)
+        let shown = try await wait(engine) { $0.rows.contains { $0.label == "Fresh task" } }
+        XCTAssertEqual(taskLabels(shown), ["Fresh task", "Last created", "First created"])
+        XCTAssertEqual(shown.rows.first { $0.label == "Fresh task" }?.canArchive, true, "a standalone computer's person may archive it")
+        try await Task.sleep(for: .milliseconds(100))
+        let after = await transport.bootstrapReads()
+        XCTAssertEqual(after, reads)
+        await engine.stop()
+    }
+
+    /// The membership coming before the task it names: the row comes with the task.
+    func testAJoinBeforeItsTaskStillShowsTheTask() async throws {
+        let transport = SyncFixture()
+        let engine = SyncEngine(client: AgentClient(transport: transport, token: "test"), directory: nil, rereadInterval: .zero)
+        await engine.start()
+        _ = try await wait(engine) { $0.live && !$0.syncing }
+        let reads = await transport.bootstrapReads()
+        await transport.emit(id: "e2", Self.joinedNew)
+        await transport.emit(id: "e3", Self.newTask)
+        let shown = try await wait(engine) { $0.rows.contains { $0.label == "Fresh task" } }
+        XCTAssertEqual(taskLabels(shown), ["Fresh task", "Last created", "First created"])
+        let after = await transport.bootstrapReads()
+        XCTAssertEqual(after, reads)
+        await engine.stop()
+    }
+
+    /// A read on its way when the task's events come began before them and
+    /// has none of it: the task stays on home when it lands.
+    func testAReadBegunBeforeANewTaskKeepsItWhenItLands() async throws {
+        let transport = SyncFixture()
+        let engine = SyncEngine(client: AgentClient(transport: transport, token: "test"), directory: nil, rereadInterval: .zero)
+        await engine.start()
+        _ = try await wait(engine) { $0.live && !$0.syncing }
+        await transport.holdNextBootstrap()
+        await transport.renameProject(withNewsDuringReads: 0)
+        try await eventually { await transport.isHolding() }
+        await transport.emit(id: "e2", Self.newTask)
+        await transport.emit(id: "e3", Self.joinedNew)
+        _ = try await wait(engine) { $0.rows.contains { $0.label == "Fresh task" } }
+        await transport.release()
+        let landed = try await wait(engine) { $0.rows.contains { $0.label == "Renamed while busy" } }
+        XCTAssertEqual(taskLabels(landed), ["Fresh task", "Last created", "First created"])
+        await engine.stop()
+    }
+
+    /// Leaving a task takes its row away at once, and reads nothing.
+    func testLeavingATaskTakesItsRowAway() async throws {
+        let transport = SyncFixture()
+        let engine = SyncEngine(client: AgentClient(transport: transport, token: "test"), directory: nil, rereadInterval: .zero)
+        await engine.start()
+        _ = try await wait(engine) { $0.live && !$0.syncing }
+        let reads = await transport.bootstrapReads()
+        await transport.emit(id: "e2", .object(["type": .string("task.left"), "payload": .object(["membership": .object(["taskId": .string("first"), "orderKey": .string("b")])])]))
+        let left = try await wait(engine) { !$0.rows.contains { $0.label == "First created" } }
+        XCTAssertEqual(taskLabels(left), ["Last created"])
+        let after = await transport.bootstrapReads()
+        XCTAssertEqual(after, reads)
+        await engine.stop()
+    }
+
+    /// A task renamed, and one deleted for good, change home from their
+    /// events, as a new one does, and read nothing.
+    func testARenamedAndARemovedTaskChangeHomeWithoutARead() async throws {
+        let transport = SyncFixture()
+        let engine = SyncEngine(client: AgentClient(transport: transport, token: "test"), directory: nil, rereadInterval: .zero)
+        await engine.start()
+        _ = try await wait(engine) { $0.live && !$0.syncing }
+        let reads = await transport.bootstrapReads()
+        await transport.emit(id: "e2", .object(["type": .string("task.updated"), "payload": .object([
+            "taskId": .string("last"), "previousVersion": .string("v1"), "version": .string("v2"), "changes": .object(["name": .string("Renamed")]),
+        ])]))
+        _ = try await wait(engine) { $0.rows.contains { $0.label == "Renamed" } }
+        await transport.emit(id: "e3", .object(["type": .string("task.removed"), "payload": .object(["taskId": .string("first"), "previousVersion": .string("v1")])]))
+        let removed = try await wait(engine) { !$0.rows.contains { $0.label == "First created" } }
+        XCTAssertEqual(taskLabels(removed), ["Renamed"])
+        try await Task.sleep(for: .milliseconds(100))
+        let after = await transport.bootstrapReads()
+        XCTAssertEqual(after, reads)
+        await engine.stop()
+    }
+
+    /// What can't be laid over home is read: a task change beyond its own
+    /// fields, and an agent made in a project, whose place the event doesn't
+    /// carry. A task's own agent, which comes whole with its task, reads nothing.
+    func testWhatCantBeLaidOverHomeIsRead() async throws {
+        let transport = SyncFixture()
+        let engine = SyncEngine(client: AgentClient(transport: transport, token: "test"), directory: nil, rereadInterval: .zero)
+        await engine.start()
+        _ = try await wait(engine) { $0.live && !$0.syncing }
+        let reads = await transport.bootstrapReads()
+        await transport.emit(id: "e2", .object(["type": .string("agent.created"), "payload": .object(["agent": .object(["id": .string("first-agent"), "workspaceId": .string("one")])])]))
+        try await Task.sleep(for: .milliseconds(100))
+        let owned = await transport.bootstrapReads()
+        XCTAssertEqual(owned, reads)
+        await transport.emit(id: "e3", .object(["type": .string("task.updated"), "payload": .object(["taskId": .string("first"), "changes": .object(["compute": .object([:])])])]))
+        try await eventually { await transport.bootstrapReads() > owned }
+        let changed = await transport.bootstrapReads()
+        await transport.emit(id: "e4", .object(["type": .string("agent.created"), "payload": .object(["agent": .object(["id": .string("session"), "workspaceId": .string("p")])])]))
+        try await eventually { await transport.bootstrapReads() > changed }
         await engine.stop()
     }
 }

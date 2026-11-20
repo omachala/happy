@@ -8,6 +8,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.advanceUntilIdle
@@ -101,6 +102,50 @@ class ToolCallsTest {
         assertEquals(listOf(Presentation.Search.Source("Spec", "https://evanw.github.io/thumbhash/")), (call.presentation as Presentation.Search).sources)
     }
 
+    @Test fun `historical and unknown presentations remain generic calls with their raw data`() {
+        val cases = listOf(
+            "show_ui" to """{"type":"ui","ui":{"id":"u","components":[{"id":"model","type":"default_model","props":{}}]}}""",
+            "suggest_replies" to """{"type":"quick_replies","options":["Yes","No"]}""",
+            "show_ui" to """{"type":"ui","ui":42}""",
+            "suggest_replies" to """{"type":"quick_replies","options":false}""",
+            "future_tool" to """{"type":"future","items":[1,2]}""",
+        )
+        for ((name, presentation) in cases) {
+            val message = Message.parse(Json.parseToJsonElement("""{
+                "id":"m","role":"agent","createdAt":1,"content":[
+                  {"type":"text","text":"Before"},
+                  {"type":"tool_call","id":"c","name":"$name","status":"completed",
+                   "arguments":{"value":"input"},"result":{"output":"result"},"presentation":$presentation},
+                  {"type":"text","text":"After"}]}"""))!!
+            val call = message.content[1] as Block.ToolCall
+            assertNull(name, call.presentation)
+            assertEquals(name, ToolKind.ToolCall, ToolKind.of(name, call.presentation))
+            val rows = ConversationRowBuilder.build(message, "a", null, false)
+            assertEquals(name, listOf("m:0", "m:1", "m:2"), rows.map { it.key })
+            assertEquals(name, name, (rows[1] as ConversationRow.Tool).name)
+            val kept = Message.parse(KeptConversation.messageJson(message))!!
+            val back = kept.content[1] as Block.ToolCall
+            assertEquals(name, call.arguments, back.arguments)
+            assertEquals(name, call.result, back.result)
+            assertEquals(name, rows, ConversationRowBuilder.build(kept, "a", null, false))
+        }
+    }
+
+    @Test fun `retired widget blocks are skipped while neighboring text and user messages still read`() {
+        val message = Message.parse(Json.parseToJsonElement("""{
+            "id":"m","role":"agent","createdAt":1,"content":[
+              {"type":"text","text":"Before"},{"type":"ui","ui":{}},
+              {"type":"quick_replies","options":["Yes"]},{"type":"text","text":"After"}]}"""))!!
+        assertEquals(listOf("Before", "After"), ConversationRowBuilder.build(message, "a", null, false).map { (it as ConversationRow.Text).text })
+        val user = Message.parse(Json.parseToJsonElement("""{
+            "id":"u","role":"user","createdAt":2,"quickReply":{"messageId":"m","index":0},
+            "content":[{"type":"text","text":"Yes"}]}"""))!!
+        assertEquals("Yes", (ConversationRowBuilder.build(user, "a", null, false).single() as ConversationRow.User).text)
+        val attempt = Message.parse(Json.parseToJsonElement("""{
+            "id":"attempt","role":"service","createdAt":3,"content":[{"type":"action","outcome":"pending"}]}"""))!!
+        assertTrue(ConversationRowBuilder.build(attempt, "a", null, false).isEmpty())
+    }
+
     @Test fun `raw strings past the limit are cut and say so`() {
         val long = "x".repeat(ToolData.LIMIT + 10)
         val call = block("""{"type":"tool_call","id":"c","name":"mystery","status":"completed","arguments":{"a":"short"},"result":{"output":"$long"}}""")
@@ -172,10 +217,10 @@ class ToolCallsTest {
         assertEquals(ToolValue.Text("k1", mono = true), parsed.fields[0].value)
     }
 
-    @Test fun `a held call is found in its run and read whole from the page just before the next run`() = runTest {
+    @Test fun `a compact labeled call is found in its run and detail reads the whole call once`() = runTest {
         val requests = ArrayList<String>()
         val history = """{"runs":[
-            {"id":"r1","status":"completed","messages":[{"id":"m1","role":"agent","createdAt":1,"content":[{"type":"tool_call","id":"c1","name":"Bash","status":"completed","presentation":{"type":"exec_command","command":"ls","output":"a"}}]}]},
+            {"id":"r1","status":"completed","messages":[{"id":"m1","role":"agent","createdAt":1,"content":[{"type":"tool_call","id":"c1","name":"Bash","status":"completed","arguments":{"description":"List files"},"presentation":{"type":"exec_command","command":"ls","output":"a"}}]}]},
             {"id":"r2","status":"completed","messages":[{"id":"m2","role":"agent","createdAt":2,"content":[{"type":"text","text":"done"}]}]}
         ],"hasMore":false}"""
         val whole = """{"runs":[{"id":"r1","status":"completed","messages":[{"id":"m1","role":"agent","createdAt":1,"content":[{"type":"tool_call","id":"c1","name":"Bash","status":"completed","arguments":{"cmd":"ls"},"result":{"output":"a"},"presentation":{"type":"exec_command","command":"ls","output":"a"}}]}]}],"hasMore":true}"""
@@ -205,10 +250,14 @@ class ToolCallsTest {
         assertNotNull(located)
         assertEquals("r1", located!!.runId)
         assertEquals("r2", located.nextRunId)
-        assertNull(located.call.arguments)
+        assertEquals(Json.parseToJsonElement("""{"description":"List files"}"""), located.call.arguments)
 
-        val full = conversation.fullToolCall("c1", located)
+        val model = com.slopus.happy.ui.conversation.ToolCallModel(ToolCallReader(ConversationApi(request), "a1"), "c1", conversation)
+        scope.launch { model.observe() }
+        advanceUntilIdle()
+        val full = model.state.value.call
         assertEquals(Json.parseToJsonElement("""{"cmd":"ls"}"""), full!!.arguments)
+        assertEquals(1, requests.count { it.contains("omitToolData=false") })
         val asked = requests.last()
         assertTrue(asked, asked.contains("before=r2") && asked.contains("limit=1") && asked.contains("omitToolData=false"))
         assertNull(conversation.toolCall("missing"))
@@ -236,7 +285,11 @@ class ToolCallsTest {
         val presented = block("""{"type":"tool_call","id":"c","name":"Bash","status":"completed","presentation":{"type":"exec_command","command":"ls"}}""")
         assertTrue(com.slopus.happy.ui.conversation.ToolCallModel.wants(presented))
         assertFalse(com.slopus.happy.ui.conversation.ToolCallModel.wants(presented.copy(status = "running")))
-        assertFalse(com.slopus.happy.ui.conversation.ToolCallModel.wants(presented.copy(arguments = Json.parseToJsonElement("""{"cmd":"ls"}""").jsonObject)))
+        val labeled = presented.copy(arguments = Json.parseToJsonElement("""{"description":"List files"}""").jsonObject)
+        assertTrue(com.slopus.happy.ui.conversation.ToolCallModel.wants(labeled))
+        assertFalse(com.slopus.happy.ui.conversation.ToolCallModel.wants(labeled.copy(status = "running")))
+        assertFalse(com.slopus.happy.ui.conversation.ToolCallModel.wants(labeled.copy(result = JsonObject(emptyMap()))))
+        assertFalse(com.slopus.happy.ui.conversation.ToolCallModel.wants(presented.copy(presentation = null, arguments = Json.parseToJsonElement("""{"cmd":"ls"}""").jsonObject)))
         assertTrue(com.slopus.happy.ui.conversation.ToolCallModel.wants(presented.copy(arguments = JsonObject(emptyMap()), cut = true)))
     }
 }

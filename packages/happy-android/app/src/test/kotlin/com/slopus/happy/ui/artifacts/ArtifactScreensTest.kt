@@ -53,6 +53,7 @@ import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Rule
+import androidx.compose.ui.test.onNodeWithContentDescription
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.annotation.Config
@@ -142,6 +143,22 @@ class ArtifactScreensTest {
         shot("artifact-document")
         rule.onNodeWithText("The guide", substring = true).performFirstLinkClick()
         assertEquals(listOf("guide.md"), files)
+    }
+
+    @Test fun aDocumentWithFrontmatter() {
+        val doc = "---\nname: alexa_smart_home_get_device\ninput:\n  endpointId:\n    type: string\n    pattern: ^amzn1.alexa.endpoint.[A-Za-z0-9-]+\$\n" +
+            "    description: Alexa endpoint id, e.g. 'amzn1.alexa.endpoint.<uuid>'.\n---\n\nRead the live state of one Alexa smart-home device\nby its endpoint id.\n\n---\n\nA rule further down is still a rule.\n"
+        val loader = loaded(
+            """{"artifactId":"a1","number":1,"title":"Skill","entry":{"path":"SKILL.md"},"files":[{"path":"SKILL.md","mimeType":"text/markdown","size":1}]}""",
+            mapOf("SKILL.md" to doc.toByteArray()),
+        )
+        showArtifact(loader)
+        rule.node(ArtifactTags.DOCUMENT).assertExists()
+        // The YAML is one code block, as written; nothing of it is a heading or a paragraph.
+        rule.onNodeWithText("pattern: ^amzn1.alexa.endpoint.[A-Za-z0-9-]+\$", substring = true).assertExists()
+        rule.onNodeWithText("Read the live state of one Alexa smart-home device by its endpoint id.").assertExists()
+        settle()
+        shot("artifact-document-frontmatter")
     }
 
     @Test fun aDocumentDark() {
@@ -300,16 +317,18 @@ class ArtifactScreensTest {
         rule.node(ArtifactTags.DELETE).assertDoesNotExist()
     }
 
-    @Test fun copyLinkPutsTheArtifactsHappyLinkOnTheClipboard() {
+    @Test fun copyLinkPutsTheArtifactsShareLinkOnTheClipboard() {
+        val link = "https://link.happy.page/#1/k3x9q2m7p0a4b8c1d5e6f7g2/artifacts/a1?version=2"
         val doc = ArtifactUi.Document("index.md", com.slopus.happy.chat.markdown.parseMarkdown("# Plan"), emptyMap(), emptyList(), "# Plan")
-        rule.setHappyContent { ArtifactScreen("Plan", doc, null, "Studio", ArtifactActions(onBack = {}, shareLink = { "happy://inst/artifact/a1?version=2" })) }
+        rule.setHappyContent { ArtifactScreen("Plan", doc, null, "Studio", ArtifactActions(onBack = {}, shareLink = { link })) }
+        rule.onNodeWithContentDescription("Copy link to artifact").assertExists()
         rule.node(ArtifactTags.COPY_LINK).performClick()
         val clipboard = ApplicationProvider.getApplicationContext<android.content.Context>().getSystemService(android.content.ClipboardManager::class.java)
-        assertEquals("happy://inst/artifact/a1?version=2", clipboard.primaryClip?.getItemAt(0)?.text?.toString())
+        assertEquals(link, clipboard.primaryClip?.getItemAt(0)?.text?.toString())
     }
 
     @Test fun aServerWithoutAnInstanceOrAGoneArtifactHasNoCopyLink() {
-        rule.setHappyContent { ArtifactScreen("Plan", ArtifactUi.Message(deleted = true), null, "Studio", ArtifactActions(onBack = {}, shareLink = { "happy://inst/artifact/a1" })) }
+        rule.setHappyContent { ArtifactScreen("Plan", ArtifactUi.Message(deleted = true), null, "Studio", ArtifactActions(onBack = {}, shareLink = { "https://link.happy.page/#1/k3x9q2m7p0a4b8c1d5e6f7g2/artifacts/a1" })) }
         rule.node(ArtifactTags.COPY_LINK).assertDoesNotExist()
     }
 

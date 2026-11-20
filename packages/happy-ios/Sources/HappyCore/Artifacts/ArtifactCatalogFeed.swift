@@ -13,8 +13,6 @@ public actor ArtifactCatalogFeed {
         /// Something was read, from disk or the computer: the list can
         /// say it is empty rather than loading.
         public var loaded = false
-        /// The computer is being read.
-        public var refreshing = false
         /// This computer keeps no artifacts (`404` on the catalog).
         public var unsupported = false
         /// The last read failed, and why.
@@ -69,7 +67,9 @@ public actor ArtifactCatalogFeed {
         for listener in listeners.values { listener.yield(state) }
     }
 
-    /// Disk, then the computer, then its events, until `stop`.
+    /// Disk, then its events, until `stop`. The computer is read on
+    /// `refresh`: by its engine once each connection, after home, and by
+    /// the Artifacts screen as it opens.
     public func start() async {
         guard !started else { return }
         started = true
@@ -80,14 +80,9 @@ public actor ArtifactCatalogFeed {
         }
         let events = events
         following = Task { [weak self] in
-            let stream = await events()
-            await self?.refresh()
-            for await event in stream {
+            for await event in await events() {
                 guard !Task.isCancelled else { return }
-                switch event {
-                case .resync: await self?.refresh()
-                case .event(let envelope): await self?.receive(envelope)
-                }
+                if case .event(let envelope) = event { await self?.receive(envelope) }
             }
         }
     }
@@ -120,9 +115,7 @@ public actor ArtifactCatalogFeed {
     }
 
     private func read() async {
-        state.refreshing = true
-        publish()
-        defer { state.refreshing = false; publish() }
+        defer { publish() }
         var items: [ArtifactSummary] = []
         var cursor: String?
         do {

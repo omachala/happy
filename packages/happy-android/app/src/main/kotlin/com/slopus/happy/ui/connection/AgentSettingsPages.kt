@@ -31,6 +31,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
@@ -108,6 +109,7 @@ internal fun NavGraphBuilder.agentSettingsPages(graph: AppGraph, nav: NavHostCon
         val theme by graph.localSettings.themePreference.collectAsStateWithLifecycle()
         val hidden = session?.projectsHidden?.collectAsStateWithLifecycle()?.value ?: false
         val sound = session?.completionSound?.collectAsStateWithLifecycle()?.value ?: CompletionSound.Always
+        val grouped by graph.toolCallsGrouped.enabled.collectAsStateWithLifecycle()
         ProvideRowReveal(route.reveal) {
             AgentAppearanceScreen(
                 theme = theme,
@@ -117,6 +119,9 @@ internal fun NavGraphBuilder.agentSettingsPages(graph: AppGraph, nav: NavHostCon
                 onBack = { nav.popBackStack() },
                 completionSound = sound,
                 onCompletionSound = { session?.setCompletionSound(it) },
+                projectsAvailable = session?.client?.cloud == false,
+                toolCallsGrouped = grouped,
+                onToolCallsGrouped = graph.toolCallsGrouped::set,
             )
         }
     }
@@ -156,11 +161,10 @@ internal fun NavGraphBuilder.agentSettingsPages(graph: AppGraph, nav: NavHostCon
         )
     }
     page<AgentDataStorageRoute> { entry -> AgentDataStorage(graph, nav, entry.toRoute<AgentDataStorageRoute>().connectionId) }
+    page<AgentUsageRoute> { entry -> AgentUsagePage(graph, nav, entry.toRoute<AgentUsageRoute>().connectionId) }
     page<AgentSharingRoute> { entry ->
-        val id = entry.toRoute<AgentSharingRoute>().connectionId
-        val session = remember(id) { graph.agentSessions.session(id) }
-        val state = session?.sharing?.collectAsStateWithLifecycle()?.value ?: com.slopus.happy.agent.AgentSharingState.Loading
-        AgentSharingScreen(state, { kind, enabled -> session?.setAutoJoin(kind, enabled) }, { nav.popBackStack() })
+        val route = entry.toRoute<AgentSharingRoute>()
+        AgentNotificationsPage(graph, nav, route.connectionId, route.reveal)
     }
     page<AgentAgentsRoute> { entry ->
         val id = entry.toRoute<AgentAgentsRoute>().connectionId
@@ -169,7 +173,7 @@ internal fun NavGraphBuilder.agentSettingsPages(graph: AppGraph, nav: NavHostCon
         // The computer's models, read each time the page opens, as a new chat reads them.
         val catalog by produceState<AgentModelsCatalog>(AgentModelsCatalog.Loading, session) {
             value = try {
-                AgentModelsCatalog.Ready(com.slopus.happy.conversation.ConversationApi(session.conversationRequest()).catalog())
+                AgentModelsCatalog.Ready(com.slopus.happy.conversation.ConversationApi(bytesRequest = null, request = session.conversationRequest(), cloud = session.client.cloud).catalog())
             } catch (e: CancellationException) {
                 throw e
             } catch (_: Exception) {
@@ -211,6 +215,8 @@ object AgentPagesTags {
     fun theme(theme: ThemePreference) = "agentPages.theme.${theme.name}"
     const val HIDE_PROJECTS = "agentPages.hideProjects"
     const val HIDE_PROJECTS_ROW = "agentPages.hideProjectsRow"
+    const val GROUP_TOOL_CALLS = "agentPages.groupToolCalls"
+    const val GROUP_TOOL_CALLS_ROW = "agentPages.groupToolCallsRow"
     fun sound(sound: CompletionSound) = "agentPages.sound.${sound.name}"
     const val PICTURE = "agentPages.picture"
     const val CHANGE_PHOTO = "agentPages.changePhoto"
@@ -220,7 +226,7 @@ object AgentPagesTags {
 
 /** A page under an agent connection's Settings: its bar on the page's own grey, as Settings' is. */
 @Composable
-internal fun AgentPage(title: String, onBack: () -> Unit, content: @Composable () -> Unit) {
+internal fun AgentPage(title: String, onBack: () -> Unit, listModifier: Modifier = Modifier, content: @Composable () -> Unit) {
     Screen(
         header = {
             AgentTopBar(
@@ -231,15 +237,17 @@ internal fun AgentPage(title: String, onBack: () -> Unit, content: @Composable (
             )
         },
     ) {
-        ItemList { content() }
+        ItemList(listModifier) { content() }
     }
 }
 
 /**
  * A connection's look on this phone (iOS's `appearanceRows`): the theme,
- * Adaptive, Light or Dark with a check on the chosen one; and Hide projects,
+ * Adaptive, Light or Dark with a check on the chosen one; and, self-hosted only, Hide projects,
  * the desktop's own setting, which home follows here and Happy Desktop
- * there. Deliberately no renderer or layout choice. Then desktop's
+ * there. Deliberately no renderer or layout choice. Then desktop's Group
+ * tool calls, kept on this phone and on unless turned off, which its chats
+ * follow ([com.slopus.happy.conversation.ToolSections]). Then desktop's
  * Completion sound (Always, When focused, Never), the connection's own
  * setting too, which the chime follows here ([com.slopus.happy.agent.CompletionWatch]).
  */
@@ -252,8 +260,11 @@ fun AgentAppearanceScreen(
     onBack: () -> Unit,
     completionSound: CompletionSound = CompletionSound.Always,
     onCompletionSound: (CompletionSound) -> Unit = {},
+    projectsAvailable: Boolean = true,
+    toolCallsGrouped: Boolean = true,
+    onToolCallsGrouped: (Boolean) -> Unit = {},
 ) {
-    val sections = agentAppearanceSections(theme, onTheme, projectsHidden, onProjectsHidden, completionSound, onCompletionSound)
+    val sections = agentAppearanceSections(theme, onTheme, projectsHidden, onProjectsHidden, completionSound, onCompletionSound, projectsAvailable, toolCallsGrouped, onToolCallsGrouped)
     AgentPage(stringResource(R.string.settings_appearance), onBack) {
         for (section in sections) SettingsCard(section)
     }
@@ -268,7 +279,10 @@ fun agentAppearanceSections(
     onProjectsHidden: (Boolean) -> Unit,
     completionSound: CompletionSound = CompletionSound.Always,
     onCompletionSound: (CompletionSound) -> Unit = {},
-): List<SettingsSection> = listOf(
+    projectsAvailable: Boolean = true,
+    toolCallsGrouped: Boolean = true,
+    onToolCallsGrouped: (Boolean) -> Unit = {},
+): List<SettingsSection> = listOfNotNull(
     SettingsSection(
         listOf(
             ThemePreference.Adaptive to R.string.settings_appearance_theme_options_adaptive,
@@ -297,6 +311,20 @@ fun agentAppearanceSections(
             ),
         ),
         footer = stringResource(R.string.settings_hide_projects_footer),
+    ).takeIf { projectsAvailable },
+    SettingsSection(
+        listOf(
+            SettingsEntry(
+                id = AgentPagesTags.GROUP_TOOL_CALLS_ROW,
+                title = stringResource(R.string.agent_settings_group_tool_calls),
+                icon = { SettingsTile(Ionicon.LayersOutline, SettingsTiles.purple) },
+                toggle = toolCallsGrouped,
+                onToggle = onToolCallsGrouped,
+                toggleTag = AgentPagesTags.GROUP_TOOL_CALLS,
+                chevron = false,
+            ),
+        ),
+        footer = stringResource(R.string.agent_settings_group_tool_calls_footer),
     ),
     SettingsSection(
         listOf(
@@ -427,7 +455,6 @@ private fun AgentProfile(source: com.slopus.happy.agent.AgentProfileSource, seed
     // Every time it shows, not only when the agent says so.
     LaunchedEffect(source) { source.refresh() }
     val scope = rememberCoroutineScope()
-    val context = LocalContext.current
     var alert by remember { mutableStateOf<Alert?>(null) }
     val ok = stringResource(R.string.common_ok)
     val couldNotSave = stringResource(R.string.settings_could_not_save_profile)
@@ -444,21 +471,48 @@ private fun AgentProfile(source: com.slopus.happy.agent.AgentProfileSource, seed
             }
         }
     }
-    val picker = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
-        uri ?: return@rememberLauncherForActivityResult
-        attempt(couldNotChange) {
-            val jpeg = withContext(Dispatchers.IO) { ProfilePhoto.prepare { context.contentResolver.openInputStream(uri) ?: throw java.io.IOException("Unreadable") } }
-            source.setPhoto(jpeg)
-        }
-    }
+    val choosePhoto = rememberProfilePhotoPicker(
+        onPicked = { jpeg -> attempt(couldNotChange) { source.setPhoto(jpeg) } },
+        onFailed = { e -> alert = Alert(couldNotChange, e.message ?: "", listOf(AlertButton(ok))) },
+    )
     AgentProfileScreen(
         seed = seed,
         state = state,
         photo = photo,
         onRename = { name -> attempt(couldNotSave) { source.rename(name) } },
-        onChangePhoto = { picker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)) },
+        onChangePhoto = choosePhoto,
         onRemovePhoto = { attempt(couldNotRemove) { source.removePhoto() } },
         onBack = onBack,
     )
     alert?.let { HappyAlert(it, onDismiss = { alert = null }) }
+}
+
+/**
+ * The system photo picker for a profile picture, as Settings › Profile and
+ * Create your profile open it: the pick prepared as a picture is sent
+ * ([ProfilePhoto.prepare]: upright, its middle square, JPEG) and handed to
+ * [onPicked]; [onFailed] when it can't be read as an image. Nothing happens
+ * when the picker is closed. Returns what opens it.
+ */
+@Composable
+internal fun rememberProfilePhotoPicker(onPicked: (ByteArray) -> Unit, onFailed: (Exception) -> Unit): () -> Unit {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val picked by rememberUpdatedState(onPicked)
+    val failed by rememberUpdatedState(onFailed)
+    val picker = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
+        uri ?: return@rememberLauncherForActivityResult
+        scope.launch {
+            val jpeg = try {
+                withContext(Dispatchers.IO) { ProfilePhoto.prepare { context.contentResolver.openInputStream(uri) ?: throw java.io.IOException("Unreadable") } }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                failed(e)
+                return@launch
+            }
+            picked(jpeg)
+        }
+    }
+    return { picker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)) }
 }

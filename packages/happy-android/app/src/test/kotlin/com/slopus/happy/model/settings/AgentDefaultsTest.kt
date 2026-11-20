@@ -74,6 +74,9 @@ class AgentDefaultsTest {
     fun otherAgentsAreNotGated() {
         assertEquals("gpt-6.1-sol", AgentDefaults.codeDefaults("codex", "1.2.0").modelMode)
         assertEquals("Gemini 3.8 Flash", AgentDefaults.codeDefaults("agy").modelMode)
+        assertEquals("Gemini 3.8 Flash", AgentDefaults.codeDefaults("agy", "1.2.6").modelMode)
+        assertEquals("Gemini 4 Hydrogen", AgentDefaults.codeDefaults("agy", "1.2.7-beta.0").modelMode)
+        assertEquals("Gemini 4 Hydrogen", AgentDefaults.codeDefaults("agy", "1.2.7").modelMode)
         for (flavor in listOf("gemini", "openclaw", "agy")) assertEquals("default", AgentDefaults.resolve(null, flavor, "1.0.0").permissionMode)
         assertEquals(AgentKey.Claude, AgentKey.normalize("something-else"))
         assertEquals(AgentKey.Claude, AgentKey.normalize(null))
@@ -103,5 +106,23 @@ class AgentDefaultsTest {
         assertEquals(0, Versions.compareWithPrerelease("1.2.1+abc", "1.2.1"))
         assertTrue(Versions.isWellFormed("1.2.6-beta.0+build"))
         assertFalse(Versions.isWellFormed("1.2"))
+    }
+
+    /** Happy Agent and Happy Desktop move from 0.4.x to CalVer YYYY.M.C, previews as YYYY.M.C-preview.N: both sort above every 0.x. */
+    @Test
+    fun calVerSortsAboveEarlierVersions() {
+        assertTrue(Versions.isWellFormed("2026.11.1"))
+        assertTrue(Versions.isWellFormed("2026.11.1-preview.2"))
+        assertEquals(1, Versions.compare("2026.11.1", "0.4.12"))
+        assertEquals(1, Versions.compare("2026.11.1-preview.2", "0.4.12-preview.3"))
+        assertEquals(1, Versions.compareWithPrerelease("2026.11.1", "0.4.12"))
+        assertEquals(1, Versions.compareWithPrerelease("2026.11.1-preview.2", "0.4.12"))
+        assertEquals(1, Versions.compareWithPrerelease("2026.11.1-preview.2", "0.4.12-preview.3"))
+        assertEquals(1, Versions.compareWithPrerelease("2026.11.1", "0.4.12-preview.3"))
+        assertEquals(-1, Versions.compareWithPrerelease("2026.11.1-preview.2", "2026.11.1"))
+        assertEquals(1, Versions.compareWithPrerelease("2026.11.1-preview.10", "2026.11.1-preview.9"))
+        assertEquals(-1, Versions.compareWithPrerelease("2026.11.2", "2026.11.10"))
+        assertEquals(1, Versions.compareWithPrerelease("2026.12.1", "2026.9.30"))
+        assertEquals(1, Versions.compareWithPrerelease("2027.1.1", "2026.12.9"))
     }
 }

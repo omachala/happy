@@ -38,9 +38,6 @@
     <string name="settings_agents_effort">思考量</string>
     <string name="settings_agents_custom_codex_title">Codex のカスタムモデル</string>
     <string name="settings_agents_custom_codex_message">正確なモデル ID を入力してください。利用できるかどうかは Codex アカウントまたは API の設定によります。</string>
-    <string name="settings_connect_claude_title">Claude に接続</string>
-    <string name="settings_connect_claude">Claude を接続</string>
-    <string name="settings_connect_claude_run">ターミナルで次のコマンドを実行してください：</string>
     <string name="settings_commit">コミット</string>
     <string name="settings_commit_at">コミット %1$s</string>
     <string name="settings_manage_subscriptions">サブスクリプションを管理</string>
@@ -55,4 +52,6 @@
     <string name="agent_settings_default_access">デフォルトのアクセスモード</string>
     <string name="agent_settings_default_access_description">新しいセッションが確認なしで行えること。アカウントに保存されるため、すべてのデバイスで共通です。</string>
     <string name="agent_settings_new_sessions_unreadable">モデルを読み込めませんでした。接続を確認して、このページを開き直してください。</string>
+    <string name="settings_analytics_not_saved">アナリティクスは一時的にオフになっていますが、設定を保存できませんでした。次回 Happy を起動すると再びオンになります。</string>
+    <string name="settings_analytics_not_turned_on">アナリティクスをオンにできませんでした。しばらくしてからもう一度お試しください。</string>
 </resources>

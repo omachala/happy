@@ -40,27 +40,80 @@ val revenueCatGoogleKey = providers.environmentVariable("EXPO_PUBLIC_REVENUE_CAT
     ?.takeIf { it.isNotBlank() }
     ?: providers.gradleProperty("happy.revenueCatGoogleKey").orNull.orEmpty()
 
+// Happy Cloud (the account menu's "Connect to Happy Cloud"): the one domain
+// every server (<name>.BASE) lives under, compiled in. HAPPY_CLOUD_BASE or -Phappy.cloudBase points a build
+// at another deployment.
+val happyCloudBase = providers.environmentVariable("HAPPY_CLOUD_BASE").orNull?.takeIf { it.isNotBlank() }
+    ?: providers.gradleProperty("happy.cloudBase").orNull?.takeIf { it.isNotBlank() }
+    ?: "happy-clusters.com"
+
+// Happy Cloud's accounts service, where the person signs in for an identity
+// token: its own origin, apart from HAPPY_CLOUD_BASE. HAPPY_CLOUD_ACCOUNTS
+// or -Phappy.cloudAccounts points a build at another one.
+val happyCloudAccounts = providers.environmentVariable("HAPPY_CLOUD_ACCOUNTS").orNull?.takeIf { it.isNotBlank() }
+    ?: providers.gradleProperty("happy.cloudAccounts").orNull?.takeIf { it.isNotBlank() }
+    ?: "https://auth.happy.engineering"
+
+// Happy Cloud's API, the cluster's: the account session (from the accounts
+// service's identity token), servers, server tokens and invites, and the one
+// token endpoint every Happy Cloud refresh goes to. HAPPY_CLOUD_API or
+// -Phappy.cloudApi points a build at another one; https://api.BASE otherwise.
+val happyCloudApi = providers.environmentVariable("HAPPY_CLOUD_API").orNull?.takeIf { it.isNotBlank() }
+    ?: providers.gradleProperty("happy.cloudApi").orNull?.takeIf { it.isNotBlank() }
+    ?: "https://api.$happyCloudBase"
+
+// Happy Cloud's web app, where a server's settings the phone has no page for
+// are (<name>.WEB/#/settings/<page>). HAPPY_CLOUD_WEB or -Phappy.cloudWeb points
+// a build at another one.
+val happyCloudWeb = providers.environmentVariable("HAPPY_CLOUD_WEB").orNull?.takeIf { it.isNotBlank() }
+    ?: providers.gradleProperty("happy.cloudWeb").orNull?.takeIf { it.isNotBlank() }
+    ?: "happybases.com"
+
+// Happy Cloud's invite links (https://INVITE/#<token>), which open the app in
+// the builds that offer Happy Cloud (src/debug and src/preview's intent filter).
+// HAPPY_CLOUD_INVITE or -Phappy.cloudInvite points a build at another host.
+val happyCloudInvite = providers.environmentVariable("HAPPY_CLOUD_INVITE").orNull?.takeIf { it.isNotBlank() }
+    ?: providers.gradleProperty("happy.cloudInvite").orNull?.takeIf { it.isNotBlank() }
+    ?: "join.happy.engineering"
+
+// Sign in with Google for the Happy Cloud account: the accounts service's web
+// OAuth client (project happy-coder-9fe36), which Google's ID tokens are issued
+// to and the service checks as their audience. Public, the same for every
+// variant; Google tells the variants apart by package and signing SHA-1.
+// HAPPY_CLOUD_GOOGLE_CLIENT_ID or -Phappy.cloudGoogleClientId points a build at
+// another accounts deployment's client.
+val happyCloudGoogleClientId = providers.environmentVariable("HAPPY_CLOUD_GOOGLE_CLIENT_ID").orNull?.takeIf { it.isNotBlank() }
+    ?: providers.gradleProperty("happy.cloudGoogleClientId").orNull?.takeIf { it.isNotBlank() }
+    ?: "902947412706-bem666be0cu3ju6lnic2go91hsl256co.apps.googleusercontent.com"
+
 // The agent connection voice call's public ElevenLabs agent
 // (docs/agent-voice-call.md): never in the repository, so from the
-// environment, -Phappy.callAgentId or the ignored local.properties. Without
-// it the voice button says voice isn't set up.
-val callAgentId = providers.environmentVariable("HAPPY_CALL_AGENT_ID").orNull?.takeIf { it.isNotBlank() }
-    ?: providers.gradleProperty("happy.callAgentId").orNull?.takeIf { it.isNotBlank() }
+// environment, -Phappy.callAgentV3Id or the ignored local.properties. Named
+// for the tools this code calls (v3), so an older agent's ID, set under the
+// old HAPPY_CALL_AGENT_ID or happy.callAgentId, never reaches it. Without it
+// the voice button says voice isn't set up.
+val callAgentId = providers.environmentVariable("HAPPY_CALL_AGENT_V3_ID").orNull?.takeIf { it.isNotBlank() }
+    ?: providers.gradleProperty("happy.callAgentV3Id").orNull?.takeIf { it.isNotBlank() }
     ?: Properties().apply {
         providers.fileContents(rootProject.layout.projectDirectory.file("local.properties")).asText.orNull?.let { load(it.reader()) }
-    }.getProperty("happy.callAgentId")?.takeIf { it.isNotBlank() }
+    }.getProperty("happy.callAgentV3Id")?.takeIf { it.isNotBlank() }
 
-// PostHog's public project key (the existing environment variable is retained);
-// only feature flags are read with it. Without one every flag is off.
+// PostHog's public project key (the existing environment variable is retained):
+// :analytics sends its events and asks this install's feature flags with it,
+// from release and preview builds. Without one nothing is sent and every flag is off.
 val postHogKey = providers.environmentVariable("EXPO_PUBLIC_POSTHOG_API_KEY").orNull
     ?.takeIf { it.isNotBlank() }
     ?: providers.gradleProperty("happy.postHogKey").orNull.orEmpty()
 
-// Native version ownership. Store builds must provide a versionCode above
-// the last published build; local builds default to 1.
+// Native version ownership. versionName is CalVer YYYY.M.C, written here at
+// release time by scripts/native-version.cjs (see AGENTS.md, "Versions and
+// signing"). Store builds must provide a versionCode above the last published
+// build; local builds default to 1.
+val defaultVersionName = "2026.11.1"
 val versionNameValue = providers.environmentVariable("HAPPY_VERSION_NAME").orNull
     ?: providers.gradleProperty("happy.versionName").orNull
-    ?: "1.8.0"
+    ?: defaultVersionName
+val calVer = Regex("""[1-9]\d{3}\.([1-9]|1[0-2])\.[1-9]\d*""")
 val versionCodeValue = (providers.environmentVariable("HAPPY_VERSION_CODE").orNull
     ?: providers.gradleProperty("happy.versionCode").orNull)
     ?.let { requireNotNull(it.toIntOrNull()?.takeIf { code -> code > 0 }) { "versionCode must be a positive integer, got '$it'" } }
@@ -104,6 +157,14 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         buildConfigField("String", "DEFAULT_SERVER_URL", "\"https://api.cluster-fluster.com\"")
+        buildConfigField("String", "HAPPY_CLOUD_BASE", groovy.json.JsonOutput.toJson(happyCloudBase))
+        buildConfigField("String", "HAPPY_CLOUD_ACCOUNTS", groovy.json.JsonOutput.toJson(happyCloudAccounts))
+        buildConfigField("String", "HAPPY_CLOUD_API", groovy.json.JsonOutput.toJson(happyCloudApi))
+        buildConfigField("String", "HAPPY_CLOUD_WEB", groovy.json.JsonOutput.toJson(happyCloudWeb))
+        buildConfigField("String", "HAPPY_CLOUD_INVITE", groovy.json.JsonOutput.toJson(happyCloudInvite))
+        manifestPlaceholders["happyCloudInviteHost"] = happyCloudInvite
+        manifestPlaceholders["happyCloudWebHost"] = happyCloudWeb
+        buildConfigField("String", "GOOGLE_SERVER_CLIENT_ID", groovy.json.JsonOutput.toJson(happyCloudGoogleClientId))
         buildConfigField("String", "REVENUE_CAT_GOOGLE_KEY", groovy.json.JsonOutput.toJson(revenueCatGoogleKey))
         buildConfigField("String", "POSTHOG_KEY", groovy.json.JsonOutput.toJson(postHogKey))
         // Existing relay voice agent, retained for compatibility with installed clients.
@@ -144,6 +205,8 @@ android {
         release {
             isMinifyEnabled = true
             isShrinkResources = true
+            // Embed native symbols in the bundle when the libraries supply them.
+            ndk { debugSymbolLevel = "FULL" }
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
             resValue("string", "app_name", "Happy")
             signingConfig = signingConfigs.findByName("release")
@@ -151,6 +214,8 @@ android {
         create("preview") {
             isMinifyEnabled = true
             isShrinkResources = true
+            // Preview does not inherit release's native symbol configuration.
+            ndk { debugSymbolLevel = "FULL" }
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
             matchingFallbacks += "release"
             resValue("string", "app_name", "Happy (preview)")
@@ -203,6 +268,10 @@ android {
                     "--add-exports=java.base/jdk.internal.access=ALL-UNNAMED",
                     "--add-opens=java.base/java.io=ALL-UNNAMED",
                 )
+                // One worker runs the whole suite. Robolectric's own share (its sandboxes, each with the
+                // framework's resources, and native text layouts it never frees) is ~400 MB of
+                // the default 512 MB by the end, which left no room for a test's own.
+                it.maxHeapSize = "1g"
             }
         }
     }
@@ -235,16 +304,48 @@ fun firebaseResources(applicationId: String): Map<String, String> {
 }
 
 // A signed store build with the default versionCode would collide with every
-// earlier upload: refuse it rather than find out at the Play console.
-// The check runs first in the variant's build (pre<Variant>Build), not after R8.
+// earlier upload, and one whose versionName isn't CalVer breaks the scheme:
+// refuse it rather than find out at the Play console.
+// The checks run first in the variant's build (pre<Variant>Build), not after R8.
 tasks.configureEach {
     if (name == "preReleaseBuild" || name == "prePreviewBuild") {
         val taskName = if (name == "preReleaseBuild") "release build" else "preview build"
         val signed = if (name == "preReleaseBuild") releaseKey != null else previewKey != null
         val versionCodeSet = versionCodeValue != null
+        val versionName = versionNameValue
+        val versionNameCalVer = calVer.matches(versionName)
         doFirst {
             check(!signed || versionCodeSet) {
                 "A signed $taskName needs a versionCode above the last store upload: set HAPPY_VERSION_CODE or -Phappy.versionCode"
+            }
+            check(!signed || versionNameCalVer) {
+                "A signed $taskName needs a CalVer versionName (YYYY.M.C, e.g. 2026.11.1), got '$versionName': see scripts/native-version.cjs"
+            }
+        }
+    }
+}
+
+// A store build without the voice agent ships a voice button that only says
+// voice isn't set up: every release and preview build, signed or not, needs
+// HAPPY_CALL_AGENT_V3_ID (an ElevenLabs agent ID, as CallAgent.id reads it).
+// CI, which has no secrets, says so with HAPPY_RELEASE_WITHOUT_CALL_AGENT=1.
+// Debug, bench and tests never need it.
+tasks.configureEach {
+    if (name == "preReleaseBuild" || name == "prePreviewBuild") {
+        val taskName = if (name == "preReleaseBuild") "release build" else "preview build"
+        val agentId = callAgentId?.trim()
+        val agentIdValid = agentId != null && Regex("agent_[A-Za-z0-9_]+").matches(agentId)
+        val waived = providers.environmentVariable("HAPPY_RELEASE_WITHOUT_CALL_AGENT").orNull == "1"
+        doFirst {
+            if (waived && !agentIdValid) {
+                logger.warn("HAPPY_RELEASE_WITHOUT_CALL_AGENT=1: this $taskName has no voice agent; voice says it isn't set up.")
+            }
+            check(waived || agentIdValid) {
+                if (agentId == null) {
+                    "A $taskName needs the voice agent: set HAPPY_CALL_AGENT_V3_ID (or -Phappy.callAgentV3Id) to the v3 agent's ID. The old HAPPY_CALL_AGENT_ID is ignored. See docs/agent-voice-call.md"
+                } else {
+                    "A $taskName needs the voice agent, and HAPPY_CALL_AGENT_V3_ID isn't an ElevenLabs agent ID (agent_…)."
+                }
             }
         }
     }
@@ -325,6 +426,11 @@ abstract class VerifyReleaseKeeps : DefaultTask() {
         serializedEnums.forEach { name ->
             if (classMapping[name] != name) problems += "Navigation enum $name was removed or renamed to ${classMapping[name]}"
             if ("$name: $name[] values()" !in seedLines) problems += "Navigation enum $name lost values() for getEnumConstants()"
+        }
+
+        // Gson reads the public agent's token by this field's name; renamed, every call connects with none.
+        if ("io.elevenlabs.network.TokenResponse: java.lang.String token" !in seedLines) {
+            problems += "ElevenLabs TokenResponse.token is not kept for Gson"
         }
 
         val xml = manifest.get().asFile.readText()
@@ -408,6 +514,8 @@ android.sourceSets.matching { it.name == "benchmarkBench" || it.name == "nonMini
 
 dependencies {
     implementation(project(":crypto"))
+    // Product analytics behind one facade; removable with its call sites (AGENTS.md "Analytics").
+    implementation(project(":analytics"))
     // Installs the Baseline Profile on sideloaded and pre-Play-cloud-profile installs.
     implementation(libs.androidx.profileinstaller)
 
@@ -418,6 +526,9 @@ dependencies {
     implementation(libs.androidx.navigation.compose)
     implementation(libs.androidx.webkit)
     implementation(libs.androidx.browser)
+    implementation(libs.androidx.credentials)
+    implementation(libs.androidx.credentials.play.services.auth)
+    implementation(libs.googleid)
     implementation(libs.androidx.swiperefreshlayout)
 
     implementation(platform(libs.compose.bom))

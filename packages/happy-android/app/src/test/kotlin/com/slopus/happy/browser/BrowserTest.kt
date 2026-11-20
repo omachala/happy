@@ -39,9 +39,9 @@ class BrowserTest {
         override suspend fun close() {}
     }
 
-    private class Routing(val responses: Map<String, String>) : Transport {
+    private class Routing(val responses: Map<String, String>, val statuses: Map<String, Int> = emptyMap()) : Transport {
         override suspend fun request(method: String, path: String, credential: String, body: ByteArray?, headers: Map<String, String>, category: RequestCategory) =
-            TransportResponse(if (responses[path] == null) 404 else 200, body = (responses[path] ?: "{}").toByteArray())
+            TransportResponse(statuses[path] ?: if (responses[path] == null) 404 else 200, body = (responses[path] ?: "{}").toByteArray())
 
         override suspend fun close() {}
     }
@@ -98,15 +98,73 @@ class BrowserTest {
             ),
             "test",
         )
-        assertEquals("artifactworkspace", client.browserWorkspace(agentId = "chat1", artifactId = "art1"))
-        assertEquals("chatworkspace", client.browserWorkspace(agentId = "chat1"))
-        assertEquals("hostworkspace", client.browserWorkspace())
+        assertEquals("/v0/workspaces/artifactworkspace/proxy", client.browserNetwork(agentId = "chat1", artifactId = "art1").path)
+        assertEquals("/v0/workspaces/chatworkspace/proxy", client.browserNetwork(agentId = "chat1").path)
+        assertEquals("/v0/workspaces/hostworkspace/proxy", client.browserNetwork().path)
         val runnerOnly = AgentClient(
             Routing(mapOf("/v0/workspaces" to """{"workspaces":[{"id":"runnerworkspace","status":"active","compute":{"type":"host","runnerId":"runner1"}}]}""")),
             "test",
         )
-        val error = runCatching { runnerOnly.browserWorkspace() }.exceptionOrNull()
+        val error = runCatching { runnerOnly.browserNetwork() }.exceptionOrNull()
         assertEquals("must not silently use a runner as the host fallback", BrowserException.Kind.Unavailable, (error as? BrowserException)?.kind)
+    }
+
+    @Test fun aChatOpensInItsAgentsNetworkAndAnOlderComputerInTheWorkspace() = runBlocking {
+        val client = AgentClient(
+            Routing(
+                mapOf(
+                    "/v0/agents/chat1" to """{"agent":{"id":"chat1","workspaceId":"botworkspace","status":"idle"}}""",
+                    "/v0/workspaces/botworkspace/agents/chat1/proxy" to """{"networkId":"c-chat1_env2"}""",
+                ),
+            ),
+            "test",
+        )
+        assertEquals("/v0/networks/c-chat1_env2/proxy", client.browserNetwork(agentId = "chat1").path)
+        // A daemon without the agent network route has only the workspace's.
+        val older = AgentClient(Routing(mapOf("/v0/agents/chat1" to """{"agent":{"id":"chat1","workspaceId":"hostworkspace","status":"idle"}}""")), "test")
+        assertEquals("/v0/workspaces/hostworkspace/proxy", older.browserNetwork(agentId = "chat1").path)
+        // A team server signed in to has no workspace proxy: no network named is none at all.
+        val team = AgentClient.lazy { AgentClient.Link(Routing(mapOf("/v0/agents/chat1" to """{"agent":{"id":"chat1","workspaceId":"teamworkspace","status":"idle"}}""")), "test", renew = { it }) }
+        assertEquals(BrowserException.Kind.Unavailable, (runCatching { team.browserNetwork(agentId = "chat1") }.exceptionOrNull() as? BrowserException)?.kind)
+        for (id in listOf("", "-a", "Host", "a/b", "a..b", "a".repeat(129))) {
+            assertEquals(id, BrowserException.Kind.Forbidden, (runCatching { BrowserNetwork.network(id) }.exceptionOrNull() as? BrowserException)?.kind)
+        }
+        assertEquals("/v0/networks/host/proxy", BrowserNetwork.network("host").path)
+    }
+
+    @Test fun happyCloudReachesTheWebThroughAnAgentsNetworkNeverAWorkspace() = runBlocking {
+        // No workspace proxy: Happy Cloud has none, so asking one would fail the test.
+        val client = AgentClient(
+            Routing(
+                mapOf(
+                    "/v0/artifacts/art1" to """{"artifact":{"updatedSource":{"workspaceId":"artifactworkspace","agentId":"maker1"}}}""",
+                    "/v0/artifacts/art2" to """{"artifact":{"source":{"botId":"bot1"}}}""",
+                    "/v0/artifacts/art3" to """{"artifact":{"source":{"workspaceId":"artifactworkspace"}}}""",
+                    "/v0/bots/bot1" to """{"bot":{"id":"bot1","agent":{"id":"botagent1"}}}""",
+                    "/v0/agents/maker1" to """{"agent":{"id":"maker1","workspaceId":"makerworkspace","status":"idle"}}""",
+                    "/v0/workspaces/makerworkspace/agents/maker1/proxy" to """{"networkId":"agent-maker1"}""",
+                    "/v0/agents/botagent1" to """{"agent":{"id":"botagent1","workspaceId":"botworkspace","status":"idle"}}""",
+                    "/v0/workspaces/botworkspace/agents/botagent1/proxy" to """{"networkId":"agent-botagent1","kind":"container"}""",
+                    "/v0/agents/chat1" to """{"agent":{"id":"chat1","workspaceId":"chatworkspace","status":"idle"}}""",
+                ),
+            ),
+            "test",
+            cloud = true,
+        )
+        assertEquals("/v0/networks/agent-maker1/proxy", client.browserNetwork(agentId = "chat1", artifactId = "art1").path)
+        assertEquals("/v0/networks/agent-botagent1/proxy", client.browserNetwork(artifactId = "art2").path)
+        // A server that names no network for the agent has nothing to open: never the workspace's.
+        assertEquals(BrowserException.Kind.Unavailable, (runCatching { client.browserNetwork(agentId = "chat1") }.exceptionOrNull() as? BrowserException)?.kind)
+        // Only a workspace, or nothing: no network on Happy Cloud.
+        assertEquals(BrowserException.Kind.Unavailable, (runCatching { client.browserNetwork(artifactId = "art3") }.exceptionOrNull() as? BrowserException)?.kind)
+        assertEquals(BrowserException.Kind.Unavailable, (runCatching { client.browserNetwork() }.exceptionOrNull() as? BrowserException)?.kind)
+    }
+
+    @Test fun connectGoesThroughAnAgentsNetwork() = runBlocking {
+        val bytes = Bytes("HTTP/1.1 200 OK\r\n\r\n", "HTTP/1.1 200 OK\r\n\r\n")
+        val client = AgentClient(Sockets(bytes), "native-token", cloud = true)
+        BrowserTunnel.open(client, BrowserNetwork.network("agent-chat1"), BrowserPolicy.Authority.of("http://localhost:5173")!!).close()
+        assertTrue(bytes.writes.first().decodeToString().startsWith("CONNECT /v0/networks/agent-chat1/proxy HTTP/1.1"))
     }
 
     @Test fun artifactBoundaryAndQueryArePreserved() {
@@ -178,7 +236,7 @@ class BrowserTest {
     @Test fun connectAuthenticatesOnlyOuterTunnelAndKeepsWorkspace() = runBlocking {
         val bytes = Bytes("HTTP/1.1 200 OK\r\n\r\n", "HTTP/1.1 200 OK\r\n\r\n")
         val client = AgentClient(Sockets(bytes), "native-token")
-        val stream = BrowserTunnel.open(client, "runnerworkspace", BrowserPolicy.Authority.of("http://localhost:5173")!!)
+        val stream = BrowserTunnel.open(client, BrowserNetwork.workspace("runnerworkspace"), BrowserPolicy.Authority.of("http://localhost:5173")!!)
         stream.close()
         val written = bytes.writes.map { it.decodeToString() }
         assertTrue(written[0].startsWith("CONNECT /v0/workspaces/runnerworkspace/proxy"))
@@ -190,10 +248,157 @@ class BrowserTest {
     @Test fun connectErrorClosesStream() = runBlocking {
         val bytes = Bytes("HTTP/1.1 403 Forbidden\r\n\r\n")
         val client = AgentClient(Sockets(bytes), "token")
-        val error = runCatching { BrowserTunnel.open(client, "work1", BrowserPolicy.Authority.of("http://localhost")!!) }.exceptionOrNull() as BrowserException
+        val error = runCatching { BrowserTunnel.open(client, BrowserNetwork.workspace("work1"), BrowserPolicy.Authority.of("http://localhost")!!) }.exceptionOrNull() as BrowserException
         assertEquals(BrowserException.Kind.Upstream, error.kind)
         assertEquals(403, error.status)
         assertTrue(bytes.closed)
+    }
+
+    @Test fun aLiveArtifactTunnelsThroughItsOwnProxyForHttpAndHttps() = runBlocking {
+        for ((url, target) in listOf("http://127.0.0.1:4191/" to "127.0.0.1:4191", "https://preview.example.com/app" to "preview.example.com:443")) {
+            val bytes = Bytes("HTTP/1.1 200 OK\r\n\r\n", "HTTP/1.1 200 OK\r\n\r\n")
+            val client = AgentClient(Sockets(bytes), "native-token")
+            BrowserTunnel.open(client, BrowserNetwork.artifact("art1"), BrowserPolicy.Authority.of(url)!!).close()
+            val written = bytes.writes.map { it.decodeToString() }
+            assertTrue(written[0].startsWith("CONNECT /v0/artifacts/art1/proxy HTTP/1.1\r\n"))
+            assertTrue(written[0].contains("Authorization: Bearer native-token"))
+            assertTrue(written[1].startsWith("CONNECT $target HTTP/1.1\r\n"))
+            assertFalse(written[1].contains("native-token"))
+        }
+        throwsBrowser(BrowserException.Kind.Forbidden) { BrowserNetwork.artifact("../agents") }
+    }
+
+    @Test fun aLiveArtifactsProxyRefusingToOpenMeansItsComputerIsUnavailable() = runBlocking {
+        val target = BrowserPolicy.Authority.of("http://localhost:4191")!!
+        suspend fun refusal(network: BrowserNetwork, vararg answers: String) =
+            runCatching { BrowserTunnel.open(AgentClient(Sockets(Bytes(*answers)), "token"), network, target) }.exceptionOrNull() as BrowserException
+        for (status in listOf(404, 501, 503)) {
+            assertEquals(BrowserException.Kind.LiveUnavailable, refusal(BrowserNetwork.artifact("gone1"), "HTTP/1.1 $status Refused\r\n\r\n").kind)
+        }
+        // The same refusal from a workspace's proxy is only its status.
+        refusal(BrowserNetwork.workspace("work1"), "HTTP/1.1 404 Not Found\r\n\r\n").let {
+            assertEquals(BrowserException.Kind.Upstream, it.kind)
+            assertEquals(404, it.status)
+        }
+        // A destination refused inside the open tunnel (the daemon's policy, or no dev server) is not the computer's absence.
+        refusal(BrowserNetwork.artifact("art1"), "HTTP/1.1 200 OK\r\n\r\n", "HTTP/1.1 403 Forbidden\r\n\r\n").let {
+            assertEquals(BrowserException.Kind.Upstream, it.kind)
+            assertEquals(403, it.status)
+        }
+        assertEquals(BrowserFailure(503, "Service Unavailable", "browser_proxy_live_unavailable"), BrowserFailure.of(BrowserUpstreamException(BrowserException(BrowserException.Kind.LiveUnavailable, 404))))
+    }
+
+    @Test fun aNetworkThatCarriesOnlyItsLoopbackSaysSo() = runBlocking {
+        fun authority(url: String) = BrowserPolicy.Authority.of(url)!!
+        val loopback = listOf("http://localhost:5173", "http://app.localhost:3000", "http://127.0.0.1:5173", "http://127.8.9.10", "http://[::1]:5173")
+        val outside = listOf(
+            "https://fonts.googleapis.com", "http://192.168.1.10:5173", "http://10.0.0.1", "http://localhost.example.com",
+            "http://128.0.0.1", "http://127.0.0.256", "http://[::2]", "https://example.com:8443", "http://0.0.0.0:5173",
+        )
+        for (url in loopback) {
+            assertTrue(url, BrowserDestinations.Loopback.tunnels(authority(url)))
+            assertTrue(url, BrowserDestinations.All.tunnels(authority(url)))
+        }
+        for (url in outside) {
+            assertFalse(url, BrowserDestinations.Loopback.tunnels(authority(url)))
+            // Absent, as on a computer: the computer reaches everything.
+            assertTrue(url, BrowserDestinations.All.tunnels(authority(url)))
+        }
+        assertEquals(BrowserDestinations.Loopback, BrowserDestinations.of("loopback"))
+        assertEquals(BrowserDestinations.All, BrowserDestinations.of(null))
+        assertEquals(BrowserDestinations.All, BrowserDestinations.of("anything"))
+
+        // The lookup's marker reaches the page's network.
+        fun cloud(answer: String) = AgentClient(
+            Routing(
+                mapOf(
+                    "/v0/agents/chat1" to """{"agent":{"id":"chat1","workspaceId":"w1","status":"idle"}}""",
+                    "/v0/workspaces/w1/agents/chat1/proxy" to answer,
+                ),
+            ),
+            "test",
+            cloud = true,
+        )
+        val network = cloud("""{"networkId":"c-chat1","kind":"runner","destinations":"loopback"}""").browserNetwork(agentId = "chat1")
+        assertEquals("/v0/networks/c-chat1/proxy", network.path)
+        assertEquals(BrowserDestinations.Loopback, network.destinations)
+        assertEquals(BrowserDestinations.All, cloud("""{"networkId":"c-chat1"}""").browserNetwork(agentId = "chat1").destinations)
+
+        // The nested CONNECT's refusal says which it is.
+        val body = """{"error":"Destination not allowed","code":"destination_not_allowed"}"""
+        val refusal = "HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nContent-Length: ${body.length}\r\n\r\n$body"
+        val refused = runCatching {
+            BrowserTunnel.open(AgentClient(Sockets(Bytes("HTTP/1.1 200 OK\r\n\r\n", refusal)), "token", cloud = true), BrowserNetwork.network("c-chat1"), authority("https://cdn.example.com"))
+        }.exceptionOrNull() as BrowserException
+        assertEquals(BrowserException.Kind.OutsideNetwork, refused.kind)
+        assertEquals(BrowserFailure(403, "Upstream Refused", "browser_proxy_upstream_refused"), BrowserFailure.of(BrowserUpstreamException(refused)))
+        assertEquals(BrowserFailure(403, "Upstream Refused", "browser_proxy_upstream_refused"), BrowserFailure.of(refused))
+
+        // The phone never dials itself: only the computer's loopback is the page's.
+        for (url in listOf("http://0.0.0.0:5173", "http://[::ffff:127.0.0.1]:5173")) {
+            val error = runCatching { BrowserDirect.open(authority(url)) }.exceptionOrNull() as? BrowserException
+            assertEquals(url, BrowserException.Kind.Forbidden, error?.kind)
+            assertEquals(url, BrowserFailure(403, "Forbidden", "browser_proxy_forbidden"), BrowserFailure.of(BrowserUpstreamException(error!!)))
+        }
+    }
+
+    @Test fun aStoppedComputesRefusalIsTheComputeGoneNotTheServer() = runBlocking {
+        val target = BrowserPolicy.Authority.of("http://localhost:5173")!!
+        fun refusal(status: Int, code: String): String {
+            val body = """{"error":"x","code":"$code"}"""
+            return "HTTP/1.1 $status Refused\r\nContent-Type: application/json\r\nContent-Length: ${body.length}\r\n\r\n$body"
+        }
+        suspend fun opening(vararg answers: String) =
+            runCatching { BrowserTunnel.open(AgentClient(Sockets(Bytes(*answers)), "token", cloud = true), BrowserNetwork.network("c-chat1"), target) }.exceptionOrNull() as BrowserException
+        // Happy Cloud answers the page's own CONNECT once the compute stopped,
+        assertEquals(BrowserException.Kind.ComputeGone, opening("HTTP/1.1 200 OK\r\n\r\n", refusal(503, "compute_offline")).kind)
+        // and the network's own after its grace, or with no compute at all.
+        assertEquals(BrowserException.Kind.ComputeGone, opening(refusal(503, "draining")).kind)
+        assertEquals(BrowserException.Kind.ComputeGone, opening(refusal(409, "no_compute")).kind)
+        // A dev server that isn't running is still the server's answer.
+        opening("HTTP/1.1 200 OK\r\n\r\n", refusal(502, "proxy_target_unavailable")).let {
+            assertEquals(BrowserException.Kind.Upstream, it.kind)
+            assertEquals(502, it.status)
+        }
+        // An agent with no compute names no network.
+        val detached = AgentClient(
+            Routing(
+                mapOf(
+                    "/v0/agents/chat1" to """{"agent":{"id":"chat1","workspaceId":"botworkspace","status":"idle"}}""",
+                    "/v0/workspaces/botworkspace/agents/chat1/proxy" to """{"error":"No compute","code":"no_compute"}""",
+                ),
+                statuses = mapOf("/v0/workspaces/botworkspace/agents/chat1/proxy" to 409),
+            ),
+            "test",
+            cloud = true,
+        )
+        assertEquals(BrowserException.Kind.ComputeGone, (runCatching { detached.browserNetwork(agentId = "chat1") }.exceptionOrNull() as? BrowserException)?.kind)
+    }
+
+    @Test fun anOpenTunnelClosedForItsComputeIsToldOnceBothSidesClose() = runBlocking {
+        // The page's side waits, as a dev server's socket does.
+        val local = object : TransportSocket {
+            var closed = false
+            override suspend fun read(maximumBytes: Int): ByteArray = kotlinx.coroutines.awaitCancellation()
+            override suspend fun write(bytes: ByteArray) {}
+            override fun close() {
+                closed = true
+            }
+        }
+        val remote = object : TransportSocket {
+            var closed = false
+            override suspend fun read(maximumBytes: Int): ByteArray = throw BrowserException(BrowserException.Kind.ComputeGone)
+            override suspend fun write(bytes: ByteArray) {}
+            override fun close() {
+                closed = true
+            }
+        }
+        val error = runCatching { BrowserRelay.duplex(local, remote) }.exceptionOrNull()
+        assertEquals(BrowserException.Kind.ComputeGone, (error as? BrowserException)?.kind)
+        assertTrue(local.closed)
+        assertTrue(remote.closed)
+        // Any other end is just an end.
+        BrowserRelay.duplex(Bytes(), Bytes())
     }
 
     @Test fun chunkedRequestIsBoundedAndCannotSmuggleAnotherRequest() = runBlocking {

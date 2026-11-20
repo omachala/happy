@@ -1,4 +1,5 @@
 #if canImport(UIKit)
+import HappyAnalytics
 import HappyCore
 import HappyWire
 import OSLog
@@ -78,7 +79,7 @@ enum HappyScan {
         start: PairingStart,
         busy: (Bool) -> Void = { _ in }
     ) async -> Result {
-        let route = ScanRoute.route(HappyCode(text), intent: intent, hasAccount: context.account.session != nil, canShareAccount: context.account.sessionIsLegacy)
+        let route = route(text, intent: intent, context: context)
         log.debug("code \(describe(text), privacy: .public) → \(String(describing: route).prefix(40), privacy: .public)")
         switch route {
         case .connectAgent:
@@ -90,6 +91,8 @@ enum HappyScan {
         case .confirmConnectComputer(let key):
             guard let session = context.account.session, await confirmRelay(controller) else { return .ended }
             return await approve(.terminal(publicKey: key), session: session, start: start, on: controller, busy: busy)
+        case .connectComputerSwitching(let id, let key):
+            return await connect(key, toAccount: id, context: context, start: start, on: controller, busy: busy)
         case .linkDevice(let key):
             guard let session = context.account.session else { return .ended }
             return await approve(.account(publicKey: key), session: session, start: start, on: controller, busy: busy)
@@ -98,10 +101,55 @@ enum HappyScan {
         case .signInToServer(let link):
             return await signIn(to: link, context: context, start: start, on: controller)
         case .problem(let problem):
-            PairingAnalytics.shared.log(.failed(method: problem.isAgentConnection ? .agentConnection : .relay, start: start))
+            Analytics.shared.scanFailed(problem, start: start)
             report(problem, on: controller)
             return .ended
         }
+    }
+
+    /// Where `text` goes from a scan with `intent`, given the accounts here.
+    static func route(_ text: String, intent: ScanIntent, context: AppContext) -> ScanRoute {
+        let account = context.account
+        let hasAccount = account.session != nil
+        return ScanRoute.route(HappyCode(text), intent: intent, hasAccount: hasAccount, canShareAccount: account.sessionIsLegacy,
+                               lastAccount: hasAccount ? nil : account.accountForComputer?.id)
+    }
+
+    /// What asking before `route` says under its title: the Happy account
+    /// a computer's code goes to, when one here takes it; nil otherwise.
+    static func confirmation(for route: ScanRoute, context: AppContext) -> String? {
+        switch route {
+        case .connectComputer, .confirmConnectComputer, .connectComputerSwitching:
+            context.account.accountForComputer.map { Strings.TerminalLink.connectTo($0.shownName) }
+        default:
+            nil
+        }
+    }
+
+    /// A computer's code while an agent connection is shown: the Happy
+    /// account used last takes it rather than a new one. That account is
+    /// shown first, so the window's screens become its home and the
+    /// outcome shows over them.
+    private static func connect(
+        _ key: Data,
+        toAccount id: String,
+        context: AppContext,
+        start: PairingStart,
+        on controller: UIViewController,
+        busy: (Bool) -> Void
+    ) async -> Result {
+        let window = controller.view.window ?? controller.navigationController?.viewIfLoaded?.window
+        let root = RootChange(window: window)
+        do {
+            try await context.account.switchAccount(to: id)
+        } catch {
+            log.error("switching to the account for a computer failed: \(String(describing: error), privacy: .public)")
+            LegacyPairingFlow.report(.failed, kind: .terminal, on: controller)
+            return .ended
+        }
+        guard let session = context.account.session else { return .ended }
+        await root.wait()
+        return await approve(.terminal(publicKey: key), session: session, start: start, on: window.flatMap(topmost) ?? controller, busy: busy)
     }
 
     private static func approve(
@@ -116,7 +164,7 @@ enum HappyScan {
         let outcome = await LegacyPairingFlow.approve(link, session: session)
         busy(false)
         log.debug("approval \(String(describing: outcome), privacy: .public)")
-        PairingAnalytics.shared.log(outcome == .approved ? .completed(method: .relay, start: start) : .failed(method: .relay, start: start))
+        Analytics.shared.relayPairingEnded(outcome, start: start)
         LegacyPairingFlow.report(outcome, kind: kind, on: controller)
         guard outcome == .approved else { return .ended }
         // happy-app lets the computer turning up say it; from a settings
@@ -139,8 +187,9 @@ enum HappyScan {
         on controller: UIViewController,
         busy: (Bool) -> Void
     ) async -> Result {
-        // The window outlives the screens signIn replaces.
-        let window = controller.view.window
+        // The window outlives signIn's screens; a newly pushed page may
+        // still be attaching to its navigation controller's window.
+        let window = controller.view.window ?? controller.navigationController?.viewIfLoaded?.window
         let root = RootChange(window: window)
         busy(true)
         let outcome: LegacyPairingFlow.Outcome
@@ -153,7 +202,7 @@ enum HappyScan {
             outcome = .failed
         }
         busy(false)
-        PairingAnalytics.shared.log(outcome == .approved ? .completed(method: .relay, start: start) : .failed(method: .relay, start: start))
+        Analytics.shared.accountForComputerEnded(outcome, start: start)
         guard outcome == .approved else {
             LegacyPairingFlow.report(outcome, kind: .terminal, on: window.flatMap(topmost) ?? controller)
             return .ended
@@ -256,13 +305,6 @@ enum HappyScan {
         let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
         let head = text.firstIndex(of: "?").map { String(text[..<$0]) } ?? String(text.prefix(24))
         return "\(head) (\(text.utf8.count) bytes)"
-    }
-}
-
-private extension ScanProblem {
-    var isAgentConnection: Bool {
-        if case .agentConnection = self { return true }
-        return false
     }
 }
 #endif

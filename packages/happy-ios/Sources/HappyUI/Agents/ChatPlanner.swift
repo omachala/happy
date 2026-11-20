@@ -1,5 +1,6 @@
 #if canImport(UIKit)
 import HappyCore
+import HappyIcons
 import HappyLayout
 import UIKit
 
@@ -24,12 +25,22 @@ actor ChatPlanner {
         var switchTarget: SwitchTarget?
         /// Models' names by ID, for what a failure was switched to.
         var modelNames: [String: String] = [:]
+        /// Whether the person's role may run a failed turn again.
+        var actionable = true
+        /// The server the conversation is on, which says where a settings
+        /// link opens (`SettingsLinkPlace`).
+        var server: String?
+        /// The conversation's agent: a Gen UI's `message` is sent only
+        /// into its origin agent's own.
+        var agentId: String?
     }
 
     /// A row as it was planned, and what from.
     struct Planned: @unchecked Sendable {
         var item: ChatItem
         var key: Key
+        /// `key`'s number in `plans`; 0 for one it hasn't numbered.
+        var keyNumber: Int
         var copied: Bool
         var opened: Bool
         var proposals: [ProposalShown?]
@@ -91,6 +102,20 @@ actor ChatPlanner {
         self.syntax = syntax
     }
 
+    /// The key each row was last planned with, as a number: the same key
+    /// keeps its number, so a row is told planned with it in one step, not
+    /// by comparing every reference the key holds once per row.
+    private var keys: [(key: Key, number: Int)] = []
+    private var keyNumbers = 0
+
+    private func number(_ key: Key) -> Int {
+        if let known = keys.first(where: { $0.key == key }) { return known.number }
+        keyNumbers += 1
+        // The rows' key and a failure card's: two are all a pass needs.
+        keys = Array((keys + [(key, keyNumbers)]).suffix(4))
+        return keyNumbers
+    }
+
     /// `proposals` are the sidebar proposals the items show, as they stand;
     /// `opened` the other agents' messages opened to read.
     func plans(_ items: [ChatItem], key: Key, copied: String?, opened: Set<String> = [], proposals: [String: ProposalShown] = [:]) -> [ChatRowPlan] {
@@ -101,24 +126,31 @@ actor ChatPlanner {
         var others = key
         others.switchTarget = nil
         others.modelNames = [:]
+        let othersNumber = number(others)
+        var failureNumber: Int?
         var shownTimes: [String: Double?] = [:]
         for var item in items {
             if item.role == .user {
-                if let first = times[item.id] { item.time = first }
+                if let first = times[item.id], item.time != first { item.time = first }
                 shownTimes[item.id] = item.time
             }
             let isCopied = copied == item.id
             let isOpened = opened.contains(item.id)
             let shown = item.proposalIds.map { proposals[$0] }
             var reads = others
-            if case .failure = item.role { reads = key }
+            var readsNumber = othersNumber
+            if case .failure = item.role {
+                reads = key
+                if failureNumber == nil { failureNumber = number(key) }
+                readsNumber = failureNumber ?? 0
+            }
             let plan: ChatRowPlan
-            if let cached = cache[item.id], cached.item == item, cached.key == reads, cached.copied == isCopied, cached.opened == isOpened, cached.proposals == shown {
+            if let cached = cache[item.id], (cached.keyNumber == 0 ? cached.key == reads : cached.keyNumber == readsNumber), cached.item == item, cached.copied == isCopied, cached.opened == isOpened, cached.proposals == shown {
                 plan = cached.plan
             } else {
                 plan = Self.plan(item, key: reads, copied: isCopied, opened: isOpened, syntax: syntax, proposals: proposals)
             }
-            next[item.id] = Planned(item: item, key: reads, copied: isCopied, opened: isOpened, proposals: shown, plan: plan)
+            next[item.id] = Planned(item: item, key: reads, keyNumber: readsNumber, copied: isCopied, opened: isOpened, proposals: shown, plan: plan)
             if plan.size.height > 0 { plans.append(plan) }
         }
         cache.replace(with: next)
@@ -152,6 +184,8 @@ actor ChatPlanner {
                 for (proposal, shown) in zip(row.item.proposalIds, row.proposals) { proposals[proposal] = shown }
                 var next = row
                 next.key = key
+                // Planned at a key `plans` hasn't numbered: told by the key itself.
+                next.keyNumber = 0
                 next.plan = Self.plan(row.item, key: key, copied: row.copied, opened: row.opened, syntax: syntax, proposals: proposals)
                 cache.adopt(next, replacing: row, id: id)
                 planned[id] = next
@@ -166,18 +200,23 @@ actor ChatPlanner {
         if case .collaborator(let agentId, let explanation) = item.role {
             return collaborator(item, agentId: agentId, explanation: explanation, key: key, opened: opened, syntax: syntax)
         }
+        if case .own(let explanation, let run) = item.role {
+            if let run { return pipelineNotice(item, run: run, key: key) }
+            return own(item, explanation: explanation, key: key, opened: opened, syntax: syntax)
+        }
         switch item.role {
         case .failure(let failure): return Self.failure(failure, id: item.id, key: key, syntax: syntax)
         case .tool(let tool):
             return item.pieces.isEmpty ? Self.tool(tool, id: item.id, key: key) : Self.toolResult(tool, item: item, key: key, syntax: syntax, proposals: proposals)
         case .turnEnd(let ended): return Self.turnEnd(ended, id: item.id, key: key, copied: copied)
         case .trace(let trace): return Self.trace(trace, id: item.id, key: key)
-        case .question(let ask): return Self.question(ask, id: item.id, key: key)
+        case .question(let ask): return ask.line ? Self.questionLine(ask, id: item.id, key: key) : Self.question(ask, id: item.id, key: key)
+        case .section(let section): return Self.section(section, id: item.id, key: key)
         default: break
         }
         guard !item.pieces.isEmpty else { return ChatRowPlan(id: item.id, size: CGSize(width: width, height: 0), items: []) }
         typealias M = MessageLayout.Metrics
-        let text = HappyReferences.plain(item.text, view: key.references.view)
+        let text = HappyReferences.plain(item.text, instanceId: key.references.instanceId, view: key.references.view)
         switch item.role {
         case .agent:
             return Self.body(item, key: key, syntax: syntax, proposals: proposals, revealable: true) {
@@ -188,22 +227,33 @@ actor ChatPlanner {
             // the accent bubble at the right, its photos under it, whole.
             // Only a ludicrous one, past `foldLines`, is cut there until
             // tapped open.
-            // A file that is no picture or video is named under the words.
+            // A file on its way that is no picture or video is named under
+            // the words; once the computer holds it, it is a card that opens it.
             let named = item.pieces.compactMap { piece -> String? in
                 guard case .sentFile(let file) = piece, !file.isVisual else { return nil }
                 return "📎 \(file.name)"
             }
+            let files = item.pieces.compactMap { piece -> Media? in
+                guard case .file(let media) = piece, media.attachment != nil else { return nil }
+                return media
+            }
             let written = ([text] + named).filter { !$0.isEmpty }.joined(separator: "\n\n")
-            let string = ChatTextStyles.text.string(written, color: Palette.userMessageText, in: environment)
+            // Its links read as desktop's: under what they name now.
+            var segments = text.isEmpty ? [] : HappyReferences.segments(item.text, instanceId: key.references.instanceId, view: key.references.view)
+            if !named.isEmpty { segments.append(.text((text.isEmpty ? "" : "\n\n") + named.joined(separator: "\n\n"))) }
+            let string = ChatSpans.plain(segments, style: ChatTextStyles.text, color: Palette.userMessageText, in: environment, links: key.references)
             let body = written.isEmpty ? nil : MeasuredText(string)
             let preview = MeasuredText(string, maxLines: M.foldLines)
             let toggles = opened ? Strings.showLess : Strings.showFull
             let control = MeasuredText(ChatTextStyles.fold.string(toggles, color: Palette.textSecondary, in: environment))
-            let pictures: [(id: String, image: MediaFlow.Image, isVideo: Bool)] = item.pieces.compactMap {
-                switch $0 {
-                case .picture(let id, _, let data): return (id, Self.pictureSize(data), false)
-                case .sentFile(let file) where file.isVisual: return (file.id, Self.fileSize(file), file.isVideo)
-                default: return nil
+            // An attachment the computer holds is read as a tool's media is,
+            // its thumbhash first; the sender's own is already here.
+            let pictures: [(id: String, image: MediaFlow.Image, isVideo: Bool, attached: Media?)] = item.pieces.flatMap { piece -> [(id: String, image: MediaFlow.Image, isVideo: Bool, attached: Media?)] in
+                switch piece {
+                case .picture(let id, _, let data): return [(id, Self.pictureSize(data), false, nil)]
+                case .sentFile(let file) where file.isVisual: return [(file.id, Self.fileSize(file), file.isVideo, nil)]
+                case .gallery(let media, _): return media.filter { $0.attachment != nil }.map { ($0.key, Self.layoutItem($0).image, $0.isVideo, $0) }
+                default: return []
                 }
             }
             var failure = false
@@ -228,7 +278,7 @@ actor ChatPlanner {
                 fold: body.map { _ in .init(preview: preview.measurable, control: control.measurable, opened: opened, lineHeight: ChatTextStyles.text.lineHeight ?? 24) },
                 // A refusal is the red mark in the slot, as Telegram's: no
                 // line under the bubble, so the row never grows when a send fails.
-                pictures: pictures.map(\.image), showsStatus: false,
+                pictures: pictures.map(\.image), cards: files.count, showsStatus: false,
                 delivery: status, trailing: body?.trailing
             )
             var items: [ChatDrawItem] = []
@@ -237,16 +287,25 @@ actor ChatPlanner {
                 items.append(.box(ChatBox(frame: bubble, fill: Palette.userBubble, radius: M.bubbleRadius)))
                 if layout.foldControl != nil { hits.append(ChatHit(frame: bubble, action: .toggleTool(item.id))) }
                 else if failure { hits.append(ChatHit(frame: bubble, action: .retry(localId: item.id))) }
-                hits.append(ChatHit(frame: bubble, action: .copyMenu(text), hold: true))
+                // Copied exactly as written.
+                hits.append(ChatHit(frame: bubble, action: .copyMenu(item.text), hold: true))
             }
             var selectable: [ChatSelectable.Text] = []
             if let body, let frame = layout.text {
                 let drawn = (layout.cut ? preview : body).layout(for: frame)
                 items.append(.text(drawn, frame))
+                items += ChatSheen.items(drawn, frame: frame, ground: Palette.userBubble)
                 selectable.append(.init(layout: drawn, frame: frame))
             }
             if let frame = layout.foldControl { items.append(.text(control.layout(for: frame), frame)) }
             for (picture, frame) in zip(pictures, layout.pictures) {
+                if let media = picture.attached {
+                    items.append(.media(ChatMedia(key: media.key, isVideo: media.isVideo, thumbhash: media.item.thumbhash, label: Strings.media(isVideo: media.isVideo, name: media.item.name)), frame: frame))
+                    hits.insert(ChatHit(frame: frame, action: .openMedia(media.key)), at: 0)
+                    let ring = media.isVideo ? MediaStatusLayout.badgeHit(in: frame) : ChatUpload.ring(in: frame).insetBy(dx: -8, dy: -8)
+                    hits.insert(ChatHit(frame: ring, action: .toggleDownload(media.key)), at: 0)
+                    continue
+                }
                 let key = MediaLoader.sentKey(picture.id)
                 let upload = uploading ? ChatUpload(key: picture.id, failed: failure) : nil
                 items.append(.media(ChatMedia(key: key, isVideo: picture.isVideo, thumbhash: nil, label: picture.isVideo ? Strings.video : Strings.picture, upload: upload), frame: frame))
@@ -260,6 +319,15 @@ actor ChatPlanner {
                     hits.append(ChatHit(frame: frame, action: .openMedia(key)))
                 }
             }
+            // A file's card, as an agent's: its ring reads or pauses it, the
+            // rest opens it once here.
+            for (file, frame) in zip(files, layout.cards) {
+                let drawn = ChatMediaPlan.draw(ChatMediaPlan.card(file: file), in: frame, environment: environment)
+                items += drawn.items
+                hits.insert(drawn.hit, at: 0)
+                let chip = ResultCardLayout(frame: frame, opens: true).chip
+                hits.insert(ChatHit(frame: chip.insetBy(dx: -8, dy: -8), action: .toggleDownload(file.key)), at: 0)
+            }
             // The mark says where it is, so the bubble is never dimmed.
             if let box = layout.delivery {
                 if let pill = layout.deliveryPill {
@@ -269,15 +337,15 @@ actor ChatPlanner {
                 items += placed.items
                 if failure { hits.insert(ChatHit(frame: placed.mark.insetBy(dx: -8, dy: -8), action: .retry(localId: item.id)), at: 0) }
             }
-            let label = [text, failure ? Strings.sendFailed : ""].filter { !$0.isEmpty }.joined(separator: ", ")
+            let label = ([text] + files.map(\.item.name) + [failure ? Strings.sendFailed : ""]).filter { !$0.isEmpty }.joined(separator: ", ")
             let shape = layout.bubble.map { ChatBox(frame: $0, fill: Palette.userBubble, radius: M.bubbleRadius) }
-                ?? ChatBox(frame: layout.pictures.reduce(CGRect.null) { $0.union($1) })
+                ?? ChatBox(frame: (layout.pictures + layout.cards).reduce(CGRect.null) { $0.union($1) })
             let flight = ChatRowFlight(bubble: shape, text: layout.text, status: layout.delivery, media: !pictures.isEmpty)
             let selection = layout.bubble.flatMap { bubble in
-                selectable.isEmpty ? nil : ChatSelectable(texts: selectable, whole: text, frame: bubble, card: false)
+                selectable.isEmpty ? nil : ChatSelectable(texts: selectable, whole: item.text, frame: bubble, card: false)
             }
             return ChatRowPlan(id: item.id, size: layout.size, items: items, hits: hits, accessibilityLabel: label, toggles: layout.foldControl == nil ? nil : toggles, flight: flight, mine: true, selection: selection)
-        case .collaborator, .failure, .tool, .turnEnd, .trace, .question:
+        case .collaborator, .own, .failure, .tool, .turnEnd, .trace, .question, .section:
             // Planned above.
             return ChatRowPlan(id: item.id, size: CGSize(width: width, height: 0), items: [])
         }
@@ -289,7 +357,7 @@ actor ChatPlanner {
     /// pictures, recordings, files and artifacts where they were presented.
     static func body(_ item: ChatItem, key: Key, syntax: CodeSyntaxService, proposals: [String: ProposalShown], revealable: Bool = false, layout: ([MessageLayout.Part]) -> MessageLayout) -> ChatRowPlan {
         let environment = key.environment
-        let text = HappyReferences.plain(item.text, view: key.references.view)
+        let text = HappyReferences.plain(item.text, instanceId: key.references.instanceId, view: key.references.view)
         var parts: [MessageLayout.Part] = []
         enum Draft {
             case markdown(MarkdownPiece)
@@ -297,6 +365,8 @@ actor ChatPlanner {
             case tree(ChatMediaPlan.Tree)
             case card(ChatMediaPlan.Card)
             case page(InlinePage)
+            case genUI(GenUIEmbed)
+            case genUIMessage(GenUIMessageEmbed)
             case proposal(String)
             /// Words the planner writes, read but not selectable.
             case line(MarkdownPiece)
@@ -306,8 +376,11 @@ actor ChatPlanner {
         for piece in item.pieces {
             switch piece {
             case .text(let text):
-                let resolved = HappyReferences.markdown(text, view: key.references.view)
-                let markdown = MarkdownPiece(Markdown.joiningSoftBreaks(resolved), color: Palette.text, diagrams: ChatMermaidHeights(row: item.id), syntax: syntax, in: environment, body: ChatTextStyles.text, header: ChatTextStyles.header)
+                let resolved = HappyReferences.markdown(text, instanceId: key.references.instanceId, view: key.references.view)
+                let markdown = MarkdownPiece(
+                    Markdown.joiningSoftBreaks(resolved), color: Palette.text, diagrams: ChatMermaidHeights(row: item.id), syntax: syntax, in: environment,
+                    body: ChatTextStyles.text, header: ChatTextStyles.header, links: key.references, server: key.server, copied: text
+                )
                 drafts.append(.markdown(markdown))
                 parts.append(.markdown(markdown.blocks))
             case .gallery(let media, let columns):
@@ -325,11 +398,23 @@ actor ChatPlanner {
                 let app = key.references.isApp(artifact.id, version: artifact.version, opensLatest: artifact.opensLatest)
                 drafts.append(.card(app ? ChatMediaPlan.card(app: artifact) : ChatMediaPlan.card(artifact: artifact)))
                 parts.append(.card)
-                // Desktop's inline page, under its card: only where the call follows the latest version.
-                if !app, artifact.followsLatest, let page = key.references.pages[artifact.id] {
+                let inner = MessageLayout.agentInner(width: key.width, maxContentWidth: key.maxContentWidth)
+                // A Gen UI under its card, as tall as its document plans at
+                // the column's width, so the row is right on its first layout.
+                if !app, let embed = GenUIPlanners.embed(artifact, references: key.references, width: inner, environment: environment, server: key.server, agentId: key.agentId) {
+                    drafts.append(.genUI(embed))
+                    parts.append(.page(height: embed.height))
+                } else if !app, artifact.followsLatest, let page = key.references.pages[artifact.id] {
+                    // Desktop's inline page, under its card: only where the call follows the latest version.
                     drafts.append(.page(InlinePage(artifactId: artifact.id, title: artifact.title, page: page)))
                     parts.append(.page(height: key.pageHeights[artifact.id] ?? Self.pageHeight))
                 }
+            case .genUI(let toolCallId, let document):
+                let inner = MessageLayout.agentInner(width: key.width, maxContentWidth: key.maxContentWidth)
+                let embed = GenUIMessageEmbed(agentId: key.agentId, toolCallId: toolCallId, document: document, width: inner, environment: environment)
+                drafts.append(.genUIMessage(embed))
+                parts.append(.page(height: embed.height))
+                spoken.append(document.fallback)
             case .sidebarProposal(let artifactId):
                 // Drawn by the sidebar's own rows once it is read.
                 if let shown = proposals[artifactId], shown.status != .loading, shown.status != .missing {
@@ -351,8 +436,8 @@ actor ChatPlanner {
         var hits: [ChatHit] = []
         var selectable: [ChatSelectable.Text] = []
         var proposals: [(artifactId: String, layout: SidebarProposalLayout, frame: CGRect)] = []
-        func media(_ media: Media, _ frame: CGRect) {
-            items.append(.media(ChatMedia(key: media.key, isVideo: media.isVideo, thumbhash: media.item.thumbhash, label: Strings.media(isVideo: media.isVideo, name: media.item.name)), frame: frame))
+        func media(_ media: Media, _ frame: CGRect, covers: Bool = false) {
+            items.append(.media(ChatMedia(key: media.key, isVideo: media.isVideo, thumbhash: media.item.thumbhash, label: Strings.media(isVideo: media.isVideo, name: media.item.name), covers: covers), frame: frame))
             hits.insert(ChatHit(frame: frame, action: .openMedia(media.key)), at: 0)
             // Telegram's ring pauses or resumes the download; a video's
             // play button plays, so its badge does that instead.
@@ -392,6 +477,10 @@ actor ChatPlanner {
                 card(drafted, frame)
             case (.page(let frame), .page(let page)):
                 items.append(.embed(.page(page), frame: frame))
+            case (.page(let frame), .genUI(let embed)):
+                items.append(.embed(.genUI(embed), frame: frame))
+            case (.page(let frame), .genUIMessage(let embed)):
+                items.append(.embed(.genUIMessage(embed), frame: frame))
             case (.markdown(let placed, let origin), .line(let markdown)):
                 items += markdown.draw(placed, origin: origin).items
             case (.proposal(let layout, let frame), .proposal(let artifactId)):
@@ -403,7 +492,7 @@ actor ChatPlanner {
         // Each picture and recording reads as itself (`ChatMediaView`).
         return ChatRowPlan(
             id: item.id, size: layout.size, items: items, hits: hits, accessibilityLabel: spoken.joined(separator: "\n\n"), proposals: proposals,
-            revealable: revealable, selection: .covering(items, texts: selectable, whole: text)
+            revealable: revealable, selection: .covering(items, texts: selectable, whole: item.text)
         )
     }
 
@@ -443,7 +532,7 @@ actor ChatPlanner {
         }
         var pieces: [MarkdownPiece] = [piece("**\(Strings.failure)**", Palette.statusError), piece(failure.reason, Palette.text, selectable: true)]
         pieces += failure.steps.map { piece($0, Palette.textSecondary) }
-        let action = Self.action(failure, target: key.switchTarget)
+        let action = key.actionable ? Self.action(failure, target: key.switchTarget) : nil
         let actionText: String? = switch action {
         case .retry?: Strings.retry
         case .switchTo(let target)?: Strings.switchAndContinue(target.label)
@@ -478,7 +567,6 @@ actor ChatPlanner {
     /// is, the line is the sender's name and that; without, "Message from"
     /// the sender. A sender nobody here can name shows by its ID's start.
     static func collaborator(_ item: ChatItem, agentId: String, explanation: String?, key: Key, opened: Bool, syntax: CodeSyntaxService) -> ChatRowPlan {
-        let environment = key.environment
         let name = key.references.agents[agentId].map { $0.label.isEmpty ? Strings.untitledAgent : $0.label }
             ?? key.subagentTitles[agentId].map { $0.isEmpty ? Strings.subagent : $0 }
             ?? (agentId.count > 10 ? "\(agentId.prefix(8))…" : agentId)
@@ -489,16 +577,30 @@ actor ChatPlanner {
         default: name
         }
         // Desktop names a bare ID in the line by its agent's title.
-        let line = explanation.map { HappyReferences.plain($0, view: key.references.view).replacingOccurrences(of: agentId, with: name) }
+        let line = explanation.map { HappyReferences.plain($0, instanceId: key.references.instanceId, view: key.references.view).replacingOccurrences(of: agentId, with: name) }
             ?? Strings.agentMessageFrom(name)
+        return activity(item, glyph: Glyphs.icon("agents"), verb: verb, line: line, key: key, opened: opened, syntax: syntax)
+    }
+
+    /// The agent's message to itself (desktop #156's `self`): its own one
+    /// line on what it is, or "Message to itself", the message behind it.
+    static func own(_ item: ChatItem, explanation: String?, key: Key, opened: Bool, syntax: CodeSyntaxService) -> ChatRowPlan {
+        let line = explanation.map { HappyReferences.plain($0, instanceId: key.references.instanceId, view: key.references.view) } ?? Strings.agentMessageToItself
+        return activity(item, glyph: Glyphs.icon("agents"), verb: explanation == nil ? Strings.agentMessage : nil, line: line, key: key, opened: opened, syntax: syntax)
+    }
+
+    /// One compact activity line, a glyph, a word and a line, the message
+    /// behind it when it has one: another agent's message, or this one's to itself.
+    private static func activity(_ item: ChatItem, glyph: Icon, verb: String?, line: String, key: Key, opened: Bool, syntax: CodeSyntaxService) -> ChatRowPlan {
+        let environment = key.environment
         let body = item.text
         let opens = !body.isEmpty
         let verbText = verb.map { ChatTextStyles.activityVerb.string($0, color: Palette.textSecondary, lineBreakMode: .byTruncatingTail, in: environment) }
         let lineText = ChatTextStyles.activityText.string(line, color: Palette.text, lineBreakMode: .byTruncatingTail, in: environment)
         let markdown = opened && opens ? MarkdownPiece(
-            Markdown.joiningSoftBreaks(HappyReferences.markdown(body, view: key.references.view)), color: Palette.textSecondary,
+            Markdown.joiningSoftBreaks(HappyReferences.markdown(body, instanceId: key.references.instanceId, view: key.references.view)), color: Palette.textSecondary,
             diagrams: ChatMermaidHeights(row: item.id), syntax: syntax, in: environment,
-            body: ChatTextStyles.activityBody, header: ChatTextStyles.activityHeader
+            body: ChatTextStyles.activityBody, header: ChatTextStyles.activityHeader, links: key.references, server: key.server, copied: body
         ) : nil
         let layout = AgentMessageLayout(
             width: key.width, maxContentWidth: key.maxContentWidth,
@@ -506,7 +608,7 @@ actor ChatPlanner {
             textWidth: ChatTextLayout(unwrapped: lineText).size.width,
             opens: opens, body: markdown?.blocks
         )
-        var items: [ChatDrawItem] = [.icon(Glyphs.icon("agents"), size: AgentMessageLayout.Metrics.glyph, frame: layout.glyph, tint: Palette.textSecondary)]
+        var items: [ChatDrawItem] = [.icon(glyph, size: AgentMessageLayout.Metrics.glyph, frame: layout.glyph, tint: Palette.textSecondary)]
         if let verbText, let frame = layout.verb { items.append(.text(ChatTextLayout(verbText, width: frame.width, maxLines: 1), frame)) }
         items.append(.text(ChatTextLayout(lineText, width: layout.text.width, maxLines: 1), layout.text))
         if let frame = layout.chevron {
@@ -520,7 +622,44 @@ actor ChatPlanner {
         }
         // The whole line opens and closes it, a finger's room above and below.
         if opens { hits.insert(ChatHit(frame: layout.header.insetBy(dx: 0, dy: -AgentMessageLayout.Metrics.paddingV), action: .toggleTool(item.id)), at: 0) }
-        let spoken = [verb, line].compactMap { $0 }.joined(separator: " ") + (opened && opens ? "\n\n" + HappyReferences.plain(body, view: key.references.view) : "")
+        let spoken = [verb, line].compactMap { $0 }.joined(separator: " ") + (opened && opens ? "\n\n" + HappyReferences.plain(body, instanceId: key.references.instanceId, view: key.references.view) : "")
+        return ChatRowPlan(id: item.id, size: layout.size, items: items, hits: hits, accessibilityLabel: spoken)
+    }
+
+    /// A pipeline's result, told to the agent that started the run
+    /// (`metadata.pipelineRun`): the outcome in its run row's colour, the
+    /// pipeline and its version, the failure's one line under it. A tap
+    /// opens the run; the message is the agent's to read, not the row's.
+    static func pipelineNotice(_ item: ChatItem, run: AgentWire.PipelineRunNotice, key: Key) -> ChatRowPlan {
+        let environment = key.environment
+        let state = PipelineRunState(rawValue: run.state)
+        let tile = state.map(PipelineRows.tile) ?? PipelineRows.neutral(.ionicons("git-network-outline"))
+        let outcome = state.map(Strings.Pipelines.state) ?? run.state.capitalized
+        let line = Strings.Pipelines.notice(name: run.pipelineName ?? run.pipelineId, version: run.version)
+        let verbText = ChatTextStyles.activityVerb.string(outcome, color: tile.ink, lineBreakMode: .byTruncatingTail, in: environment)
+        let lineText = ChatTextStyles.activityText.string(line, color: Palette.text, lineBreakMode: .byTruncatingTail, in: environment)
+        let summary = run.summary.flatMap { $0.isEmpty ? nil : MeasuredText(ChatTextStyles.activityBody.string($0, color: Palette.textSecondary, lineBreakMode: .byTruncatingTail, in: environment), maxLines: 1) }
+        let layout = AgentMessageLayout(
+            width: key.width, maxContentWidth: key.maxContentWidth,
+            verbWidth: ChatTextLayout(unwrapped: verbText).size.width, textWidth: ChatTextLayout(unwrapped: lineText).size.width,
+            opens: true, body: summary.map { [.text($0.measurable)] }
+        )
+        var items: [ChatDrawItem] = [.icon(tile.icon, size: AgentMessageLayout.Metrics.glyph, frame: layout.glyph, tint: tile.ink)]
+        if let frame = layout.verb { items.append(.text(ChatTextLayout(verbText, width: frame.width, maxLines: 1), frame)) }
+        items.append(.text(ChatTextLayout(lineText, width: layout.text.width, maxLines: 1), layout.text))
+        if let frame = layout.chevron {
+            items.append(.icon(Glyphs.icon("chevron-right"), size: AgentMessageLayout.Metrics.chevron, frame: frame, tint: Palette.textSecondary))
+        }
+        var bottom = layout.header.maxY
+        if let summary, let placed = layout.body?.blocks.first, case .text(let frame) = placed {
+            let frame = frame.offsetBy(dx: layout.bodyOrigin.x, dy: layout.bodyOrigin.y)
+            items.append(.text(summary.layout(for: frame), frame))
+            bottom = frame.maxY
+        }
+        // The whole row opens the run, a finger's room above and below.
+        let area = CGRect(x: layout.header.minX, y: layout.header.minY, width: layout.header.width, height: bottom - layout.header.minY)
+        let hits = [ChatHit(frame: area.insetBy(dx: 0, dy: -AgentMessageLayout.Metrics.paddingV), action: .openPipelineRun(runId: run.runId, pipelineName: run.pipelineName))]
+        let spoken = [outcome, line, run.summary].compactMap { $0 }.joined(separator: ". ")
         return ChatRowPlan(id: item.id, size: layout.size, items: items, hits: hits, accessibilityLabel: spoken)
     }
 

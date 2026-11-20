@@ -7,7 +7,6 @@ import UIKit
 /// has Support Happy's boba row instead). Subscribe pushes Support Happy's
 /// page (`SupportViewController`, always, on sale or not); Restore
 /// restores, on the tap only; a subscriber is thanked. Nothing restores or charges on opening it.
-/// The relay's voice access remains the server's decision.
 ///
 /// happy-app's SettingsView opens its hosted voluntary_support paywall;
 /// its title, subtitle, heart and unavailable copy are retained here.
@@ -86,6 +85,13 @@ extension Array where Element == SettingsRow {
     func withFooter(_ footer: String) -> [SettingsRow] {
         var rows = self
         if !rows.isEmpty { rows[rows.count - 1].footer = footer }
+        return rows
+    }
+
+    /// The card with `header` over it, said by its first row.
+    func withHeader(_ header: String) -> [SettingsRow] {
+        var rows = self
+        if !rows.isEmpty { rows[0].header = header }
         return rows
     }
 }

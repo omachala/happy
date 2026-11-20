@@ -27,13 +27,17 @@ import CoreGraphics
 ///     │ 8 [+42] 2 [ text (two lines, then scrolls) ] 2 [opt 42] 8 [42] 8 │ row 44+
 ///
 /// The chips go behind the options button (`options`), which opens them;
-/// the buttons keep to the row's foot as the text grows.
+/// the buttons keep to the row's foot as the text grows. `compactLines`
+/// lets the text grow further before it scrolls (the "+" sheet's caption
+/// shows five, as the full card does).
 ///
 /// Frames are in the card's bounds. `middleContent` is in `middle`'s.
 public struct AgentInputCardLayout: Equatable, Sendable {
     public enum Metrics {
         // AgentInputAttachmentStrip
         public static let attachmentSize: CGFloat = 64
+        /// Between dictated words and the recording circle over send.
+        public static let recordingTextGap: CGFloat = 8
         public static let attachmentGap: CGFloat = 8
         public static let attachmentStripPaddingH: CGFloat = 4
         public static let attachmentStripMarginH: CGFloat = 8
@@ -130,6 +134,12 @@ public struct AgentInputCardLayout: Equatable, Sendable {
         /// The trash after add, on the full card; not in zen mode and not
         /// on the compact card, which has no room for it.
         public var showsTrash: Bool
+        /// The lines the compact row shows before its text scrolls.
+        public var compactLines: Int
+        /// Dictation is writing into the text while the recording circle
+        /// (`RecordMotion.Metrics.innerDiameter`) stands centred on send:
+        /// the text wraps clear of the circle, so the newest words show.
+        public var recording: Bool
 
         /// The compact card's options button: there whenever a chip is.
         public var showsOptions: Bool {
@@ -154,7 +164,9 @@ public struct AgentInputCardLayout: Equatable, Sendable {
             zenMode: Bool = false,
             offersExpand: Bool = false,
             compact: Bool = false,
-            showsTrash: Bool = false
+            showsTrash: Bool = false,
+            compactLines: Int = 2,
+            recording: Bool = false
         ) {
             self.width = width
             self.metrics = metrics
@@ -174,6 +186,8 @@ public struct AgentInputCardLayout: Equatable, Sendable {
             self.offersExpand = offersExpand
             self.compact = compact
             self.showsTrash = showsTrash
+            self.compactLines = compactLines
+            self.recording = recording
         }
     }
 
@@ -263,7 +277,7 @@ public struct AgentInputCardLayout: Equatable, Sendable {
             let text = MultiTextInputLayout(
                 contentHeight: input.textContentHeight,
                 hasText: input.hasText,
-                maxHeight: Self.compactTextCap(lineHeight: lineHeight, metrics: metrics),
+                maxHeight: Self.compactTextCap(lineHeight: lineHeight, lines: input.compactLines, metrics: metrics),
                 lineHeight: lineHeight,
                 paddingTop: metrics.inputPaddingTop,
                 paddingBottom: metrics.inputPaddingBottom
@@ -274,15 +288,15 @@ public struct AgentInputCardLayout: Equatable, Sendable {
             var textFrame = CGRect(
                 x: columns.containerX + insets.inputContainerPaddingLeft,
                 y: y + metrics.inputPaddingTop + (containerHeight - metrics.inputPaddingTop - metrics.inputPaddingBottom - text.height) / 2,
-                width: max(0, columns.containerWidth - insets.inputContainerPaddingLeft - insets.inputContainerPaddingRight),
+                width: Self.textWidth(input),
                 height: text.height
             )
             textScrolls = text.scrollEnabled
             if textScrolls {
-                // Scrolled, the text shows its two lines and nothing else:
-                // no padding inside to scroll away and bare part of a line
-                // at the top. Following the caret then rests on whole lines.
-                let lines = 2 * lineHeight
+                // Scrolled, the text shows its lines and nothing else: no
+                // padding inside to scroll away and bare part of a line at
+                // the top. Following the caret then rests on whole lines.
+                let lines = CGFloat(max(1, input.compactLines)) * lineHeight
                 textFrame.origin.y += metrics.inputPaddingTop + (textFrame.height - metrics.inputPaddingTop - metrics.inputPaddingBottom - lines) / 2
                 textFrame.size.height = lines
                 textPaddingTop = 0
@@ -340,7 +354,7 @@ public struct AgentInputCardLayout: Equatable, Sendable {
         self.text = CGRect(
             x: contentX + insets.inputContainerPaddingLeft,
             y: y + metrics.inputPaddingTop + (innerHeight - text.height) / 2,
-            width: max(0, contentWidth - insets.inputContainerPaddingLeft - insets.inputContainerPaddingRight),
+            width: Self.textWidth(input),
             height: text.height
         )
         textScrolls = text.scrollEnabled
@@ -482,10 +496,11 @@ public struct AgentInputCardLayout: Equatable, Sendable {
         return content
     }
 
-    /// The compact card's text cap, its padding included: two lines show,
-    /// and the third scrolls, as the full card's 120 shows five (and 2).
-    public static func compactTextCap(lineHeight: CGFloat, metrics: MobileComposerMetrics = .mobile) -> CGFloat {
-        2 * lineHeight + metrics.inputPaddingTop + metrics.inputPaddingBottom + 2
+    /// The compact card's text cap, its padding included: `lines` show
+    /// (two by default), and the next scrolls, as the full card's 120 shows
+    /// five (and 2).
+    public static func compactTextCap(lineHeight: CGFloat, lines: Int = 2, metrics: MobileComposerMetrics = .mobile) -> CGFloat {
+        CGFloat(max(1, lines)) * lineHeight + metrics.inputPaddingTop + metrics.inputPaddingBottom + 2
     }
 
     /// Where the compact card's columns start: add, the text's container
@@ -517,10 +532,23 @@ public struct AgentInputCardLayout: Equatable, Sendable {
         let metrics = input.metrics
         let border = max(0, input.borderWidth)
         let insets = AgentInputInsets(shellInset: metrics.shellInset, actionSize: metrics.actionSize, addIconSize: metrics.addIconSize)
-        let container = input.compact
-            ? compactColumns(width: max(0, input.width), borderWidth: border, metrics: metrics, input: input).containerWidth
-            : max(0, input.width - 2 * border - 2 * metrics.shellInset)
-        return max(0, container - insets.inputContainerPaddingLeft - insets.inputContainerPaddingRight)
+        let contentX = border + metrics.shellInset
+        let containerX: CGFloat
+        let containerWidth: CGFloat
+        let primaryX: CGFloat
+        if input.compact {
+            let columns = compactColumns(width: max(0, input.width), borderWidth: border, metrics: metrics, input: input)
+            (containerX, containerWidth, primaryX) = (columns.containerX, columns.containerWidth, columns.primary)
+        } else {
+            containerWidth = max(0, input.width - 2 * border - 2 * metrics.shellInset)
+            (containerX, primaryX) = (contentX, contentX + containerWidth - metrics.primaryActionSize)
+        }
+        let width = max(0, containerWidth - insets.inputContainerPaddingLeft - insets.inputContainerPaddingRight)
+        guard input.recording else { return width }
+        // Send is the circle's centre; the words stop a gap short of it.
+        let circleMinX = primaryX + metrics.primaryActionSize / 2 - RecordMotion.Metrics.innerDiameter / 2
+        let textX = containerX + insets.inputContainerPaddingLeft
+        return max(0, min(width, circleMinX - Metrics.recordingTextGap - textX))
     }
 
     /// The thumbnails in the attachment strip's scrolling content, and that

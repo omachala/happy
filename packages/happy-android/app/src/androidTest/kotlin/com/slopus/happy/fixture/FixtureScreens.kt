@@ -56,12 +56,12 @@ fun FixtureScreens(transport: FixtureTransport, scope: CoroutineScope, onConvers
             DisposableEffect(conversation) { onDispose { conversation.setVisible(false) } }
             ConversationScreen(
                 state = state,
-                connection = null,
                 actions = remember(conversation, nav) {
                     ConversationScreenActions(
                         onBack = {},
                         onDraftChange = conversation::setDraft,
                         onSend = { words, attachments -> conversation.send(words, attachments) },
+                        onSendPending = { words, attachments, pending -> conversation.send(words, attachments, pending) },
                         onAnswer = conversation::answer,
                         onOpenArtifact = { row -> nav.navigate("artifact/${row.artifactId}") },
                         onRetryLoad = conversation::retryLoad,

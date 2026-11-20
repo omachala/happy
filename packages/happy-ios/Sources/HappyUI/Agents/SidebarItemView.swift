@@ -44,6 +44,13 @@ final class SidebarItemView: ListRowView {
     var pressed = false {
         didSet { if pressed != oldValue { applyFill() } }
     }
+    /// A voice touch on the row (`VoiceTouch`): lit in its fill's shape,
+    /// under its words, and pressed as a finger presses it.
+    var voiceTouch: VoiceTouch.Mark {
+        VoiceTouch.Mark(host: self, frame: fill.frame, radius: fill.layer.cornerRadius, corners: fill.layer.maskedCorners, above: fill) { [weak self] down, _ in
+            self?.pressed = down
+        }
+    }
     /// What the row wears as its mark.
     var markImage: UIImage? { picture.isHidden ? nil : picture.image }
 
@@ -62,14 +69,18 @@ final class SidebarItemView: ListRowView {
         }
         guard fresh || titleBand == nil else { return }
         let drawing = entry.drawing
-        let band = ShimmerBand(
-            frame: drawing.frame.label, run: CGRect(x: 0, y: 0, width: run, height: drawing.frame.label.height),
-            scale: drawing.displayScale, draw: { drawing.drawShimmerCopy(in: $0) }
-        )
-        band.accessibilityIdentifier = "shimmer"
-        titleBand?.removeFromSuperview()
-        insertSubview(band, aboveSubview: drawingView)
-        titleBand = band
+        // The band fades with the title: placed at once, never glided in
+        // by a list pass that animates the row.
+        UIView.performWithoutAnimation {
+            let band = ShimmerBand(
+                frame: drawing.frame.label, run: CGRect(x: 0, y: 0, width: run, height: drawing.frame.label.height),
+                scale: drawing.displayScale, draw: { drawing.drawShimmerCopy(in: $0) }
+            )
+            band.accessibilityIdentifier = "shimmer"
+            titleBand?.removeFromSuperview()
+            insertSubview(band, aboveSubview: drawingView)
+            titleBand = band
+        }
     }
     override var isDisplayReady: Bool { drawingView.isDisplayReady }
 

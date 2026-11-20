@@ -1,8 +1,16 @@
 #if canImport(UIKit)
+import HappyAnalytics
 import HappyCore
 import HappyLayout
 import HappyWire
 import UIKit
+
+/// A flow that adds an account and ends by opening it: the coordinator
+/// puts the new account's root in place under it, then dismisses it if it
+/// was presented, or dissolves into the new root if it was pushed. The flow
+/// doesn't dismiss or pop itself once the account it added is open.
+@MainActor
+protocol AccountAddingFlow: UIViewController {}
 
 /// Owns the window's navigation stack and swaps its root when the account
 /// signs in or out. Deep links (`happy://terminal?…`) land here too.
@@ -23,6 +31,10 @@ public final class AppCoordinator {
     private var pendingLink: String?
     /// An entity or file link from outside, waiting for the stored accounts.
     private var pendingInstanceLink: String?
+    /// A Happy Cloud invite link, waiting for the stored accounts.
+    private var pendingInvite: CloudInvite?
+    /// Links a screen hands over to open as links from outside open (`openHappyLink`).
+    private var linkRequests: NSObjectProtocol?
     /// What an instance link opens once its connection is home.
     private var instanceTarget: (connection: String, link: HappyLink)?
     /// The session a tapped notification named, until a signed-in home can
@@ -50,6 +62,13 @@ public final class AppCoordinator {
         context.account.onChange = { [weak self] state in
             self?.show(state)
         }
+        linkRequests = NotificationCenter.default.addObserver(forName: Self.openLinkRequested, object: window, queue: .main) { [weak self] note in
+            guard let text = note.userInfo?["link"] as? String else { return }
+            MainActor.assumeIsolated {
+                self?.pendingInstanceLink = text
+                self?.openPendingInstanceLink()
+            }
+        }
         // language.tsx reloads the app after a new language; here the
         // screens are built again in it, from the root, as a reload leaves
         // them.
@@ -61,18 +80,19 @@ public final class AppCoordinator {
         // opens; with none, a paired computer rather than Welcome.
         let v2 = Preference(variant: context.variant)
         context.account.fallsBackToAgentConnection = true
-        PairingAnalytics.shared.variant = context.variant
+        Analytics.shared.follow(context.account)
         Task { @MainActor [weak self] in
             guard let account = self?.context.account else { return }
             // The Happy account's filter showed a computer's V2: that
             // computer is home now, from the first screen.
             await account.restore(openingAgentConnection: v2.takeFilterChoice(), preferred: v2.agentConnectionID)
+            // Analytics waits for every signed-in account's opt-out, read off the main thread.
+            Task { await Analytics.shared.accountsRestored() }
             self?.show(account.state)
             self?.accountRestored = true
-            // Only now, with the accounts read, is it known whose subscription it is.
-            Offers.shared.follow(account)
             self?.openPendingLink()
             self?.openPendingInstanceLink()
+            self?.openPendingInvite()
             self?.openNotificationSession()
         }
     }
@@ -180,6 +200,15 @@ public final class AppCoordinator {
         // A sign-in's redirect belongs to its browser session, which takes
         // it before iOS opens the app; a stray one opens nothing.
         if OAuthRedirect.isCallback(url) { return true }
+        // Google's redirect (its reversed client ID's scheme) goes to its
+        // sign-in, which usually takes it in its own session first.
+        if CloudGoogle.handle(url) { return true }
+        if let invite = CloudInvite(url: url) {
+            guard HappyCloud.isOffered(in: context.variant) else { return false }
+            pendingInvite = invite
+            openPendingInvite()
+            return true
+        }
         let text = url.absoluteString
         guard HappyCode(text) != .notHappy else {
             // An entity or file link: opened only on the installation it names.
@@ -191,6 +220,16 @@ public final class AppCoordinator {
         pendingLink = text
         openPendingLink()
         return true
+    }
+
+    /// A Happy Cloud invite: the Cloud flow over whatever is shown, on the
+    /// invite once the account is signed in.
+    private func openPendingInvite() {
+        guard accountRestored, pendingInvite != nil, shell.topViewController != nil else { return }
+        guard clearedForLink(then: { [weak self] in self?.openPendingInvite() }),
+              let invite = pendingInvite, let top = linkHost else { return }
+        pendingInvite = nil
+        AccountAdding.connectToCloud(context: context, from: top, invite: invite)
     }
 
     /// An entity or file link from outside: on the connection whose
@@ -226,13 +265,17 @@ public final class AppCoordinator {
     }
 
     /// The linked entity, pushed over its connection's home once that is
-    /// the root. An artifact or a conversation opens; anything else
-    /// (a workspace, a file, a service) shows that connection's home.
+    /// the root. An artifact, a conversation or a settings page opens;
+    /// anything else (a workspace, a file, a service) shows that
+    /// connection's home.
     private func openInstanceTarget() {
         guard let target = instanceTarget, case .agentConnection(let shown) = context.account.state, shown.id == target.connection,
               shell.stack.first is AgentHomeViewController, let session = Session.session(for: target.connection, context: context) else { return }
         instanceTarget = nil
         shell.presentedViewController?.dismiss(animated: false)
+        if case .settings(let page) = target.link.target, let top = shell.topViewController {
+            return SettingsLinks.open(page, options: target.link.providerOptions, session: session, from: top)
+        }
         guard case .reference(let reference) = target.link.target, let navigation = shell.topViewController?.navigationController else { return }
         switch reference.kind {
         case .artifact:
@@ -252,14 +295,15 @@ public final class AppCoordinator {
         guard clearedForLink(then: { [weak self] in self?.openPendingLink() }),
               let text = pendingLink, let top = linkHost else { return }
         pendingLink = nil
-        let route = ScanRoute.route(HappyCode(text), intent: .connect, hasAccount: context.account.session != nil, canShareAccount: context.account.sessionIsLegacy)
+        let route = HappyScan.route(text, intent: .connect, context: context)
         Task { @MainActor in
             switch route {
-            case .connectComputer, .confirmConnectComputer, .newAccountForComputer, .linkDevice:
+            case .connectComputer, .confirmConnectComputer, .connectComputerSwitching, .newAccountForComputer, .linkDevice:
                 let terminal = if case .linkDevice = route { false } else { true }
+                // Names the account the computer gets, when one here takes it.
                 guard await Alerts.confirm(
                     terminal ? Strings.Modals.authenticateTerminal : Strings.SettingsAccount.linkNewDevice,
-                    nil,
+                    HappyScan.confirmation(for: route, context: context),
                     confirmTitle: Strings.Common.continueAction,
                     on: top
                 ) else { return }
@@ -278,8 +322,6 @@ public final class AppCoordinator {
         ThemeController.apply(from: context, to: window)
         let session: AccountSession?
         if case .signedIn(let value) = state { session = value } else { session = nil }
-        VoiceCoordinator.shared.accountDidChange(to: session)
-        if accountRestored { Offers.shared.tell(context.account) }
         let identity = session.map(ObjectIdentifier.init)
         let pending = context.account.pendingServerConfirmation
         let agentConnectionID = context.account.agentConnections.activeID
@@ -371,11 +413,23 @@ public final class AppCoordinator {
         let kept = settings.flatMap { settings in
             presented == nil && (context.account.agentConnections.active != nil || session != nil) ? settings : nil
         }
-        shell.presentedViewController?.dismiss(animated: false)
+        // A flow that added this account, full screen over the old home,
+        // goes away over the new one: the old home is never seen between.
+        let addingFlow = presented.flatMap { $0 is AccountAddingFlow ? $0 : nil }
+        if addingFlow == nil { shell.presentedViewController?.dismiss(animated: false) }
+        // One pushed on the stack ends as a switch does, in a dissolve, not
+        // a push forward.
+        let pushedFlow = presented == nil && current.last is AccountAddingFlow
         let stack = [root] + [kept].compactMap { $0 }
-        // Beside the sidebar, the whole split dissolves into the new
-        // account's: its home in the sidebar, nothing open beside it.
-        if animated, kept == nil, current.count == 1 || shell.isExpanded, shell.view.window != nil {
+        if let addingFlow {
+            UIView.performWithoutAnimation {
+                shell.setStack(stack, animated: false)
+                shell.view.layoutIfNeeded()
+            }
+            addingFlow.dismiss(animated: animated)
+        } else if animated, kept == nil, current.count == 1 || shell.isExpanded || pushedFlow, shell.view.window != nil {
+            // Beside the sidebar, the whole split dissolves into the new
+            // account's: its home in the sidebar, nothing open beside it.
             // Home itself on screen: the new one dissolves in where it is, so
             // the header and the toolbar stay put and only what's in them
             // changes. A push here read as going somewhere, not as switching.
@@ -398,6 +452,7 @@ public final class AppCoordinator {
         NotificationCenter.default.post(name: Self.rootDidChange, object: window)
         openPendingLink()
         openPendingInstanceLink()
+        openPendingInvite()
         openNotificationSession()
         openInstanceTarget()
     }
@@ -406,6 +461,11 @@ public final class AppCoordinator {
     /// are its root. Whatever was shown over the old ones went with them,
     /// so a flow that changed the account says what it did after this.
     static let rootDidChange = Notification.Name("AppCoordinator.rootDidChange")
+
+    /// Posted by a screen, with its window as the object and the link as
+    /// `userInfo["link"]`, for a Happy link to open as one from outside
+    /// does (`openHappyLink`).
+    static let openLinkRequested = Notification.Name("AppCoordinator.openLinkRequested")
 
     /// How long one home takes to dissolve into the next on a switch. A
     /// dissolve is already the reduced-motion form, so it stays.

@@ -18,6 +18,7 @@ import com.slopus.happy.agent.AgentFamily
 import com.slopus.happy.agent.AgentSession
 import com.slopus.happy.agent.HappyLink
 import com.slopus.happy.agent.HappyReferenceKind
+import com.slopus.happy.agent.HappyShareLinks
 import com.slopus.happy.agent.HappyUrls
 import com.slopus.happy.agent.string
 import com.slopus.happy.connection.RequestCategory
@@ -57,7 +58,7 @@ internal class AgentPageModel(private val session: AgentSession, private val age
     data class Read(val detail: AgentDetail? = null, val reading: Boolean = true, val error: Problem? = null)
 
     private val request = session.conversationRequest()
-    private val api = ConversationApi(request)
+    private val api = ConversationApi(bytesRequest = null, request = request, cloud = session.client.cloud)
     private val readState = MutableStateFlow(Read())
     val read: StateFlow<Read> = readState.asStateFlow()
     private val sharedFeed = SharedFeed(api, agentId) { readState.value.detail?.agent?.parentAgentId }
@@ -187,7 +188,8 @@ internal fun AgentPageEntry(graph: AppGraph, nav: NavHostController, route: Conv
         // A worktree of a project; a bot's or task's own folder is the bot or task.
         workspace = workspace?.takeIf { projectId != null && it.string("id") != projectId }?.string("name")?.takeIf { it.isNotBlank() },
         parent = agent?.parentAgentId?.let { id -> AgentPageParent(id, feed.title(id) ?: catalog.agent(id)?.title?.takeIf { it.isNotBlank() }) },
-        workspaceId = agent?.workspaceId ?: row?.workspaceId,
+        // Happy Cloud has no folders: no Changes or Files.
+        workspaceId = (agent?.workspaceId ?: row?.workspaceId)?.takeUnless { session.client.cloud },
         lineChanges = row?.lineChanges,
         // The chat beneath picks it, once it knows its mode or the catalog's default, as its header did.
         chatMode = held?.let { warm?.mode ?: warm?.catalog?.defaults },
@@ -195,32 +197,37 @@ internal fun AgentPageEntry(graph: AppGraph, nav: NavHostController, route: Conv
     val kept = rememberKeptMedia(graph, session, route.agentId)
     val connections by graph.agentConnections.accounts.collectAsStateWithLifecycle()
     val instanceId = connections.firstOrNull { it.id == route.connectionId }?.instanceId?.takeIf(HappyUrls::isInstanceId)
-    val actions = remember(nav, model, session, route, kept, held, instanceId) {
+    val kind = state.kind
+    val actions = remember(nav, model, session, route, kept, held, instanceId, kind) {
         AgentPageActions(
             onBack = { nav.popBackStack() },
             onOpenConversation = { id -> if (id == route.agentId) nav.popBackStack() else nav.openConversation(route.connectionId, id) },
             onWant = model::want,
             onOpenChanges = { workspaceId -> nav.navigate(WorkspaceChangesRoute(route.connectionId, workspaceId)) },
             onOpenFiles = { workspaceId -> nav.navigate(com.slopus.happy.ui.files.WorkspaceFilesRoute(route.connectionId, workspaceId)) },
-            loadMedia = { ref -> ConversationApi(session.conversationRequest()).media(route.agentId, ref.toolCallId, ref.index) },
+            loadMedia = { ref -> ConversationApi(session.conversationRequest()).media(route.agentId, ref) },
             loadMediaRange = { ref, range ->
                 session.client.send(
                     "GET",
-                    ConversationApi.mediaPath(route.agentId, ref.toolCallId, ref.index),
+                    ConversationApi.mediaPath(route.agentId, ref),
                     headers = mapOf("Range" to "bytes=${range.first}-${range.last}"),
                     category = RequestCategory.File,
                 )
             },
             kept = kept,
             onModeChange = { mode -> held?.setMode(mode) },
-            link = instanceId?.let { HappyUrls.format(HappyLink.Reference(HappyReferenceKind.Agent, route.agentId), it) },
+            link = HappyShareLinks.format(HappyLink.Reference(HappyReferenceKind.Agent, route.agentId), instanceId, kind?.shareRole()),
         )
     }
     // A link opens as one in the chat does: through this agent's workspace.
     val context = LocalContext.current
     val computer = computerName(graph, route.connectionId)
-    val links = remember(nav, computer, route.agentId) {
-        LinkOpener.agent(context, computer) { url -> nav.navigate(BrowserRoute(route.connectionId, url, route.agentId)) }
+    // A Happy URL, or a share link carrying one, opens in the app.
+    val happyLinks = com.slopus.happy.ui.connection.LocalHappyLinks.current
+    val links = remember(nav, computer, route.agentId, happyLinks) {
+        LinkOpener.agent(context, computer, app = { url -> happyLinks?.open(url, route.connectionId) == true }) { url ->
+            nav.navigate(BrowserRoute(route.connectionId, url, route.agentId))
+        }
     }
     CompositionLocalProvider(LocalAgentPictures provides session.pictures) {
         ProvideLinks(links) { AgentPageScreen(state, actions) }

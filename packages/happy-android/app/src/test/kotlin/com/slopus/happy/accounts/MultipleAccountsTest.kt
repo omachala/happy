@@ -160,14 +160,43 @@ class MultipleAccountsTest {
         val graph = graph(defaultServer = first.url)
         runBlocking { graph.auth.restore(backup(first)) }
         val account = graph.accountStore.registry.value.activeId!!
+        val home = com.slopus.happy.ui.home.HomeServices.of(graph)
+        syncedTo(graph, setOf("a1"))
+        eventually(message = "Happy home loaded") { home.snapshots.value?.sessions?.any { it.id == "a1" } == true }
+        eventually(message = "Happy list loaded") { home.list.state.value != null }
         // An agent connection opens: no Happy account is open, none is signed out.
         graph.accountStore.select("agent-connection-1")
         runBlocking { graph.auth.reload() }
         assertEquals(AuthState.SignedOut, graph.auth.state.value)
+        eventually(message = "Happy home released on switch") { home.snapshots.value == null }
+        eventually(message = "Happy list released on switch") { home.list.state.value == null }
         assertEquals("agent-connection-1", graph(defaultServer = first.url).accountStore.registry.value.activeId)
         assertEquals(listOf(account), graph.accountStore.registry.value.entries.map { it.id })
         runBlocking { graph.open(account).join() }
         eventually(message = "account again") { openId(graph) == account }
+        eventually(message = "Happy home restored") { home.snapshots.value?.sessions?.any { it.id == "a1" } == true }
+    }
+
+    @Test
+    fun aTerminalLinkGoesToTheHappyAccountOpenLastEvenAfterARestart() {
+        val graph = graph(defaultServer = first.url)
+        assertNull(graph.accountStore.registry.value.forTerminal())
+        runBlocking { graph.auth.restore(backup(first)) }
+        val a = graph.accountStore.registry.value.activeId!!
+        graph.accountStore.select("agent-connection-1")
+        runBlocking { graph.auth.reload() }
+        graph.serverConfig.set(second.url)
+        runBlocking { graph.auth.restore(backup(second)) }
+        val b = graph.accountStore.registry.value.activeId!!
+        // The open one while it is open, then the one open last while an agent connection is.
+        assertEquals(b, graph.accountStore.registry.value.forTerminal()?.id)
+        runBlocking { graph.open(a).join() }
+        graph.accountStore.select("agent-connection-1")
+        assertEquals(a, graph.accountStore.registry.value.forTerminal()?.id)
+        assertEquals(a, graph(defaultServer = first.url).accountStore.registry.value.forTerminal()?.id)
+        // Signed out of it, the other.
+        graph.accountStore.remove(a)
+        assertEquals(b, graph.accountStore.registry.value.forTerminal()?.id)
     }
 
     @Test

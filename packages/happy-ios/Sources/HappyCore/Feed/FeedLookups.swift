@@ -173,6 +173,13 @@ public actor FeedLookups {
     /// The stream opened: what wasn't there is asked for again with the
     /// next `want`, which the engine makes at once. `gap`: events may have
     /// been missed, so everything held is read again too.
+    /// The stream said hello: what is wanted is read from now, as the
+    /// Feed's rows are (`FeedLibrary.opened`).
+    public func opened() {
+        live = true
+        read()
+    }
+
     public func connected(gap: Bool) {
         live = true
         missing = Wanted()
@@ -201,6 +208,17 @@ public actor FeedLookups {
         next.subtract(missing)
         queue = next
         read()
+    }
+
+    /// Whether `receive` reads anything of `event`: the stream need not
+    /// hand over the others, an agent's words and its updates without a
+    /// new title above all, which come many times a second.
+    public static func reads(_ event: JSONValue) -> Bool {
+        switch event["type"]?.stringValue {
+        case "agent.updated": event["payload"]?["changes"]?["title"] != nil
+        case "profile.updated", "todo.created", "todo.updated", "project.updated", "workspace.updated", "artifact.updated", "artifact.deleted": true
+        default: false
+        }
     }
 
     /// One event from the stream: a thing held that it says changed is

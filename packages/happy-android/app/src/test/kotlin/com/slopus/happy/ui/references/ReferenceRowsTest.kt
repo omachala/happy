@@ -81,7 +81,7 @@ class ReferenceRowsTest {
         rule.setHappyContent(dark) {
             val opener = LinkOpener.agent(context, "Studio", app = { url -> HappyReferences.opensInApp(url).also { if (it) calls.app += url } }) { calls.browsed += it }
             ProvideLinks(opener) {
-                ConversationScreen(ConversationState(created = true, loaded = true, rows = listOf(row), agent = agent), null, ConversationScreenActions())
+                ConversationScreen(ConversationState(created = true, loaded = true, rows = listOf(row), agent = agent), ConversationScreenActions())
             }
         }
     }
@@ -110,11 +110,11 @@ class ReferenceRowsTest {
         shot("references-chat")
         rule.onAllNodesWithTag(ProseTags.TEXT, useUnmergedTree = true)[0].performTouchInput { click(point("Q3 revenue")) }
         rule.waitForIdle()
-        assertEquals(listOf(HappyReferences.Reference("artifact", "r1")), calls.app.map { HappyReferences.reference(it) })
+        assertEquals(listOf(HappyReferences.Reference("artifact", "r1")), calls.app.map { HappyReferences.reference(it)?.first })
         assertTrue("never the browser", calls.browsed.isEmpty())
         rule.onAllNodesWithTag(ProseTags.TEXT, useUnmergedTree = true)[0].performTouchInput { click(point("Guest list")) }
         rule.waitForIdle()
-        assertEquals(HappyReferences.Reference("agent", "as"), HappyReferences.reference(calls.app.last()))
+        assertEquals(HappyReferences.Reference("agent", "as"), HappyReferences.reference(calls.app.last())?.first)
     }
 
     @Test fun `a reference has no link menu, and a person opens nothing`() {

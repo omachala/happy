@@ -41,6 +41,7 @@ import kotlinx.serialization.Serializable
 
 internal fun NavGraphBuilder.dataStorageRoutes(graph: AppGraph, nav: NavHostController) {
     connectionDiagnosticsRoutes(graph, nav)
+    privacyRoutes(graph, nav)
     page<LegacyDataStorageRoute> {
         val auth by graph.auth.state.collectAsStateWithLifecycle()
         val open by graph.openAccount.collectAsStateWithLifecycle()
@@ -113,6 +114,7 @@ private fun MediaStoragePage(graph: AppGraph, nav: NavHostController, library: M
  * media needs: what this connection's media takes on the phone, Clear Media
  * after a confirm, and Automatic Media Download's switches and size limits,
  * one setting for every network, with this account's Connection diagnostics on top.
+ * This phone's Analytics switch is on Privacy ([PrivacyScreen]).
  */
 @Composable
 fun DataStorageScreen(

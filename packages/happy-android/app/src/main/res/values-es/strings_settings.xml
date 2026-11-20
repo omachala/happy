@@ -38,9 +38,6 @@
     <string name="settings_agents_effort">Esfuerzo</string>
     <string name="settings_agents_custom_codex_title">Modelo de Codex personalizado</string>
     <string name="settings_agents_custom_codex_message">Escribe el ID exacto del modelo. La disponibilidad depende de tu cuenta de Codex o de la configuración de la API.</string>
-    <string name="settings_connect_claude_title">Conectar con Claude</string>
-    <string name="settings_connect_claude">Conectar Claude</string>
-    <string name="settings_connect_claude_run">Ejecuta este comando en tu terminal:</string>
     <string name="settings_commit">Commit</string>
     <string name="settings_commit_at">Commit %1$s</string>
     <string name="settings_manage_subscriptions">Gestionar suscripciones</string>
@@ -55,4 +52,6 @@
     <string name="agent_settings_default_access">Acceso predeterminado</string>
     <string name="agent_settings_default_access_description">Lo que una sesión nueva puede hacer sin preguntar. Se guarda en tu cuenta, así que te acompaña en todos tus dispositivos.</string>
     <string name="agent_settings_new_sessions_unreadable">No se pudieron leer los modelos. Comprueba la conexión y vuelve a abrir esta página.</string>
+    <string name="settings_analytics_not_saved">Las analíticas están desactivadas por ahora, pero no se pudo guardar el ajuste. Se volverán a activar la próxima vez que se inicie Happy.</string>
+    <string name="settings_analytics_not_turned_on">No se pudieron activar las analíticas. Inténtalo de nuevo más tarde.</string>
 </resources>

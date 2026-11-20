@@ -152,6 +152,10 @@ enum ChatDrawItem {
     case spinner(CGRect, tint: ColorToken, scale: CGFloat)
     /// A label carrying the shimmer while its work goes (`ChatShimmerView`).
     case shimmer(ChatShimmerText, frame: CGRect)
+    /// A busy link's band over the words drawn under it (`ChatSheen`): a
+    /// copy of the text at `frame` with only that link's words, in the
+    /// band's colour, wiped through across `run`, the link in the frame.
+    case sheen(ChatTextLayout, frame: CGRect, run: CGRect)
     /// A running tool's timer: whole seconds since `since` (ms), as "12.0s",
     /// at the row's text size (nil: the designed size).
     case elapsed(since: Int64, frame: CGRect, text: TextEnvironment?)
@@ -187,12 +191,18 @@ enum ChatDrawItem {
     case embed(ChatEmbed, frame: CGRect)
     /// A person's own message's clock or checks (`ChatDeliveryView`).
     case delivery(ChatDeliveryMark, frame: CGRect)
+    /// A tool section's one line (`ChatToolLineView`): it keeps what it
+    /// showed and replaces it letter by letter.
+    case toolLine(ChatToolLine, frame: CGRect)
 }
 
 /// What an embedded view shows.
 enum ChatEmbed: Equatable, Sendable {
     /// An HTML artifact's page (`InlinePageView`).
     case page(InlinePage)
+    /// A `gen_ui` artifact's document (`GenUIBlockView`).
+    case genUI(GenUIEmbed)
+    case genUIMessage(GenUIMessageEmbed)
 }
 
 /// An artifact's page shown inline in a V2 conversation: the
@@ -229,6 +239,9 @@ struct ChatMedia: Equatable, Sendable {
     var label: String
     /// Still going to the computer: its ring.
     var upload: ChatUpload? = nil
+    /// It fills its tile, cropped, as a `media` component's items do,
+    /// rather than fitting inside it.
+    var covers = false
 }
 
 /// A picture or video of a message on its way: how far it is lives on
@@ -293,6 +306,9 @@ enum ChatRowAction: Equatable, Sendable {
     case openFile(String)
     /// A web address a tool call's screen shows.
     case openURL(String)
+    /// A Happy link shown as a button (API.md, "Buttons"): opens as its
+    /// link would; `label` is what it says.
+    case linkButton(url: String, label: String)
     case option(String)
     case retry(localId: String)
     /// A sending picture's cross: takes it out of message `messageId`. A
@@ -316,6 +332,8 @@ enum ChatRowAction: Equatable, Sendable {
     case playAttachment(ChatAttachment)
     /// A V2 artifact's card.
     case openArtifact(Artifact)
+    /// A pipeline result's row: its run's page.
+    case openPipelineRun(runId: String, pipelineName: String?)
     /// A finished V2 turn's "View traces" / "Hide traces", by its run.
     case toggleTurn(String)
 

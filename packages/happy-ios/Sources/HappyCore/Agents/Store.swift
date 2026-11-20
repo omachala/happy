@@ -25,6 +25,8 @@ public struct Snapshot: Equatable, Sendable {
     /// (`ChatPrefill`); nil until the bots have been read, or where the
     /// account has no Chief of Staff running.
     public var happyAgentId: String?
+    /// The bots' own conversations, by agent id.
+    public var botAgentIds: Set<String> = []
     /// The person's V2 setting, which runs Prioritizing; nil until read.
     public var prioritizing: Bool?
     /// The last act the daemon refused: its reason, empty when it gave none.
@@ -107,11 +109,15 @@ public actor Store {
     private var bots: [JSONValue] = []
     private var tasks: [JSONValue] = []
     private var surfaces: [AgentWire.Surface] = []
+    /// The bots, tasks and Surfaces as the account's bootstrap has them
+    /// (`SyncEngine`), which never reads them here: what references name.
+    private var bootstrapped: (owners: [JSONValue], surfaces: [AgentWire.Surface])?
     private var agents = Agents()
     /// Artifact titles references asked for, as read; and those being read.
     private var artifactTitles: [String: References.Artifact] = [:]
     private var artifactPages: [String: References.Page] = [:]
     private var artifactApps: [String: Int] = [:]
+    private var artifactGenUI: [String: References.GenUI] = [:]
     private var artifactReads: Set<String> = []
     /// People messages mention, as named, and those being read; the person reading.
     private var userNames: [String: String] = [:]
@@ -120,6 +126,30 @@ public actor Store {
     private var me: String?
     private var places = Places()
     private var placesReload: Task<Void, Never>?
+    /// Paused since the stream last opened (`externalOpening`).
+    private var pausedSinceOpening = false
+    /// How many times the client the stream and queries share was let go
+    /// (`SyncEngine.resetCarrier`): a read on its way dies with it, and is
+    /// asked again without saying it failed.
+    public private(set) var carrierResets = 0
+    /// A chat opened before its engine first asks for the stream is read
+    /// after it, and home's read waits for it (`ChatsFirst`).
+    public nonisolated let chatsFirst = ChatsFirst()
+    private var placesDirty = false
+    /// When the bots and tasks were last read (~0.8 MB on a busy
+    /// computer), and what came meanwhile that their read could not follow.
+    private var placesRead: ContinuousClock.Instant?
+    private var placesHeld: [JSONValue]?
+    /// Tasks `task.created` told of that aren't the person's yet: one
+    /// takes its place in their list when they join it (`task.joined`).
+    private var announcedTasks: [String: JSONValue] = [:]
+    /// Whether the bots and tasks were read yet: before then they aren't held.
+    private var placesLoaded = false
+    /// How soon after a read news may read the bots and tasks again.
+    private let placesRereadInterval: Duration
+    /// An `agent.updated` the sidebar follows, drawn with the others that
+    /// come within 250 ms (`followAgentsSoon`).
+    private var followingAgents: Task<Void, Never>?
     /// Names given here whose rename no read has carried yet.
     private var titleIntents: [String: (title: String, base: String?)] = [:]
 
@@ -128,8 +158,9 @@ public actor Store {
     private var attentionIdle: Task<Void, Never>?
     private var attentionVisible = true
 
-    public init(client: AgentClient, offline: OfflineFile? = nil, intents: IntentOutbox? = nil, labels: Rows.Labels = Rows.Labels()) {
+    public init(client: AgentClient, offline: OfflineFile? = nil, intents: IntentOutbox? = nil, labels: Rows.Labels = Rows.Labels(), placesRereadInterval: Duration = .seconds(10)) {
         self.client = client
+        self.placesRereadInterval = placesRereadInterval
         self.offline = offline
         self.intents = intents
         self.labels = labels
@@ -144,8 +175,7 @@ public actor Store {
 
     @discardableResult
     public func externalResync(loadSidebar: Bool) async -> Bool {
-        for listener in listeners.values { listener.continuation.yield(.resync) }
-        for listener in typeListeners.values { listener.continuation.yield(.resync) }
+        resync(from: nil)
         snapshot.live = true
         if loadSidebar {
             await load()
@@ -155,15 +185,82 @@ public actor Store {
         return true
     }
 
+    /// The account's stream opens (`SyncEngine`): the conversations
+    /// followed are read at once, beside it. `replays`: it picks up where
+    /// it left off, and only those on screen are read.
+    public func externalOpening(replays: Bool = false) {
+        let stale = pausedSinceOpening
+        pausedSinceOpening = false
+        for listener in listeners.values { listener.continuation.yield(.resync(from: nil, stale: stale, replays: replays)) }
+    }
+
+    public func carrierReset() { carrierResets += 1 }
+
+    /// The account's stream is open. It carries everything after
+    /// `missedBefore`; what came before it, those following read again.
+    /// Nil: it picked up where it left off and replays what they missed.
+    public func externalOpened(missedBefore cursor: String?) {
+        if let cursor { resync(from: cursor) }
+        snapshot.live = true
+        publish()
+    }
+
+    private func resync(from cursor: String?) {
+        for listener in listeners.values { listener.continuation.yield(.resync(from: cursor)) }
+        for listener in typeListeners.values { listener.continuation.yield(.resync(from: cursor)) }
+    }
+
+    /// What the server's health says it serves, read with the account's
+    /// bootstrap: what Gen UI's actions may run (`References.genUIServed`).
+    public func externalCapabilities(_ capabilities: AgentWire.Health.Capabilities?) {
+        let capabilities = capabilities ?? AgentWire.Health.Capabilities()
+        guard capabilities != self.capabilities else { return }
+        self.capabilities = capabilities
+        publish()
+    }
+
+    /// The bots, tasks and Surfaces from the account's bootstrap, kept
+    /// current by its stream, for references to name and open.
+    public func externalDirectory(owners: [JSONValue], surfaces: [AgentWire.Surface]) {
+        guard bootstrapped?.owners != owners || bootstrapped?.surfaces != surfaces else { return }
+        bootstrapped = (owners, surfaces)
+        publish()
+    }
+
     public func externalEvent(_ envelope: JSONValue) {
+        hand(envelope)
+        receive(envelope)
+    }
+
+    /// The event to whoever follows its conversation or Surface, and to
+    /// whoever follows its type: both found by key, not by asking every
+    /// follower, for every word an agent writes.
+    private func hand(_ envelope: JSONValue) {
         let payload = envelope["payload"]
         if let key = payload?["agentId"]?.stringValue ?? payload?["surfaceId"]?.stringValue ?? payload?["todo"]?["surfaceId"]?.stringValue {
-            for listener in listeners.values where listener.key == key { listener.continuation.yield(.event(envelope)) }
+            for id in keyed[key] ?? [] { listeners[id]?.continuation.yield(.event(envelope)) }
         }
-        if let type = envelope["type"]?.stringValue {
-            for listener in typeListeners.values where listener.prefixes.contains(where: type.hasPrefix) { listener.continuation.yield(.event(envelope)) }
+        guard let type = envelope["type"]?.stringValue, !prefixed.isEmpty else { return }
+        var heard = Set<UUID>()
+        for prefix in Self.prefixes(of: type) {
+            for id in prefixed[prefix] ?? [] where heard.insert(id).inserted {
+                guard let listener = typeListeners[id], listener.wanted?(envelope) ?? true else { continue }
+                listener.continuation.yield(.event(envelope))
+            }
         }
-        receive(envelope)
+    }
+
+    /// What `events(matching:)` may follow `type` by: it whole, and each
+    /// part of it up to a dot (`space.`, `space.sidebar.`, …).
+    static func prefixes(of type: String) -> [String] {
+        var prefixes = [type]
+        var index = type.startIndex
+        while let dot = type[index...].firstIndex(of: ".") {
+            let next = type.index(after: dot)
+            if next < type.endIndex { prefixes.append(String(type[..<next])) }
+            index = next
+        }
+        return prefixes
     }
 
     public func start() {
@@ -177,6 +274,7 @@ public actor Store {
     /// Closes the events stream while the app is in the background; what
     /// shows stays, and `start` resumes from the last cursor.
     public func pause() {
+        pausedSinceOpening = true
         following?.cancel(); following = nil
         // Kept now rather than after the app may have been closed.
         if let keeping { keeping.cancel(); self.keeping = nil; saveOffline() }
@@ -195,7 +293,8 @@ public actor Store {
         await flush()
         following?.cancel(); following = nil
         loading?.cancel(); loading = nil
-        placesReload?.cancel(); placesReload = nil
+        placesReload?.cancel(); placesReload = nil; placesHeld = nil
+        followingAgents?.cancel(); followingAgents = nil
         attentionIdle?.cancel(); attentionIdle = nil
         keeping?.cancel(); keeping = nil
         continuation.finish()
@@ -210,26 +309,17 @@ public actor Store {
                 for try await frame in frames {
                     if frame.event == "hello" {
                         attempt = 0
-                        let hello = try? JSONDecoder().decode(JSONValue.self, from: Data(frame.data.utf8))
+                        let hello = try? JSONValue.decode(Data(frame.data.utf8))
                         let resumed = hello?["resumed"]?.boolValue == true && hello?["gap"]?.boolValue != true
                         if let next = hello?["cursor"]?.stringValue, !resumed || cursor == nil { cursor = next }
                         snapshot.live = true
-                        if !resumed {
-                            for listener in listeners.values { listener.continuation.yield(.resync) }
-                            for listener in typeListeners.values { listener.continuation.yield(.resync) }
-                        }
+                        if !resumed { resync(from: hello?["cursor"]?.stringValue ?? "") }
                         if !resumed || held == nil { await load() } else { publish() }
                         continue
                     }
                     if let id = frame.id { cursor = id }
-                    guard let envelope = try? JSONDecoder().decode(JSONValue.self, from: Data(frame.data.utf8)) else { continue }
-                    let payload = envelope["payload"]
-                    if let key = payload?["agentId"]?.stringValue ?? payload?["surfaceId"]?.stringValue ?? payload?["todo"]?["surfaceId"]?.stringValue {
-                        for listener in listeners.values where listener.key == key { listener.continuation.yield(.event(envelope)) }
-                    }
-                    if let type = envelope["type"]?.stringValue {
-                        for listener in typeListeners.values where listener.prefixes.contains(where: type.hasPrefix) { listener.continuation.yield(.event(envelope)) }
-                    }
+                    guard let envelope = try? JSONValue.decode(Data(frame.data.utf8)) else { continue }
+                    hand(envelope)
                     receive(envelope)
                 }
             } catch AgentClientError.revoked {
@@ -247,35 +337,64 @@ public actor Store {
     // MARK: Conversations
 
     /// One conversation's events off this store's stream, so an open chat
-    /// needs no stream of its own. `resync` means some were lost: read again.
+    /// needs no stream of its own. `resync` means some may have been lost:
+    /// read again. `from` is where the stream began, which a read that
+    /// began after it covers; nil while it is still opening. `stale`: the
+    /// engine was paused since the stream last opened, so a read on its way
+    /// may be on a tunnel the suspension left dead. `replays`: the stream
+    /// picks up where it left off and brings what was missed; only what is
+    /// on screen is read beside it, to show before the replay is through.
     public enum ConversationEvent: Sendable {
         case event(JSONValue)
-        case resync
+        case resync(from: String?, stale: Bool = false, replays: Bool = false)
     }
 
     private var listeners: [UUID: (key: String, continuation: AsyncStream<ConversationEvent>.Continuation)] = [:]
+    /// The followers of each key and of each type prefix (`hand`).
+    private var keyed: [String: Set<UUID>] = [:]
+    private var prefixed: [String: Set<UUID>] = [:]
 
     /// `key` is a conversation's agent ID, or a Surface's ID for its todos.
     public func conversationEvents(_ key: String) -> AsyncStream<ConversationEvent> {
         let id = UUID()
         let (stream, continuation) = AsyncStream.makeStream(of: ConversationEvent.self)
         listeners[id] = (key, continuation)
+        keyed[key, default: []].insert(id)
         continuation.onTermination = { [weak self] _ in Task { await self?.unlisten(id) } }
         return stream
     }
 
-    private func unlisten(_ id: UUID) { listeners.removeValue(forKey: id); typeListeners.removeValue(forKey: id) }
+    private func unlisten(_ id: UUID) {
+        if let key = listeners.removeValue(forKey: id)?.key {
+            keyed[key]?.remove(id)
+            if keyed[key]?.isEmpty == true { keyed[key] = nil }
+        }
+        for prefix in typeListeners.removeValue(forKey: id)?.prefixes ?? [] {
+            prefixed[prefix]?.remove(id)
+            if prefixed[prefix]?.isEmpty == true { prefixed[prefix] = nil }
+        }
+    }
 
-    private var typeListeners: [UUID: (prefixes: [String], continuation: AsyncStream<ConversationEvent>.Continuation)] = [:]
+    private var typeListeners: [UUID: (prefixes: [String], wanted: (@Sendable (JSONValue) -> Bool)?, continuation: AsyncStream<ConversationEvent>.Continuation)] = [:]
 
-    /// Every event whose type starts with one of `prefixes` (`"artifact."`),
-    /// for what no conversation or Surface key names. `resync` as above.
-    public func events(matching prefixes: [String]) -> AsyncStream<ConversationEvent> {
+    /// Every event whose type starts with one of `prefixes`, for what no
+    /// conversation or Surface key names. A prefix ends at a dot
+    /// (`"artifact."`) or is a whole type (`"agent.created"`): each is
+    /// found by key (`prefixes(of:)`). `wanted`, when given, picks among
+    /// them here, so what isn't wanted isn't handed over at all. `resync`
+    /// as above.
+    public func events(matching prefixes: [String], wanted: (@Sendable (JSONValue) -> Bool)? = nil) -> AsyncStream<ConversationEvent> {
         let id = UUID()
         let (stream, continuation) = AsyncStream.makeStream(of: ConversationEvent.self)
-        typeListeners[id] = (prefixes, continuation)
+        typeListeners[id] = (prefixes, wanted, continuation)
+        for prefix in prefixes { prefixed[prefix, default: []].insert(id) }
         continuation.onTermination = { [weak self] _ in Task { await self?.unlisten(id) } }
         return stream
+    }
+
+    /// Subscription ownership diagnostics: one listener may name several prefixes.
+    func eventListenerCount(matching prefixes: [String]) -> Int {
+        Set(prefixes.flatMap { prefixed[$0] ?? [] }).count
     }
 
     // MARK: Reads
@@ -294,21 +413,12 @@ public actor Store {
     private func read() async {
         sidebarReadSucceeded = false
         do {
-            async let health = client.health()
             async let sidebar = client.sidebar(widgets: true)
             async let bots = client.bots()
             async let tasks = client.tasks()
             async let setting = client.userSetting(Self.settingKey)
             async let surfaceList = client.surfaces()
             async let profile = client.profileUser()
-            let capabilities = (try? await health)?.capabilities ?? AgentWire.Health.Capabilities()
-            self.capabilities = capabilities
-            guard capabilities.sidebarOperations == true else {
-                snapshot.availability = .unsupported
-                heldEvents = nil
-                publish()
-                return
-            }
             let answer = try await sidebar
             let (botList, taskList) = try await (bots, tasks)
             snapshot.prioritizing = (try? await setting) == .bool(true)
@@ -341,6 +451,7 @@ public actor Store {
             artifactTitles = [:]
             artifactPages = [:]
             artifactApps = [:]
+            artifactGenUI = [:]
             for event in pending { receive(event) }
             publish()
             keeping?.cancel()
@@ -372,21 +483,66 @@ public actor Store {
         publish()
     }
 
+    /// The bots and tasks are stale: read once things settle, and once
+    /// more for news that came during the read, as home's own loop does
+    /// (Proofs/: `Refresh`). Starting the wait again with each piece of
+    /// news, as this did, never read while news kept coming. A read is
+    /// `placesRereadInterval` after the last at the soonest, and what came
+    /// during it is taken in after it, in order: a working agent's updates
+    /// follow the copy just read rather than asking for the lists again
+    /// with every word.
     private func schedulePlacesReload() {
-        placesReload?.cancel()
+        placesDirty = true
+        guard placesReload == nil else { return }
         placesReload = Task {
-            try? await Task.sleep(for: .milliseconds(300))
-            guard !Task.isCancelled else { return }
-            guard let (bots, tasks) = try? await (client.bots(), client.tasks()) else { return }
-            await adoptPlaces(bots: bots, tasks: tasks)
+            while placesDirty {
+                let due = max(.now + .milliseconds(300), placesRead.map { $0 + placesRereadInterval } ?? .now)
+                try? await Task.sleep(until: due, clock: .continuous)
+                guard !Task.isCancelled else { return }
+                placesDirty = false
+                placesRead = .now
+                placesHeld = []
+                guard let (bots, tasks) = try? await (client.bots(), client.tasks()) else { placesHeld = nil; placesDirty = true; break }
+                guard !Task.isCancelled else { placesHeld = nil; return }
+                adoptPlaces(bots: bots, tasks: tasks)
+                let held = placesHeld ?? []
+                placesHeld = nil
+                for event in held { receive(event) }
+            }
+            placesReload = nil
         }
     }
 
     private func adoptPlaces(bots: [JSONValue], tasks: [JSONValue]) {
         self.bots = bots; self.tasks = tasks
+        placesLoaded = true
         for owner in bots + tasks { if let agent = owner["agent"] { agents.absorb(agent) } }
         rebuildPlaces()
         publish()
+    }
+
+    /// A new task from its own events, as home takes it (`HomeEvent`):
+    /// `task.created` carries the whole task, kept until `task.joined`
+    /// puts it at its order key in the person's list. False for what needs
+    /// the lists read: a join of a task no event told of, or one already
+    /// held, which moves it.
+    private func joinWithoutRead(_ type: String, _ payload: JSONValue) -> Bool {
+        if type == "task.created" {
+            guard let task = payload["task"], let id = task["id"]?.stringValue,
+                  !tasks.contains(where: { $0["id"]?.stringValue == id }) else { return false }
+            announcedTasks[id] = task
+            return true
+        }
+        guard let membership = payload["membership"], let id = membership["taskId"]?.stringValue, let key = membership["orderKey"]?.stringValue,
+              !tasks.contains(where: { $0["id"]?.stringValue == id }),
+              var task = announcedTasks.removeValue(forKey: id)?.objectValue else { return false }
+        task["membership"] = membership
+        let index = tasks.firstIndex { ($0["membership"]?["orderKey"]?.stringValue ?? "") > key } ?? tasks.endIndex
+        tasks.insert(.object(task), at: index)
+        if let agent = task["agent"] { agents.absorb(agent) }
+        rebuildPlaces()
+        publish()
+        return true
     }
 
     /// The bots and tasks, each with its conversation composed from the newest copies.
@@ -415,6 +571,7 @@ public actor Store {
                 let read: References.Artifact?
                 var page: References.Page?
                 var app: Int?
+                var genUI: References.GenUI?
                 do {
                     let object = try await client.artifact(id)
                     read = References.artifact(object)
@@ -425,22 +582,37 @@ public actor Store {
                        (try? await client.artifactPage(id, version: entry.version, path: entry.path))?.mode == .app {
                         app = entry.version
                     }
+                    if let version = References.genUIVersion(object) {
+                        genUI = await Self.genUI(client, artifactId: id, version: version)
+                    }
                 } catch AgentClientError.status(404, _, _) {
                     read = .missing
                 } catch {
                     read = nil
                 }
-                await artifactRead(id, read, page: page, app: app)
+                await artifactRead(id, read, page: page, app: app, genUI: genUI)
             }
         }
     }
 
-    private func artifactRead(_ id: String, _ read: References.Artifact?, page: References.Page?, app: Int?) {
+    /// A `gen_ui` version's render document (`GenUIRenderDocument.path`),
+    /// read and parsed here, off the main thread, with the agent that made
+    /// the version; nil when the document can't be had. A version that
+    /// can't be read names no agent, and its actions that need one are
+    /// drawn disabled.
+    private static func genUI(_ client: AgentClient, artifactId: String, version: Int) async -> References.GenUI? {
+        async let read = try? client.artifactVersion(artifactId, version: version)
+        guard let data = try? await client.genUIRender(artifactId, version: version), let document = GenUIRenderDocument.parse(data) else { return nil }
+        return References.GenUI(version: version, document: document, origin: await read?.origin)
+    }
+
+    private func artifactRead(_ id: String, _ read: References.Artifact?, page: References.Page?, app: Int?, genUI: References.GenUI?) {
         artifactReads.remove(id)
         guard let read else { return }
         artifactTitles[id] = read
         artifactPages[id] = page
         artifactApps[id] = app
+        artifactGenUI[id] = genUI
         publish()
     }
 
@@ -514,6 +686,22 @@ public actor Store {
     }
 
 
+    /// A working agent's `agent.updated` comes with every word, and each
+    /// rebuilt the bots' and tasks' places through JSON and redrew the
+    /// sidebar: drawn together 250 ms on, as `SyncEngine` draws home, the
+    /// rows still move within a quarter of a second. Any other change
+    /// draws them at once with it.
+    private func followAgentsSoon() {
+        guard followingAgents == nil else { return }
+        followingAgents = Task {
+            try? await Task.sleep(for: .milliseconds(250))
+            guard !Task.isCancelled else { return }
+            followingAgents = nil
+            rebuildPlaces()
+            publish()
+        }
+    }
+
     // MARK: Events
 
     private func receive(_ event: JSONValue) {
@@ -531,17 +719,36 @@ public actor Store {
         case "space.sidebar.changed":
             sidebarChanged(payload)
         case "agent.updated":
-            guard let id = payload["agentId"]?.stringValue else { return }
+            // An agent no bot or task here holds draws nothing here; one
+            // that moved only its time within the minute, nothing either.
+            guard let id = payload["agentId"]?.stringValue, agents.holds(id) else { return }
+            let drawn = agents.drawn(id)
             let followed = agents.update(agentId: id, previousVersion: payload["previousVersion"]?.stringValue, version: payload["version"]?.stringValue, changes: payload["changes"]?.objectValue ?? [:])
-            if followed { rebuildPlaces() } else { schedulePlacesReload() }
+            if followed {
+                if agents.drawn(id) != drawn { followAgentsSoon() }
+                return
+            }
+            if placesHeld != nil { placesHeld?.append(event); return }
+            schedulePlacesReload()
         case "agent.created":
             if let agent = payload["agent"] { agents.created(agent); rebuildPlaces() }
         case "bot.created", "bot.updated", "task.created", "task.updated", "task.joined", "task.left":
+            if type == "task.created" || type == "task.joined", placesLoaded, placesHeld == nil, joinWithoutRead(type, payload) { return }
             if let membership = payload["membership"] { adoptMembership(membership) }
+            if placesHeld != nil { placesHeld?.append(event); return }
             schedulePlacesReload()
         case "task.membership.updated":
             guard let membership = payload["membership"] else { return }
             adoptMembership(membership)
+        case "task.removed":
+            // Deleted for good, its memberships with it, as home takes it
+            // (`HomeEvent`); a read on its way may still hold it.
+            guard let id = payload["taskId"]?.stringValue else { return }
+            if placesHeld != nil { placesHeld?.append(event) }
+            announcedTasks[id] = nil
+            tasks.removeAll { $0["id"]?.stringValue == id }
+            rebuildPlaces()
+            publish()
         case "profile.updated":
             // Names changed somewhere: the ones held are read again.
             let held = Array(userNames.keys)
@@ -575,8 +782,9 @@ public actor Store {
             if type == "artifact.deleted" || changes["status"]?.stringValue == "deleted" {
                 artifactPages[id] = nil
                 artifactApps[id] = nil
-            } else if case .active(_, "html", _) = held {
-                // A page shown inline follows its latest version, entry and display.
+                artifactGenUI[id] = nil
+            } else if case .active(_, let kind, _) = held, kind == "html" || kind == "gen_ui" {
+                // A page or Gen UI shown inline follows its latest version and display.
                 read(artifacts: [id])
             }
 
@@ -671,13 +879,19 @@ public actor Store {
             snapshot.document = document
         }
         snapshot.happyAgentId = places.chiefOfStaffAgentId
-        var references = References.entities(owners: composedOwners)
+        snapshot.botAgentIds = Set(places.bots.compactMap { $0.agent?.id })
+        var references = References.entities(owners: bootstrapped?.owners ?? composedOwners)
         references.artifacts = artifactTitles
         references.pages = artifactPages
         references.apps = artifactApps
+        references.genUI = artifactGenUI
+        references.genUIServed = GenUIServed(capabilities)
         references.users = userNames
         references.me = me
         references.missingUsers = usersMissing
+        references.surfaces = Dictionary((bootstrapped?.surfaces ?? surfaces).map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        // The conversations whose rows shimmer: links to them do too.
+        references.busy = References.busy(in: snapshot.allRows)
         snapshot.references = references
         continuation.yield(snapshot)
         // What the events changed is kept too, once they settle.
@@ -1059,4 +1273,84 @@ public actor Store {
 struct Lossy<T: Decodable>: Decodable {
     let value: T?
     init(from decoder: Decoder) throws { value = try? T(from: decoder) }
+}
+
+/// The chat on screen goes between the stream and home's bootstrap (sync
+/// order P0). Closed from its engine's first start until that engine asks
+/// for the stream: a chat opened meanwhile is read right after the ask,
+/// and the ask's home read waits until those chats have asked. A chat
+/// whose engine never started reads at once.
+public final class ChatsFirst: @unchecked Sendable {
+    private let lock = NSLock()
+    private var closed = false
+    private var used = false
+    private var ended = false
+    private var waitingForStream: [CheckedContinuation<Void, Never>] = []
+    private var asking = 0
+    private var waitingForChats: [CheckedContinuation<Void, Never>] = []
+
+    /// The engine starts, the first time.
+    public func close() { lock.withLock { if !used { used = true; closed = true } } }
+
+    /// A chat opening: true while closed, and then it says `asked` once
+    /// its read has gone, or it closed.
+    public func opening() -> Bool {
+        lock.withLock {
+            guard closed else { return false }
+            asking += 1
+            return true
+        }
+    }
+
+    public func asked() {
+        let waiters = lock.withLock { () -> [CheckedContinuation<Void, Never>] in
+            asking -= 1
+            guard asking == 0 else { return [] }
+            defer { waitingForChats = [] }
+            return waitingForChats
+        }
+        for waiter in waiters { waiter.resume() }
+    }
+
+    /// A chat's read waits here while closed: false once its engine
+    /// stopped (signed out), when nothing is to be asked.
+    public func wait() async -> Bool {
+        await withCheckedContinuation { (waiter: CheckedContinuation<Void, Never>) in
+            let now = lock.withLock { () -> Bool in
+                if !closed || ended { return true }
+                waitingForStream.append(waiter)
+                return false
+            }
+            if now { waiter.resume() }
+        }
+        return lock.withLock { !ended }
+    }
+
+    /// The engine stopped: chats waiting, and any after, ask nothing.
+    public func end() {
+        lock.withLock { ended = true }
+        open()
+    }
+
+    /// The stream was asked for, or won't be: the chats waiting are read now.
+    public func open() {
+        let waiters = lock.withLock { () -> [CheckedContinuation<Void, Never>] in
+            closed = false
+            defer { waitingForStream = [] }
+            return waitingForStream
+        }
+        for waiter in waiters { waiter.resume() }
+    }
+
+    /// Returns once the chats opened while closed have asked.
+    public func chatsAsked() async {
+        await withCheckedContinuation { (waiter: CheckedContinuation<Void, Never>) in
+            let now = lock.withLock { () -> Bool in
+                if asking == 0 { return true }
+                waitingForChats.append(waiter)
+                return false
+            }
+            if now { waiter.resume() }
+        }
+    }
 }

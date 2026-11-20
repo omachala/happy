@@ -26,6 +26,15 @@ public final class AgentClient: Sendable {
     public let signsIn: Bool
     /// How the artifact pages read through it ask to be shown.
     public let pageModes = ArtifactPageModes()
+    /// Whether the computer takes this device's environment, and what it was last told.
+    public let environment = UserEnvironmentReports()
+    /// Whether the computer was lately found without attachments.
+    public let attachmentSupport = AttachmentSupport()
+    /// What the computer serves, as its account's bootstrap says.
+    let servedHealth = ServedHealth()
+    /// Chat history reads on their way: what waits for home waits for them
+    /// (`SyncEngine`'s P2 stages, a picture's bytes).
+    public let chatReads = ChatReads()
 
     init(transport: any AgentTransport, token: String, signsIn: Bool = false) {
         self.transport = transport
@@ -34,6 +43,9 @@ public final class AgentClient: Sendable {
     }
 
     public func close() async { await transport.close() }
+    /// Back from the background: see `AgentTransport.resumed`.
+    public func resumed() async { await transport.resumed() }
+    public func warm(_ count: Int) async { await transport.warm(count) }
 
     // MARK: Requests
 
@@ -55,23 +67,37 @@ public final class AgentClient: Sendable {
         let body = try raw ?? json.map { try encoder.encode($0) }
         let response: HTTP1Response
         if let sent, let body, headers.isEmpty {
+            // An upload whose progress is heard.
             response = try await transport.send(method: method, path: path, credential: token, body: body, category: category, sent: sent)
-        } else if let sent, let body {
+            if response.status == 401 { throw AgentClientError.revoked }
+            return try Self.checked(response)
+        }
+        if let sent, let body {
             response = try await transport.send(method: method, path: path, credential: token, body: body, headers: headers, category: category, sent: sent)
         } else {
             response = try await transport.request(method: method, path: path, credential: token, body: body, headers: headers, category: category)
         }
         if response.status == 401 { throw AgentClientError.revoked }
+        return try Self.checked(response)
+    }
+
+    static func checked(_ response: HTTP1Response) throws -> HTTP1Response {
         guard (200..<300).contains(response.status) || response.status == 304 || response.status == 206 else {
-            struct Failure: Decodable { let error: String?; let code: String? }
-            let failure = try? JSONDecoder().decode(Failure.self, from: response.body)
-            throw AgentClientError.status(response.status, code: failure?.code, message: failure?.error)
+            // Flat (`{error, code}`) or nested (`{error: {code, message}}`).
+            let failure = try? JSONValue.decode(response.body)
+            let nested = failure?["error"]?.objectValue
+            throw AgentClientError.status(response.status, code: failure?["code"]?.stringValue ?? nested?["code"]?.stringValue,
+                                          message: failure?["error"]?.stringValue ?? nested?["message"]?.stringValue)
         }
         return response
     }
 
     func decode<T: Decodable>(_ type: T.Type, _ method: String, _ path: String, json: JSONValue? = nil) async throws -> T {
         let response = try await send(method, path, json: json)
+        if T.self == JSONValue.self {
+            guard let value = try? JSONValue.decode(response.body) as? T else { throw AgentClientError.invalidResponse }
+            return value
+        }
         do { return try JSONDecoder().decode(T.self, from: response.body) }
         catch { throw AgentClientError.invalidResponse }
     }
@@ -79,7 +105,34 @@ public final class AgentClient: Sendable {
     // MARK: Health and settings
 
     public func health() async throws -> AgentWire.Health {
-        try await decode(AgentWire.Health.self, "GET", "/v0/health")
+        let value = try await served()
+        let capabilities = value["capabilities"].flatMap { try? JSONDecoder().decode(AgentWire.Health.Capabilities.self, from: JSONEncoder().encode($0)) }
+        return AgentWire.Health(ready: value["ready"]?.boolValue ?? true, capabilities: capabilities)
+    }
+
+    /// `GET /v0/health`'s answer. An engine's client takes it from the
+    /// engine's bootstrap (`ServedHealth`) and never asks for it.
+    func served() async throws -> JSONValue {
+        try await servedHealth.value { try await self.decode(JSONValue.self, "GET", "/v0/health") }
+    }
+
+    /// Tells the computer this device's environment (`PUT /v0/environment`),
+    /// when its health says it takes one and it changed since it was last
+    /// told. Health is asked until it says yes: a computer updated while
+    /// the app runs starts taking reports. A 404 is a computer that doesn't.
+    public func reportEnvironment(_ environment: UserEnvironment, deviceId: String) async throws {
+        if self.environment.takesReports != true {
+            let takes = try await health().capabilities?.userEnvironment == true
+            self.environment.serves(takes, deviceId: deviceId)
+            guard takes else { return }
+        }
+        guard !self.environment.told(environment) else { return }
+        do { _ = try await send("PUT", "/v0/environment", json: environment.report(deviceId: deviceId)) }
+        catch AgentClientError.status(404, _, _) {
+            self.environment.serves(false, deviceId: deviceId)
+            return
+        }
+        self.environment.remember(environment)
     }
 
     public func userSetting(_ key: String) async throws -> JSONValue? {
@@ -244,6 +297,11 @@ public final class AgentClient: Sendable {
 
     // MARK: Surfaces
 
+    /// Puts a Surface in the reader's sidebar, at its end; one already there stays where it is.
+    public func joinSurface(_ surfaceId: String, mutationId: String = ClientID.make()) async throws {
+        _ = try await send("POST", "/v0/surfaces/\(Self.escape(surfaceId))/join", json: .object(["mutationId": .string(mutationId)]))
+    }
+
     /// Takes a Surface out of the reader's sidebar; its content stays for everyone.
     public func leaveSurface(_ surfaceId: String, mutationId: String = ClientID.make()) async throws {
         _ = try await send("POST", "/v0/surfaces/\(Self.escape(surfaceId))/leave", json: .object(["mutationId": .string(mutationId)]))
@@ -330,6 +388,23 @@ public final class AgentClient: Sendable {
         AccountUsage.project(try await decode(JSONValue.self, "GET", "/v0/usage"))
     }
 
+    /// `GET /v0/usage` as it came: each account's plan reading and the
+    /// rolling token windows Settings › Usage reads (`UsageOverview`).
+    public func usageResponse() async throws -> JSONValue {
+        try await decode(JSONValue.self, "GET", "/v0/usage")
+    }
+
+    /// Whether the server keeps a daily history (`capabilities.dailyUsage`).
+    public func servesDailyUsage() async throws -> Bool {
+        try await served()["capabilities"]?["dailyUsage"]?.boolValue == true
+    }
+
+    /// `GET /v0/usage/daily`: the last `days` local days in `timeZone`
+    /// (an IANA name) that spent tokens (`DailyUsage.read`).
+    public func dailyUsage(days: Int, timeZone: String) async throws -> JSONValue {
+        try await decode(JSONValue.self, "GET", "/v0/usage/daily?days=\(days)&tz=\(Self.escape(timeZone))")
+    }
+
     /// Asks for fresher readings of these accounts; they arrive as
     /// `provider.usage.updated`.
     public func refreshAccountUsage(_ providerIds: [String]) async throws {
@@ -345,7 +420,8 @@ public final class AgentClient: Sendable {
     /// Always steering, as desktop sends: mid-turn it is taken at the next
     /// boundary rather than waiting behind the run; idle, it starts one.
     /// `progress` hears each image's share written, in order, as the body goes out.
-    public func sendMessage(_ agentId: String, id: String, text: String, images: [(mimeType: String, data: Data)], toolRequest: AgentWire.ToolCallRequest? = nil,
+    /// `files` are `file` blocks naming attachments already uploaded.
+    public func sendMessage(_ agentId: String, id: String, text: String, images: [(mimeType: String, data: Data)], files: [JSONValue] = [], toolRequest: AgentWire.ToolCallRequest? = nil,
         mode: AgentWire.Mode, progress: (@Sendable ([Double]) -> Void)? = nil) async throws {
         guard images.allSatisfy({ $0.data.count <= AttachmentRules.maxInlineImageBytes }),
               images.reduce(0, { $0 + $1.data.count }) <= AttachmentRules.maxInlineImageTotalBytes else {
@@ -357,13 +433,15 @@ public final class AgentClient: Sendable {
             "clientMetadata": .object(["composer": .string("mobile")]),
         ]
         let encoded = images.map { $0.data.base64EncodedString() }
-        if !images.isEmpty || toolRequest != nil {
+        if !images.isEmpty || !files.isEmpty || toolRequest != nil {
             // /send prepends its required top-level text to these rich blocks.
             object["content"] = .array(zip(images, encoded).map {
                 .object(["type": .string("image"), "mimeType": .string($0.0.mimeType), "data": .string($0.1)])
-            } + (toolRequest.map { [$0.json] } ?? []))
+            } + files + (toolRequest.map { [$0.json] } ?? []))
         }
         object["mode"] = try JSONDecoder().decode(JSONValue.self, from: JSONEncoder().encode(mode))
+        // Only to a computer that takes it: an older one refuses the whole send.
+        if let deviceId = environment.sendingDeviceId { object["deviceId"] = .string(deviceId) }
         let path = "/v0/agents/\(Self.escape(agentId))/send"
         // Pictures make it a file's size: a file's client and deadline.
         let category: RequestCategory = images.isEmpty ? .query : .file
@@ -395,6 +473,33 @@ public final class AgentClient: Sendable {
         if let arguments { body["arguments"] = .string(arguments) }
         let answer = try await decode(JSONValue.self, "POST", "/v0/agents/\(Self.escape(agentId))/slash-commands/\(Self.escape(name))", json: .object(body))
         return AgentWire.SlashCommand.catalog(answer["slashCommands"])
+    }
+
+    /// The connection's global skills new work's `/` offers before it has
+    /// an agent (`GET /v0/skills`, every page; a page cursor a change made
+    /// stale starts the list again), as `SlashCommands.globalSkills` keeps
+    /// them. Nil from a computer without skill management (404, 501).
+    public func globalSkills() async throws -> [AgentWire.SlashCommand]? {
+        var summaries: [JSONValue] = []
+        var page: String?
+        var restarts = 0
+        while true {
+            let answer: JSONValue
+            do {
+                answer = try await decode(JSONValue.self, "GET", "/v0/skills?limit=100" + (page.map { "&pageCursor=\(Self.escape($0))" } ?? ""))
+            } catch AgentClientError.status(let status, _, _) where status == 404 || status == 501 {
+                return nil
+            } catch AgentClientError.status(409, _, _) where page != nil && restarts < 3 {
+                summaries = []
+                page = nil
+                restarts += 1
+                continue
+            }
+            summaries += answer["skills"]?.arrayValue ?? []
+            guard let next = answer["nextPageCursor"]?.stringValue else { break }
+            page = next
+        }
+        return SlashCommands.globalSkills(summaries)
     }
 
     /// The composer's draft as the computer keeps it for this person.
@@ -507,6 +612,18 @@ public final class AgentClient: Sendable {
         return try await send("GET", "/v0/artifacts/\(Self.escape(artifactId))/versions/\(version)/files/\(escaped)", headers: headers, category: .file)
     }
 
+    /// A `gen_ui` version's render document (`GenUIRenderDocument.path`),
+    /// whole, read by its path whether or not the version's files list it:
+    /// a Happy Agent lists it, a Happy Cloud server leaves it out and serves
+    /// it all the same (happy-cluster API.md, "Gen UI artifacts").
+    public func genUIRender(_ artifactId: String, version: Int) async throws -> Data {
+        var data = Data()
+        try await Self.read({ range in
+            try await artifactFile(artifactId, version: version, path: GenUIRenderDocument.path, range: range.map { "bytes=\($0.lowerBound)-\($0.upperBound)" })
+        }, each: { piece, _, _ in data.append(piece) })
+        return data
+    }
+
     /// One answer holds at most 8 MiB, so a whole file is read in ranges
     /// of this size.
     public static let rangeChunk = 4 * 1024 * 1024
@@ -569,8 +686,10 @@ public final class AgentClient: Sendable {
     /// The journal as it happens, from `after` when given. The first frame is
     /// `hello`; the stream ends when the connection does, or when nothing,
     /// not even a heartbeat, has come for `silence`.
-    public func events(after cursor: String?) async throws -> AsyncThrowingStream<ServerSentEvent, Error> {
-        let response = try await transport.stream(path: "/v0/events/stream", credential: token, headers: cursor.map { ["Last-Event-ID": $0] } ?? [:])
+    public func events(after cursor: String?, resetOnSilence: Bool = true) async throws -> AsyncThrowingStream<ServerSentEvent, Error> {
+        var headers: [String: String] = [:]
+        if let cursor { headers["Last-Event-ID"] = cursor }
+        let response = try await transport.stream(path: "/v0/events/stream", credential: token, headers: headers)
         if response.status == 401 { throw AgentClientError.revoked }
         guard response.status == 200 else { throw AgentClientError.status(response.status, code: nil, message: nil) }
         let body = response.body
@@ -578,12 +697,13 @@ public final class AgentClient: Sendable {
         return AsyncThrowingStream { continuation in
             let reader = Task {
                 var parser = ServerSentEventParser()
-                var watchdog = Self.watch(continuation, transport: transport)
+                let heard = Heard()
+                let watchdog = Self.watch(continuation, transport: transport, heard: heard, resetOnSilence: resetOnSilence)
                 defer { watchdog.cancel() }
                 do {
                     for try await bytes in body {
-                        watchdog.cancel()
-                        watchdog = Self.watch(continuation, transport: transport)
+                        heard.now()
+                        RadioWake.shared.noted()
                         for frame in parser.append(bytes) { continuation.yield(frame) }
                     }
                     continuation.finish()
@@ -598,10 +718,25 @@ public final class AgentClient: Sendable {
     /// so this long without a byte means it is gone, and so is the tunnel.
     static let silence: Duration = .seconds(40)
 
-    private static func watch(_ continuation: AsyncThrowingStream<ServerSentEvent, Error>.Continuation, transport: any AgentTransport) -> Task<Void, Never> {
+    /// When the stream last brought bytes.
+    private final class Heard: @unchecked Sendable {
+        private let lock = NSLock()
+        private var last = ContinuousClock.now
+        func now() { lock.withLock { last = .now } }
+        var lastHeard: ContinuousClock.Instant { lock.withLock { last } }
+    }
+
+    /// One sleeper for the stream's life, woken at the silence deadline and
+    /// put back to sleep if bytes came meanwhile: not a task made and
+    /// cancelled for every chunk.
+    private static func watch(_ continuation: AsyncThrowingStream<ServerSentEvent, Error>.Continuation, transport: any AgentTransport, heard: Heard, resetOnSilence: Bool) -> Task<Void, Never> {
         Task {
-            guard (try? await Task.sleep(for: silence)) != nil else { return }
-            await transport.reset(.realtime)
+            while true {
+                let due = heard.lastHeard + silence
+                guard (try? await Task.sleep(until: due, clock: .continuous)) != nil else { return }
+                if ContinuousClock.now >= heard.lastHeard + silence { break }
+            }
+            if resetOnSilence { await transport.reset(.realtime) }
             continuation.finish(throwing: PairingError.unavailable)
         }
     }
@@ -624,8 +759,112 @@ public struct Identity: Equatable, Sendable {
 
 extension AgentConnections {
     /// A client for a paired device, sharing nothing with its identity refresh.
-    public func agentClient(for accountID: String) -> AgentClient? {
+    public func agentClient(for accountID: String, startup: StartupLink? = nil) -> AgentClient? {
         guard let credential = credential(for: accountID) else { return nil }
-        return AgentClient(transport: transport(credential, for: accountID), token: credential.deviceToken, signsIn: credential.signIn != nil)
+        return AgentClient(transport: transport(credential, for: accountID, startup: startup), token: credential.deviceToken, signsIn: credential.signIn != nil)
+    }
+}
+
+/// What a computer serves (`GET /v0/health`'s answer) as the bootstrap its
+/// account's engine reads carries it: everyone who asks what it serves is
+/// answered from there, after the first bootstrap lands. A bootstrap
+/// without `health` serves nothing optional. A client no running engine
+/// follows asks the computer, as does one waiting when a bootstrap fails.
+final class ServedHealth: @unchecked Sendable {
+    private let lock = NSLock()
+    private var followed = false
+    private var ended = false
+    private var health: JSONValue?
+    private var waiting: [CheckedContinuation<JSONValue?, Error>] = []
+
+    func follow() { lock.withLock { followed = true } }
+
+    func take(_ health: JSONValue?) {
+        let health = health ?? .object([:])
+        let waiters = lock.withLock {
+            self.health = health
+            defer { waiting = [] }
+            return waiting
+        }
+        for waiter in waiters { waiter.resume(returning: health) }
+    }
+
+    /// The engine paused: those waiting ask the computer themselves.
+    func letGo() {
+        let waiters = lock.withLock {
+            followed = false
+            defer { waiting = [] }
+            return waiting
+        }
+        for waiter in waiters { waiter.resume(returning: nil) }
+    }
+
+    /// A bootstrap failed: those waiting ask the computer themselves.
+    func missed() {
+        let waiters = lock.withLock {
+            defer { waiting = [] }
+            return waiting
+        }
+        for waiter in waiters { waiter.resume(returning: nil) }
+    }
+
+    /// The engine stopped (signed out, removed): nothing is asked of its
+    /// computer again, and those waiting are told so.
+    func close() {
+        let waiters = lock.withLock {
+            followed = false
+            ended = true
+            defer { waiting = [] }
+            return waiting
+        }
+        for waiter in waiters { waiter.resume(throwing: CancellationError()) }
+    }
+
+    func value(asking ask: () async throws -> JSONValue) async throws -> JSONValue {
+        let (known, follows, over) = lock.withLock { (health, followed, ended) }
+        if let known { return known }
+        guard !over else { throw CancellationError() }
+        guard follows else { return try await ask() }
+        let taken: JSONValue? = try await withCheckedThrowingContinuation { (waiter: CheckedContinuation<JSONValue?, Error>) in
+            lock.withLock {
+                if let health { waiter.resume(returning: health) }
+                else if ended { waiter.resume(throwing: CancellationError()) }
+                else if followed { waiting.append(waiter) }
+                else { waiter.resume(returning: nil) }
+            }
+        }
+        if let taken { return taken }
+        return try await ask()
+    }
+}
+
+/// How many chat history reads are on their way (`AgentClient.chatReads`).
+public final class ChatReads: @unchecked Sendable {
+    private let lock = NSLock()
+    private var reading = 0
+    private var waiting: [CheckedContinuation<Void, Never>] = []
+
+    public func began() { lock.withLock { reading += 1 } }
+
+    public func ended() {
+        let waiters = lock.withLock {
+            reading -= 1
+            guard reading == 0 else { return [CheckedContinuation<Void, Never>]() }
+            defer { waiting = [] }
+            return waiting
+        }
+        for waiter in waiters { waiter.resume() }
+    }
+
+    /// Returns once no chat history read is on its way.
+    public func landed() async {
+        await withCheckedContinuation { (waiter: CheckedContinuation<Void, Never>) in
+            let now = lock.withLock {
+                if reading == 0 { return true }
+                waiting.append(waiter)
+                return false
+            }
+            if now { waiter.resume() }
+        }
     }
 }

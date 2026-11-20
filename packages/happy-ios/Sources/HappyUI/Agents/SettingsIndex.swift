@@ -18,12 +18,26 @@ enum SettingsIndex {
     static var changeAgentName: Entry { Entry(id: "change-agent-name", title: Strings.changeAgentName, glyph: "create-outline", tile: .blue) }
     static var changeAgentAvatar: Entry { Entry(id: "change-agent-avatar", title: Strings.changeAgentAvatar, glyph: "image-outline", tile: .orange) }
     static var hideProjects: Entry { Entry(id: "hide-projects", title: "Hide projects", glyph: "folder-outline", tile: .orange) }
+    /// On Appearance, this phone's own: whether a shimmer still runs in Low Power Mode.
+    static var shimmerInLowPower: Entry { Entry(id: "shimmer-in-low-power", title: Strings.LowPowerShimmer.title, glyph: "flash-outline", tile: .orange) }
+    /// On Appearance, this phone's own: whether a run of tool calls is one line in a chat.
+    static var groupToolCalls: Entry { Entry(id: "group-tool-calls", title: Strings.ToolSections.title, glyph: "layers-outline", tile: .indigo) }
     static var connection: Entry { Entry(id: "connection", title: Strings.Connection.title, glyph: "pulse-outline", tile: .teal) }
+    static var computes: Entry { Entry(id: "computes", title: Strings.Compute.title, glyph: "server-outline", tile: .blue) }
     static var account: Entry { Entry(id: "account", title: Strings.Settings.account, glyph: "person-circle-outline", tile: .blue) }
     static var backupRestore: Entry { Entry(id: "backup-restore", title: Strings.BackupRestore.title, glyph: "key-outline", tile: .green) }
     static var language: Entry { Entry(id: "language", title: Strings.SettingsLanguage.title, glyph: "language-outline", tile: .green) }
-    static var voice: Entry { Entry(id: "voice", title: Strings.Voice.title, glyph: "mic-outline", tile: .orange) }
     static var agents: Entry { Entry(id: "agents", title: Strings.Settings.agents, glyph: "options-outline", tile: .teal) }
+    static var providers: Entry { Entry(id: "providers", title: Strings.Providers.title, glyph: "key-outline", tile: .indigo) }
+    /// A Happy Cloud server's two documents every agent follows.
+    static var instructions: Entry { Entry(id: "instructions", title: Strings.PolicyDocuments.title(.instructions), glyph: "document-text-outline", tile: .gray) }
+    static var securityPolicy: Entry { Entry(id: "security-policy", title: Strings.PolicyDocuments.title(.security), glyph: "shield-checkmark-outline", tile: .green) }
+    /// What each provider account has spent: a year of daily tokens, plans and models.
+    static var usage: Entry { Entry(id: "usage", title: Strings.Usage.title, glyph: "flash-outline", tile: .teal) }
+    /// On Agents, this phone's own: whether home's microphone opens the task it starts.
+    static var dictationOpensTask: Entry { Entry(id: "dictation-opens-task", title: Strings.Record.opensTask, glyph: "mic-outline", tile: .blue) }
+    /// On Agents, this phone's own: whether dictation listens in two languages.
+    static var multilingualDictation: Entry { Entry(id: "multilingual-dictation", title: Strings.Record.multilingual, glyph: "language-outline", tile: .green) }
     static var scanTerminal: Entry { Entry(id: "scan-terminal", title: Strings.connectTerminal, glyph: "qr-code-outline", tile: .indigo) }
     static var enterTerminal: Entry { Entry(id: "enter-terminal", title: Strings.enterTerminalURL, glyph: "link-outline", tile: .indigo) }
     /// An agent connection's Support Happy row, under Profile, and its Voice page.
@@ -31,6 +45,10 @@ enum SettingsIndex {
     static var agentVoice: Entry { Entry(id: "agent-voice", title: Strings.AgentVoice.title, glyph: "mic-outline", tile: .orange) }
     static var supportUs: Entry { Entry(id: "support-us", title: Strings.SupportUs.title, glyph: "heart-outline", tile: .red) }
     static var dataStorage: Entry { Entry(id: "data-storage", title: Strings.DataStorage.title, glyph: "server-outline", tile: .green) }
+    /// Privacy, a page of its own: this phone's Analytics switch.
+    static var privacySettings: Entry { Entry(id: "privacy-settings", title: Strings.SettingsAccount.privacy, glyph: "lock-closed-outline", tile: .blue) }
+    /// This phone's own Analytics switch, on every kind of account's Privacy page.
+    static var analytics: Entry { Entry(id: "device-analytics", title: Strings.SettingsAccount.analytics, glyph: "analytics-outline", tile: .blue) }
     static var appearance: Entry { Entry(id: "appearance", title: Strings.Settings.appearance, glyph: "color-palette-outline", tile: .purple) }
     static var about: Entry { Entry(id: "about", title: Strings.Settings.about, glyph: "information-circle-outline", tile: .gray) }
     static var connectAgent: Entry { Entry(id: "connect-agent", title: Strings.SettingsActions.addAgent, glyph: "add-outline", tile: .action) }
@@ -48,14 +66,19 @@ enum SettingsIndex {
     /// is Data and Storage's. Disconnect is left
     /// out: a search doesn't offer to take the computer away.
     static var computer: [Entry] {
-        [profile, changeAgentName, changeAgentAvatar, supportBoba, appearance, hideProjects, agentVoice, agents, dataStorage, connection, connectAgent, addAccount] + aboutRows
+        [appearance, hideProjects, shimmerInLowPower, groupToolCalls, profile, changeAgentName, changeAgentAvatar, agentVoice, dataStorage, connection, supportBoba, agents, usage, dictationOpensTask, multilingualDictation, privacySettings, analytics, connectAgent, addAccount] + aboutRows
+    }
+
+    /// Cloud has no project settings; paired and self-hosted agents keep them.
+    static func computer(isCloud: Bool) -> [Entry] {
+        computer.filter { !isCloud || $0.id != hideProjects.id }
     }
 
     /// What a Happy account's settings show under its accounts card, in
     /// their order: the same places as a computer's, with the account's own
     /// pages beside them. Sign out is left out, as Disconnect is.
     static var happyAccount: [Entry] {
-        [account, backupRestore, appearance, language, voice, agents, dataStorage, connection, scanTerminal, enterTerminal, supportUs] + aboutRows
+        [account, backupRestore, appearance, language, agents, dataStorage, connection, scanTerminal, enterTerminal, supportUs, privacySettings, analytics] + aboutRows
     }
 
     /// The About page's rows.

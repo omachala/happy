@@ -22,6 +22,7 @@ import com.slopus.happy.ui.PHONE
 import com.slopus.happy.model.NewSessionPage
 import com.slopus.happy.model.ComposeKind
 import com.slopus.happy.ui.bounds
+import com.slopus.happy.ui.components.StateArt
 import com.slopus.happy.ui.chat.ChatScreenTags
 import com.slopus.happy.ui.chat.ComposeChatTags
 import com.slopus.happy.ui.chat.MessageTags
@@ -112,17 +113,15 @@ class ComposeJourneyTest {
         rule.setContent { HappyApp(graph) }
         rule.waitFor(FlatRowTags.ROW)
 
-        // One computer: shown all the same, saying it answers (c9adf9162); its most recent folder. No Happy Agent: Bot and Task dimmed.
+        // One computer: shown all the same, saying it answers (c9adf9162); its most recent folder. No Happy Agent: only a session to make, so no kind to choose.
         rule.node(HomeTags.COMPOSE).performClick()
         rule.waitFor(NewWorkTags.FOLDER)
         rule.onNode(hasText("● Online") and hasAnyAncestor(hasTestTag(NewWorkTags.MACHINE_STATUS)), useUnmergedTree = true).assertExists()
-        // The folder can show from the first machine row before the rest of
-        // initial sync finishes. Kinds stay available until that is known.
         rule.waitUntil(5_000) { newSession.options.value?.machinesSynced == true }
-        rule.node(ComposeChatTags.kind(ComposeKind.Task)).assertIsNotEnabled()
-        rule.node(ComposeChatTags.kind(ComposeKind.Bot)).assertIsNotEnabled()
+        rule.node(NewWorkTags.KIND).assertDoesNotExist()
+        rule.node(NewWorkTags.NOTE).assertTextEquals(ApplicationProvider.getApplicationContext<android.content.Context>().getString(com.slopus.happy.R.string.compose_session_note))
         rule.waitUntil(5_000) { newSession.draft.value.selectedPath == "/h/repo" }
-        rule.node(NewWorkTags.FOLDER).assertContentDescriptionEquals("~/repo")
+        rule.node(NewWorkTags.FOLDER).assertContentDescriptionEquals("Project: ~/repo")
         rule.node(NewWorkTags.FOLDER).performClick()
         rule.waitFor(ComposeChatTags.FOLDER_MENU)
         rule.node(ComposeChatTags.CUSTOM_PATH).assertExists()
@@ -309,8 +308,12 @@ class ComposeJourneyTest {
         rule.node(NewWorkTags.FOLDER).assertDoesNotExist()
         // A task is Happy Agent's: its first send takes pictures (20e20e0a8).
         rule.node(AttachmentStripTags.ADD).assertExists()
+        fun places(art: StateArt) = listOf(NewWorkTags.art(art), ComposeChatTags.kind(ComposeKind.Task), NewWorkTags.MACHINE, ComposerTags.INPUT).map { rule.node(it).bounds }
+        val task = places(StateArt.Action)
         rule.node(ComposeChatTags.kind(ComposeKind.Bot)).performClick()
         rule.waitFor(NewWorkTags.NAME_FIELD)
+        // Bot | Task moves nothing: a task keeps a bot's name and note as empty room.
+        assertEquals(task, places(StateArt.Ready))
         rule.node(NewWorkTags.FOLDER).assertDoesNotExist()
         rule.node(ComposerTags.INPUT).performTextInput("Own the releases")
         rule.node(ComposerTags.PRIMARY).performClick()

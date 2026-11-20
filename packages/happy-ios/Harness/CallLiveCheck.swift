@@ -8,9 +8,11 @@ import UIKit
 /// A real call with the build's hosted agent, spoken to from files
 /// (`-callLive <directory>` with `HAPPY_CALL_TAP=1`): desktop's live voice
 /// check, on the simulator. The audio engine renders by hand, so no
-/// microphone is ever opened; `prompt-1.wav`, `prompt-2.wav`, … in the
+/// microphone is ever opened and nothing is played: the agent's voice goes
+/// only to `output.wav`. `prompt-1.wav`, `prompt-2.wav`, … in the
 /// directory go to the agent as the person's voice, each once the agent
-/// has answered the one before. The provider, its transport and the
+/// has answered the one before; a `prompt-N.txt` goes as the person's
+/// words typed (a user message the call hears as theirs). The provider, its transport and the
 /// client tools are real; the computer they act on is the harness's
 /// fixture one (`DemoComputer`), so nothing reaches a real task.
 ///
@@ -28,16 +30,18 @@ final class CallLiveCheck {
 
     init(directory: URL) throws {
         prompts = try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
-            .filter { $0.lastPathComponent.hasPrefix("prompt-") && $0.pathExtension == "wav" }
+            .filter { $0.lastPathComponent.hasPrefix("prompt-") && ["wav", "txt"].contains($0.pathExtension) }
             .sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
         output = try FileManager.default.url(for: .documentDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
-        // Before the call: no device, so no microphone, only what is played in.
+        // Before the call: no device, so no microphone and no speaker, only what is played in.
         try AudioManager.shared.setManualRenderingMode(true)
+        guard AudioManager.shared.isManualRenderingMode else { throw CocoaError(.featureUnsupported) }
+        CallDropSound.muted = true
         sent.open(output.appendingPathComponent("input.wav"))
         heard.open(output.appendingPathComponent("output.wav"))
         AudioManager.shared.add(localAudioRenderer: sent)
         AudioManager.shared.add(remoteAudioRenderer: heard)
-        log("prompts \(prompts.map(\.lastPathComponent))")
+        log("prompts \(prompts.map(\.lastPathComponent)) silent: manual rendering \(AudioManager.shared.isManualRenderingMode)")
         Task { await run() }
     }
 
@@ -49,6 +53,14 @@ final class CallLiveCheck {
         _ = await quiet(after: 0, timeout: 20)
         for prompt in prompts {
             let agentLines = CallProbe.transcript.filter { $0.role == "agent" }.count
+            if prompt.pathExtension == "txt" {
+                let text = ((try? String(contentsOf: prompt, encoding: .utf8)) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                log("type \(prompt.lastPathComponent): \(text)")
+                CallProbe.type?(text)
+                if await !quiet(after: agentLines, timeout: 60) { log("no answer to \(prompt.lastPathComponent)") }
+                if !CallController.shared.state.isShown { break }
+                continue
+            }
             do {
                 let file = try AVAudioFile(forReading: prompt)
                 guard let buffer = AVAudioPCMBuffer(pcmFormat: file.processingFormat, frameCapacity: AVAudioFrameCount(file.length)) else { continue }
@@ -72,7 +84,17 @@ final class CallLiveCheck {
                 continue
             }
             if await !quiet(after: agentLines, timeout: 60) { log("no answer to \(prompt.lastPathComponent)") }
+            if !CallController.shared.state.isShown { break }
         }
+        // A read's update still to come after the last prompt: context, never a cue.
+        let updates = { (kind: String) in CallProbe.sent.filter { $0.kind == kind && $0.text.contains("conversation_update") }.count }
+        if CallController.shared.state.isShown {
+            _ = await until(20, { updates("update") > 0 })
+            log("updates sent \(updates("update")), as cues \(updates("cue"))")
+        }
+        // What the bar shows once the talking is done: gone if the agent hung up.
+        log("call state \(CallController.shared.state)")
+        try? await Task.sleep(for: .seconds(4))
     }
 
     /// Until the agent has said more than `after` lines and been quiet
@@ -81,7 +103,9 @@ final class CallLiveCheck {
         var quietSince: Date?
         return await until(timeout) {
             let answered = CallProbe.transcript.filter { $0.role == "agent" }.count > lines
-            guard answered, !CallProbe.agentSpeaking else { quietSince = nil; return false }
+            // Not just after a cue went: the agent is about to answer it.
+            let cued = CallProbe.sent.last { $0.kind == "cue" }.map { Date().timeIntervalSince($0.at) < 6 } ?? false
+            guard answered, !CallProbe.agentSpeaking, !cued else { quietSince = nil; return false }
             let since = quietSince ?? Date()
             quietSince = since
             return Date().timeIntervalSince(since) > 2.5

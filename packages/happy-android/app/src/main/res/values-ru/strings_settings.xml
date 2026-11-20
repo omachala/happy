@@ -38,9 +38,6 @@
     <string name="settings_agents_effort">Усилие</string>
     <string name="settings_agents_custom_codex_title">Своя модель Codex</string>
     <string name="settings_agents_custom_codex_message">Введите точный ID модели. Доступность зависит от вашего аккаунта Codex или настроек API.</string>
-    <string name="settings_connect_claude_title">Подключение к Claude</string>
-    <string name="settings_connect_claude">Подключить Claude</string>
-    <string name="settings_connect_claude_run">Выполните эту команду в терминале:</string>
     <string name="settings_commit">Коммит</string>
     <string name="settings_commit_at">Коммит %1$s</string>
     <string name="settings_manage_subscriptions">Управление подписками</string>
@@ -55,4 +52,6 @@
     <string name="agent_settings_default_access">Доступ по умолчанию</string>
     <string name="agent_settings_default_access_description">Что новая сессия может делать без вопросов. Сохраняется в вашем аккаунте и действует на всех ваших устройствах.</string>
     <string name="agent_settings_new_sessions_unreadable">Не удалось загрузить модели. Проверьте подключение и откройте эту страницу снова.</string>
+    <string name="settings_analytics_not_saved">Аналитика пока выключена, но настройку не удалось сохранить. Она снова включится при следующем запуске Happy.</string>
+    <string name="settings_analytics_not_turned_on">Не удалось включить аналитику. Повторите попытку позже.</string>
 </resources>

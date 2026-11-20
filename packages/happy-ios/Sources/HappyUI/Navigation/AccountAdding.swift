@@ -19,8 +19,10 @@ enum AccountAdding {
         }
     }
 
-    /// Entering a link, restoring an account, and the relay server. A team
-    /// server is added by scanning the code Happy Desktop shows.
+    /// Entering a link, restoring an account, and the relay server: the
+    /// self-hosted ways in. Any other team server is added by scanning the
+    /// code Happy Desktop shows. Happy Cloud isn't here: its ways in are
+    /// Start's Use Happy Cloud, the account menu's and Settings'.
     static func otherWays(context: AppContext, from controller: UIViewController, intent: ScanIntent = .addAccount, busy: @escaping (Bool) -> Void = { _ in }) -> [ScannerWay] {
         [
             ScannerWay(title: Strings.Start.enterLink, symbol: "link") { [weak controller] in
@@ -44,7 +46,33 @@ enum AccountAdding {
     /// (`instanceId` is the installation it must be), or one here already
     /// whose sign-in is renewed.
     static func signInToServer(context: AppContext, from controller: UIViewController, server: String, instanceId: String?) {
-        show(ServerSignInViewController(context: context, server: server, instanceId: instanceId), context: context, from: controller)
+        show(ServerSignInViewController(context: context, server: server, installation: instanceId.map { .expected($0) } ?? .unchecked), context: context, from: controller)
+    }
+
+    /// Happy Cloud, full screen: Welcome while the account isn't signed in
+    /// on this phone, its servers once it is (`CloudScreens`).
+    /// Cloud servers need no scanned code: their addresses are built from
+    /// the app's own base. An invite link opens on its invite, after
+    /// signing in when the account isn't.
+    static func connectToCloud(context: AppContext, from controller: UIViewController, invite: CloudInvite? = nil) {
+        guard HappyCloud.isOffered(in: context.variant) else { return }
+        let first = CloudScreens.first(context: context, invite: invite)
+        if context.account.accounts.isEmpty, let navigation = controller.navigationController {
+            navigation.pushViewController(first, animated: true)
+            return
+        }
+        context.account.beginAddingAccount()
+        let navigation = CloudNavigationController(rootViewController: first)
+        // The flow's, not the welcome's: a welcome put back after the pass
+        // ends wears the same button.
+        first.navigationItem.leftBarButtonItem = UIBarButtonItem(systemItem: .close, primaryAction: UIAction { [weak navigation] _ in
+            context.account.cancelAddingAccount()
+            navigation?.dismiss(animated: true)
+        })
+        first.navigationItem.leftBarButtonItem?.accessibilityIdentifier = "cloud-close"
+        AppCoordinator.applyAppearance(to: navigation.navigationBar)
+        navigation.modalPresentationStyle = .fullScreen
+        controller.present(navigation, animated: true)
     }
 
     /// Restore: the code another phone scans, with a secret key under it.

@@ -143,11 +143,6 @@ public struct AttachPreviewDismissal: Equatable, Sendable {
         public static let closingSpeed: CGFloat = 700
         /// A close goes at least this fast.
         public static let minimumSpeed: CGFloat = 600
-        /// With no cell to go back to, the picture leaves the screen at
-        /// least this fast (`simpleTransitionOutWithVelocity`).
-        public static let leavingSpeed: CGFloat = 2000
-        /// Let go short, it returns over this long.
-        public static let returnDuration: TimeInterval = 0.3
         /// The drag starts once the finger has gone 12 up or down, and is
         /// never one after 10 to the side
         /// (`TGModernGalleryZoomableScrollViewSwipeGestureRecognizer`).
@@ -177,34 +172,96 @@ public struct AttachPreviewDismissal: Equatable, Sendable {
     }
 
     /// With no cell to go back to: the offset it leaves to, a screen's
-    /// height the way it goes, and how long that takes.
+    /// height the way it goes (down without a velocity), and how long that
+    /// takes: the zoom's time, or less for a finger faster than that.
     public static func leave(velocity: CGFloat, height: CGFloat) -> (offset: CGFloat, duration: TimeInterval) {
-        let speed = max(abs(velocity), Metrics.leavingSpeed)
         let offset = velocity < 0 ? -height : height
-        return (offset, TimeInterval(height / speed))
+        let fling = velocity == 0 ? AttachPreviewMotion.duration : TimeInterval(height / abs(velocity))
+        return (offset, min(AttachPreviewMotion.duration, fling))
     }
 }
 
-/// Telegram's gallery springs (`TGModernGalleryController.animateView`):
-/// mass 0.8, stiffness 300, damping 25 in and 30 out, their keyframes
-/// stretched 1.8 and 2 times; the page shows within 0.07 of the zoom in,
-/// the black and buttons go in 0.15 of the zoom out.
+/// How the preview comes and goes. Telegram's gallery springs
+/// (`TGModernGalleryController.animateView`, stretched 1.8 and 2 times)
+/// take most of a second to settle, which reads as slow; here the zoom out
+/// of the cell, the zoom back into it, a let-go drag's close or return and
+/// the slide with no cell all take 0.22 s on one tight ease out (Android's
+/// the same). The page shows within 0.07 of the zoom in; the buttons, and
+/// the black on a zoom back, go in 0.15.
 public enum AttachPreviewMotion {
-    public static let mass: CGFloat = 0.8
-    public static let stiffness: CGFloat = 300
-    public static let dampingIn: CGFloat = 25
-    public static let dampingOut: CGFloat = 30
-    public static let stretchIn: CGFloat = 1.8
-    public static let stretchOut: CGFloat = 2
+    public static let duration: TimeInterval = 0.22
+    /// The ease out: most of the way in the first half, no overshoot.
+    public static let curve: (x1: CGFloat, y1: CGFloat, x2: CGFloat, y2: CGFloat) = (0.25, 1, 0.5, 1)
     public static let pageFadeIn: TimeInterval = 0.07
-    public static let groundIn: TimeInterval = 0.3
     public static let fadeOut: TimeInterval = 0.15
-    /// With no cell, the black goes over this long as the picture leaves.
-    public static let groundOut: TimeInterval = 0.35
     public static let chrome: TimeInterval = 0.2
+}
 
-    /// A spring stretched `factor` times in time: stiffness over f², damping over f.
-    public static func stretched(damping: CGFloat, factor: CGFloat) -> (mass: CGFloat, stiffness: CGFloat, damping: CGFloat) {
-        (mass, stiffness / (factor * factor), damping / factor)
+/// Telegram's gallery foot: a separate Back at the left of the glass
+/// tool group, the caption 10 above its 49-point row. The picture is
+/// fitted to the whole screen under all of it, as Telegram's gallery
+/// fits it (`TGModernGalleryZoomableItemView`).
+///
+/// Typing the caption (`TGPhotoCaptionInputMixin`, `TGMediaPickerGallery-
+/// InterfaceView.keyboardHeightChanged`): the row hides, the caption rides
+/// 8 over the keyboard, and the pictures keep their size, lifted by half
+/// the keyboard (`scrollViewOffsetRequested(-keyboardHeight / 2)`) and
+/// dimmed, the caption over them. The caption shows one line at rest and
+/// grows with its text while typed, up to what the keyboard leaves less
+/// 100, never under 60 (`LegacyMessageInputPanel.maxInputPanelHeight`).
+public struct AttachPreviewFootLayout: Equatable, Sendable {
+    public enum Metrics {
+        public static let bar: CGFloat = 49
+        public static let tool: CGFloat = 44
+        public static let toolGap: CGFloat = 10
+        /// The caption over the bar, and over the keyboard.
+        public static let overBar: CGFloat = 10
+        public static let overKeyboard: CGFloat = 8
+        public static let side: CGFloat = 26
+        /// The caption's cap: never under 60, else what the keyboard
+        /// leaves less 100.
+        public static let captionShortest: CGFloat = 60
+        public static let captionClearance: CGFloat = 100
+    }
+
+    /// The row through the screen's foot (transparent, on viewer black).
+    public var bar: CGRect
+    /// The tools side by side, centred in the bar.
+    public var tools: [CGRect]
+    public var card: CGRect
+    public var back: CGRect
+    public var group: CGRect
+    /// The pictures' offset down from where they rest: minus half the
+    /// keyboard while typing, else 0.
+    public var lift: CGFloat
+    /// The keyboard is up for the caption: no tools, the pictures dimmed.
+    public var typing: Bool
+
+    /// The caption's width, for the height it asks at.
+    public static func cardWidth(size: CGSize, safeArea: LayoutInsets, inset: CGFloat) -> CGFloat {
+        max(0, size.width - safeArea.left - safeArea.right - 2 * inset)
+    }
+
+    /// The tallest the caption grows with `keyboard` up.
+    public static func captionCap(size: CGSize, keyboard: CGFloat) -> CGFloat {
+        max(Metrics.captionShortest, size.height - keyboard - Metrics.captionClearance)
+    }
+
+    /// `keyboard` is how much of the screen's foot it covers; `cardHeight`
+    /// what the caption asks at `cardWidth`.
+    public init(size: CGSize, safeArea: LayoutInsets, keyboard: CGFloat, inset: CGFloat, cardHeight: CGFloat, tools count: Int) {
+        typing = keyboard > 0
+        let barTop = size.height - safeArea.bottom - Metrics.bar
+        bar = CGRect(x: 0, y: barTop, width: size.width, height: size.height - barTop)
+        let width = CGFloat(count) * Metrics.tool + CGFloat(max(0, count - 1)) * Metrics.toolGap
+        let left = (size.width - width) / 2
+        let top = barTop + (Metrics.bar - Metrics.tool) / 2
+        back = CGRect(x: safeArea.left + Metrics.side, y: top, width: Metrics.tool, height: Metrics.tool)
+        group = CGRect(x: left, y: top, width: width, height: Metrics.tool)
+        tools = (0..<count).map { CGRect(x: left + CGFloat($0) * (Metrics.tool + Metrics.toolGap), y: top, width: Metrics.tool, height: Metrics.tool) }
+        let height = min(cardHeight, Self.captionCap(size: size, keyboard: keyboard))
+        let bottom = typing ? size.height - keyboard - Metrics.overKeyboard : barTop - Metrics.overBar
+        card = CGRect(x: safeArea.left + inset, y: bottom - height, width: Self.cardWidth(size: size, safeArea: safeArea, inset: inset), height: height)
+        lift = typing ? -keyboard / 2 : 0
     }
 }

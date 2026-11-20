@@ -62,13 +62,6 @@ public final class LocalSettings: Sendable {
         }
     }
 
-    /// PostHog's last answer for `direct-connection-migration-note`
-    /// (`MigrationNoteFlag`); nil before one, or once nothing may ask.
-    public var migrationNoteFlag: Bool? {
-        get { storage.string(forKey: Keys.migrationNoteFlag).map { $0 == "true" } }
-        set { storage.set(newValue.map { $0 ? "true" : "false" }, forKey: Keys.migrationNoteFlag) }
-    }
-
     public var linkComputerChecklist: LinkChecklist {
         get {
             guard let json = storage.string(forKey: Keys.linkComputerChecklist),
@@ -108,6 +101,29 @@ public final class LocalSettings: Sendable {
     public var zenMode: Bool {
         get { storage.string(forKey: Keys.zenMode) == "true" }
         set { storage.set(newValue ? "true" : nil, forKey: Keys.zenMode) }
+    }
+
+    /// Settings › Agents › Open task after dictating: a task started from
+    /// home's microphone opens (the default), or starts while home stays.
+    public var dictationOpensTask: Bool {
+        get { storage.string(forKey: Keys.dictationStaysHome) != "true" }
+        set { storage.set(newValue ? nil : "true", forKey: Keys.dictationStaysHome) }
+    }
+
+    /// Settings › Agents › Multilingual dictation: a recording listens in
+    /// the person's two most likely languages and keeps the one spoken
+    /// (the default), or only in the most likely one.
+    public var multilingualDictation: Bool {
+        get { storage.string(forKey: Keys.dictationOneLanguage) != "true" }
+        set { storage.set(newValue ? nil : "true", forKey: Keys.dictationOneLanguage) }
+    }
+
+    /// Settings › Appearance › Group tool calls: in an agent's chat each
+    /// run of tool calls is one grey line (the default), or every call is
+    /// a row of its own.
+    public var groupsToolCalls: Bool {
+        get { storage.string(forKey: Keys.toolCallsUngrouped) != "true" }
+        set { storage.set(newValue ? nil : "true", forKey: Keys.toolCallsUngrouped) }
     }
 
     /// The projects showing every worktree on the grouped home list
@@ -155,7 +171,7 @@ public final class LocalSettings: Sendable {
     }
 
     public func clear() {
-        for key in [Keys.linkComputerChecklist, Keys.themePreference, Keys.devModeEnabled, Keys.markdownCopyV2, Keys.expandedProjects, Keys.acknowledgedCliVersions, Keys.registeredPushToken, Keys.zenMode, NewSessionDraft.storageKey] {
+        for key in [Keys.linkComputerChecklist, Keys.themePreference, Keys.devModeEnabled, Keys.markdownCopyV2, Keys.expandedProjects, Keys.acknowledgedCliVersions, Keys.registeredPushToken, Keys.zenMode, Keys.dictationStaysHome, Keys.toolCallsUngrouped, NewSessionDraft.storageKey] {
             storage.set(nil, forKey: key)
         }
     }
@@ -172,7 +188,8 @@ public final class LocalSettings: Sendable {
         static let themePreference = "themePreference"
         /// The chat's and Home's renderer picks, from when Appearance
         /// offered UICollectionView and UITableView beside UltraList.
-        static let retired = ["chatListRenderer", "homeListRenderer"]
+        /// The migration card's flag answer, kept per account before; now in memory only.
+        static let retired = ["chatListRenderer", "homeListRenderer", "posthog.direct-connection-migration-note"]
 
         static let devModeEnabled = "devModeEnabled"
         static let markdownCopyV2 = "markdownCopyV2"
@@ -180,6 +197,8 @@ public final class LocalSettings: Sendable {
         static let acknowledgedCliVersions = "acknowledgedCliVersions"
         static let registeredPushToken = "registered-push-token-v1"
         static let zenMode = "zenMode"
-        static let migrationNoteFlag = "posthog.direct-connection-migration-note"
+        static let dictationStaysHome = "dictationStaysHome"
+        static let dictationOneLanguage = "dictationOneLanguage"
+        static let toolCallsUngrouped = "toolCallsUngrouped"
     }
 }

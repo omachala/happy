@@ -242,10 +242,10 @@ abstract class FoldableLayoutTest(
         val row = rule.node(AgentHomeTags.row("agent-ab1")).bounds
         val card = DpRect(row.left + ContentTokens.inset, row.top, row.right - ContentTokens.inset, row.bottom)
         assertOnKeylines("agent home", null, null, card)
-        // The bar's outer glyphs stand on the content inside the cards: the first row's mark, the dots at the rows' ends.
+        // The bar's outer glyphs stand on the content inside the cards: the first row's mark, the status slots at the rows' ends.
         val mark = first(AgentHomeTags.ROW_MARK)
-        val dot = first(AgentHomeTags.ROW_DOT)
-        assertOnRowContent("agent home", glyph(AccountMenuTags.BUTTON, 32.dp), glyph(AgentHomeTags.SETTINGS, 24.dp), mark.left, dot.right)
+        val status = first(AgentHomeTags.ROW_STATUS)
+        assertOnRowContent("agent home", glyph(AccountMenuTags.BUTTON, 32.dp), glyph(AgentHomeTags.SETTINGS, 24.dp), mark.left, status.right)
         assertDp("agent home: search sits 48 before settings", glyph(AgentHomeTags.SETTINGS, 24.dp).right - 48.dp, glyph(AgentHomeTags.SEARCH, 24.dp).right)
         assertRestsBelowFeather("agent home")
         shot("agent-home")
@@ -314,7 +314,7 @@ abstract class FoldableLayoutTest(
             agent = AgentInfo("a1", "w1", null, "Fix the login redirect", "idle", null, null, 1_755_300_000_000, 1_755_400_000_000, 0, 2),
             mode = Mode("claude", "anthropic/opus-5", "high", null, "auto"),
         )
-        show { ConversationScreen(state, null, ConversationScreenActions()) }
+        show { ConversationScreen(state, ConversationScreenActions()) }
         val text = first(MessageTags.AGENT)
         assertOnKeylines("agent chat", glyph(ConversationScreenTags.BACK, 24.dp), glyph(ConversationScreenTags.COMPOSE, 24.dp), text)
         // The composer is the column's, 12 in, as on a phone.
@@ -375,7 +375,7 @@ abstract class FoldableLayoutTest(
             ArtifactSummary("a2", "html", "Dashboard", 1, null, createdAt = now - day, updatedAt = now - day),
             ArtifactSummary("a3", "image", "Screenshots of the new onboarding flow on every size of phone", 2, null, createdAt = now - 3 * day, updatedAt = now - 3 * day),
         )
-        show { ArtifactsScreen(ArtifactCatalogFeed.State(items, loaded = true), {}, {}, {}) }
+        show { ArtifactsScreen(ArtifactCatalogFeed.State(items, loaded = true), {}, {}) }
         // The cards stand on the column's keyline; the title is a card's 16, a tile and its 12 further in.
         val row = first(ArtifactsTags.ROW)
         val card = DpRect(row.left + ContentTokens.inset, row.top, row.right - ContentTokens.inset, row.bottom)

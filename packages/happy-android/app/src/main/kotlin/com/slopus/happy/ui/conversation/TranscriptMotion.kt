@@ -137,7 +137,11 @@ internal class TranscriptMotion(private val list: LazyListState) {
         entering.clear()
         delays.clear()
         flown.clear()
-        for (i in 0 until end) if (next[i].key !in before && !next[i].streams()) entering += next[i].key
+        for (i in 0 until end) if (next[i].key !in before && !next[i].streams()) {
+            entering += next[i].key
+            // A live tool section's line comes in a character at a time ([ToolSectionRow]): it takes its room, unfaded.
+            if ((next[i] as? ConversationRow.Section)?.live == true) flown += next[i].key
+        }
         if (entering.isEmpty()) return
         height = -1f
         started = false
@@ -274,7 +278,7 @@ class SendFlight {
 
     /** Whether [row] is the sent message in flight, claiming it if it is the one just sent. */
     internal fun claim(row: ConversationRow): Boolean =
-        claim(row.key, (row as? ConversationRow.User)?.takeIf { it.pictures.isEmpty() }?.text)
+        claim(row.key, (row as? ConversationRow.User)?.takeIf { it.pictures.isEmpty() && it.files.isEmpty() }?.text)
 
     /** Whether row [key] is the sent message in flight, claiming it if its [text] (null: not a plain message) is what was sent. */
     fun claim(key: String, text: String?): Boolean {

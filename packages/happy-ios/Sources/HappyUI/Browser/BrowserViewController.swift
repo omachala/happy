@@ -1,4 +1,5 @@
 #if canImport(UIKit)
+import HappyAnalytics
 import HappyCore
 import HappyIcons
 import HappyLayout
@@ -15,8 +16,10 @@ import WebKit
 /// Embedded in another screen (an artifact), the buttons go in that
 /// screen's header and its title stays.
 ///
-/// An app (`ArtifactPageMode`, in `AppPageViewController`) has no header,
-/// loading bar or pull to refresh: its page fills the view, never scrolls,
+/// There is no pull to refresh; the header's button reloads.
+///
+/// An app (`ArtifactPageMode`, in `AppPageViewController`) has no header
+/// or loading bar: its page fills the view, never scrolls,
 /// bounces or zooms, and runs with `AppPageScripts`.
 final class BrowserViewController: UIViewController, WKNavigationDelegate, WKUIDelegate, TakesBackSwipe {
     private let originalURL: URL
@@ -29,7 +32,6 @@ final class BrowserViewController: UIViewController, WKNavigationDelegate, WKUID
     private var observations: [NSKeyValueObservation] = []
     private let progressView = BrowserProgressView()
     let failureView = BrowserFailureView()
-    private let refresh = UIRefreshControl()
     private(set) var progress = BrowserProgress()
     private var trickling: Task<Void, Never>?
     /// Why the error page shows, while it does.
@@ -46,6 +48,16 @@ final class BrowserViewController: UIViewController, WKNavigationDelegate, WKUID
     private var crashReload: WKNavigation?
     private var link: LinkState?
     private var linkWatch: Watch?
+    /// An agent's page closes while its compute is gone and opens again
+    /// when it is back (Happy Cloud), following `BrowserAgentCompute`.
+    private var compute = BrowserComputeGate()
+    /// What the compute last said, nil until it said anything.
+    private var computeNow: BrowserCompute?
+    private var computeWatch: Task<Void, Never>?
+    private var computeProbe: Task<Void, Never>?
+    /// Back with its compute, the page's server may still be starting.
+    private var reopenRetry = BrowserReopenRetry()
+    private var reopenRetrying: Task<Void, Never>?
     private let isApp: Bool
     /// Where an app's close button is, as its page is told.
     var appClose = AppPageScripts.Close(corner: .topStart, box: 0, rightToLeft: false)
@@ -65,18 +77,19 @@ final class BrowserViewController: UIViewController, WKNavigationDelegate, WKUID
         originalURL = url; self.session = session; self.agentID = agentID; self.artifactID = artifactID; self.page = page
         isApp = app
         super.init(nibName: nil, bundle: nil)
-        title = Self.isSynthetic(url) ? nil : url.host
+        title = Self.isSynthetic(url) ? nil : BrowserPolicy.Loopback.shown(url).host
         navigationItem.largeTitleDisplayMode = .never
     }
     @available(*, unavailable) required init?(coder: NSCoder) { fatalError() }
 
     private var computerName: String { session?.computerName ?? Strings.agentConnection }
     /// A bundled artifact's made-up origin, which means nothing outside.
-    private static func isSynthetic(_ url: URL) -> Bool { url.host?.hasSuffix(".invalid") == true }
+    /// A loopback alias is not: it shows as the address it stands for.
+    private static func isSynthetic(_ url: URL) -> Bool { BrowserPolicy.Loopback.shown(url).host?.hasSuffix(".invalid") == true }
     /// The host and any port, as the error page names a server: a dev
     /// server is told apart by its port. Nothing for a made-up origin.
     private static func address(_ url: URL) -> String? {
-        guard !isSynthetic(url), let host = url.host else { return nil }
+        guard !isSynthetic(url), let host = BrowserPolicy.Loopback.shown(url).host else { return nil }
         return url.port.map { "\(host):\($0)" } ?? host
     }
     /// In another screen rather than a navigation stack of its own.
@@ -90,7 +103,6 @@ final class BrowserViewController: UIViewController, WKNavigationDelegate, WKUID
         failureView.isHidden = true
         failureView.retried = { [weak self] in self?.retry() }
         progressView.faded = { [weak self] in self?.setProgress { $0.hide() } }
-        refresh.addAction(UIAction { [weak self] _ in self?.pulled() }, for: .valueChanged)
         backItem.accessibilityLabel = Strings.Browser.back
         backItem.accessibilityIdentifier = "browser-back"
         forwardItem.accessibilityLabel = Strings.Browser.forward
@@ -105,6 +117,15 @@ final class BrowserViewController: UIViewController, WKNavigationDelegate, WKUID
             linkWatch = session.watchHeader { [weak self] state in self?.linkChanged(state) }
         }
         open()
+        if let session, let agentID, !agentID.isEmpty, artifactID == nil {
+            let changes = BrowserAgentCompute(client: session.client, store: session.store).changes(agentID: agentID)
+            computeWatch = Task { [weak self] in
+                for await change in changes {
+                    guard let self else { return }
+                    computeChanged(change)
+                }
+            }
+        }
     }
 
     override func didMove(toParent parent: UIViewController?) {
@@ -134,9 +155,22 @@ final class BrowserViewController: UIViewController, WKNavigationDelegate, WKUID
         do {
             if page == nil {
                 guard let session else { throw BrowserError.unavailable }
-                let workspace = try await session.client.browserWorkspace(agentID: agentID, artifactID: artifactID)
-                try Task.checkCancellation()
-                page = try await BrowserPage.workspace(client: session.client, url: originalURL, workspaceID: workspace, artifactID: artifactID)
+                if let artifactID {
+                    // A live artifact opens where it was made, never in a workspace guessed for it.
+                    page = try await BrowserPage.live(client: session.client, url: originalURL, artifactID: artifactID)
+                } else if let agentID, !agentID.isEmpty {
+                    // The agent's own network, which is where it ran the server.
+                    let network = BrowserAgentNetwork(client: session.client, agentID: agentID)
+                    _ = try await network.current()
+                    try Task.checkCancellation()
+                    let page = try await BrowserPage.agent(client: session.client, url: originalURL, network: network)
+                    page.refusals.onComputeGone { [weak self] in Task { @MainActor [weak self] in self?.computeGone() } }
+                    self.page = page
+                } else {
+                    let workspace = try await session.client.browserWorkspace()
+                    try Task.checkCancellation()
+                    page = try await BrowserPage.workspace(client: session.client, url: originalURL, workspaceID: workspace)
+                }
             }
             try Task.checkCancellation()
             guard let page else { return }
@@ -144,7 +178,7 @@ final class BrowserViewController: UIViewController, WKNavigationDelegate, WKUID
             load(failedURL ?? page.url, in: web)
         } catch {
             guard !Task.isCancelled, !(error is CancellationError) else { return }
-            fail(BrowserProblem.opening(error, link: link), url: originalURL, beforeCommit: false)
+            fail(BrowserProblem.opening(error, link: link), url: failedURL ?? originalURL, beforeCommit: false)
         }
     }
 
@@ -178,7 +212,6 @@ final class BrowserViewController: UIViewController, WKNavigationDelegate, WKUID
         web.isOpaque = false
         web.backgroundColor = UIColor(Palette.surface)
         web.scrollView.backgroundColor = UIColor(Palette.surface)
-        web.scrollView.refreshControl = refresh
         HeaderBar.edge(web.scrollView, in: header)
     }
 
@@ -222,7 +255,6 @@ final class BrowserViewController: UIViewController, WKNavigationDelegate, WKUID
     private func loadingChanged(_ isLoading: Bool) {
         updateHeader()
         if isLoading { setProgress { $0.begin() }; return }
-        refresh.endRefreshing()
         // A failure says so in its own callback, which may come just after:
         // only a load that ended without one fills the bar.
         DispatchQueue.main.async { [weak self] in
@@ -253,11 +285,16 @@ final class BrowserViewController: UIViewController, WKNavigationDelegate, WKUID
     // MARK: Failing
 
     private func fail(_ problem: BrowserProblem, url: URL?, beforeCommit: Bool) {
+        // Gone for its compute: the page closes until the compute is back.
+        if problem == .computeDisconnected, computeWatch != nil, !compute.closed {
+            computeGone(at: url)
+            return
+        }
         self.problem = problem
+        Analytics.shared.browserLoadFailed(problem)
         failedURL = url ?? failedURL ?? originalURL
         failedBeforeCommit = beforeCommit
         setProgress { $0.hide() }
-        refresh.endRefreshing()
         failureView.show(problem, computer: computerName, host: failedURL.flatMap(Self.address))
         if failureView.isHidden {
             failureView.alpha = 0
@@ -265,9 +302,23 @@ final class BrowserViewController: UIViewController, WKNavigationDelegate, WKUID
             UIView.animate(withDuration: 0.2) { self.failureView.alpha = 1 }
         }
         updateHeader()
+        reopenRetrying?.cancel()
+        if let wait = reopenRetry.failed(problem) {
+            reopenRetrying = Task { [weak self] in
+                try? await Task.sleep(for: wait)
+                guard let self, !Task.isCancelled else { return }
+                // Try Again's load, the tries so far kept.
+                let kept = reopenRetry
+                retry()
+                reopenRetry = kept
+            }
+        }
     }
 
     private func clearFailure() {
+        // Tried again by hand: the compute closes it again if still gone.
+        if compute.closed { compute = BrowserComputeGate(); computeProbe?.cancel() }
+        reopenRetry.end(); reopenRetrying?.cancel()
         problem = nil
         failureView.isHidden = true
         page?.refusals.clear()
@@ -290,6 +341,60 @@ final class BrowserViewController: UIViewController, WKNavigationDelegate, WKUID
         if state == .online, before != .online, problem == .computerUnreachable || problem == .noNetwork { retry() }
     }
 
+    // MARK: Compute
+
+    private func computeChanged(_ change: BrowserCompute) {
+        computeNow = change
+        switch compute.apply(change) {
+        case .close?: closeForCompute()
+        case .reopen?: reopenForCompute()
+        case nil: break
+        }
+    }
+
+    /// A tunnel was refused for the compute being gone: as its own news.
+    private func computeGone(at url: URL? = nil) {
+        if compute.apply(.detached) == .close { closeForCompute(at: url) }
+    }
+
+    /// The page goes, so nothing in it keeps knocking, and the error page
+    /// says why; its address is kept to open again.
+    private func closeForCompute(at failed: URL? = nil) {
+        let url = failed ?? (problem != nil ? failedURL : web?.url ?? pendingURL)
+        loading?.cancel()
+        web?.stopLoading(); web?.removeFromSuperview(); web = nil; page = nil; observations = []
+        fail(.computeDisconnected, url: url ?? originalURL, beforeCommit: false)
+        probeCompute()
+    }
+
+    private func reopenForCompute() {
+        computeProbe?.cancel()
+        clearFailure()
+        reloadedAfterCrash = false
+        reopenRetry.reopened()
+        open()
+    }
+
+    /// A compute back within its grace sends no news of having gone or
+    /// come back: while it last said it was there, or said nothing, the
+    /// page asks now and then whether a tunnel opens.
+    private func probeCompute() {
+        computeProbe?.cancel()
+        guard let session, let agentID else { return }
+        let network = BrowserAgentNetwork(client: session.client, agentID: agentID)
+        let url = failedURL ?? originalURL
+        computeProbe = Task { [weak self] in
+            var delay = 3.0
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(delay))
+                delay = min(delay * 2, 30)
+                guard let self, !Task.isCancelled, compute.closed else { return }
+                if computeNow == .detached { continue }
+                if await network.answers(url), !Task.isCancelled { computeChanged(.attached) }
+            }
+        }
+    }
+
     // MARK: Header
 
     private var canGoBack: Bool {
@@ -309,7 +414,7 @@ final class BrowserViewController: UIViewController, WKNavigationDelegate, WKUID
         reloadItem.accessibilityLabel = stops ? Strings.Browser.stop : Strings.Browser.reload
         guard !isEmbedded else { return }
         let url = problem != nil ? failedURL : web?.url ?? originalURL
-        let host = url.flatMap { Self.isSynthetic($0) ? nil : $0.host }
+        let host = url.flatMap { Self.isSynthetic($0) ? nil : BrowserPolicy.Loopback.shown($0).host }
         let pageTitle = problem == nil ? web?.title.flatMap { $0.isEmpty ? nil : $0 } : nil
         navigationItem.title = pageTitle ?? host ?? title
         navigationItem.subtitle = pageTitle != nil && host != pageTitle ? host : nil
@@ -331,16 +436,9 @@ final class BrowserViewController: UIViewController, WKNavigationDelegate, WKUID
         if problem != nil { retry(); return }
         if web.isLoading {
             web.stopLoading()
-            refresh.endRefreshing()
             setProgress { $0.hide() }
             return
         }
-        if web.url == nil { load(failedURL ?? page?.url ?? originalURL, in: web) } else { setProgress { $0.begin() }; web.reload() }
-    }
-
-    /// Pull to refresh: always loads again, never stops.
-    private func pulled() {
-        guard let web, problem == nil else { retry(); return }
         if web.url == nil { load(failedURL ?? page?.url ?? originalURL, in: web) } else { setProgress { $0.begin() }; web.reload() }
     }
 
@@ -350,11 +448,12 @@ final class BrowserViewController: UIViewController, WKNavigationDelegate, WKUID
             guard let list = self?.web?.backForwardList else { done([]); return }
             let items = forward ? list.forwardList : list.backList.reversed()
             done(items.map { item in
-                let action = UIAction(title: item.title.flatMap { $0.isEmpty ? nil : $0 } ?? item.url.host ?? item.url.absoluteString) { [weak self] _ in
+                let url = BrowserPolicy.Loopback.shown(item.url)
+                let action = UIAction(title: item.title.flatMap { $0.isEmpty ? nil : $0 } ?? url.host ?? url.absoluteString) { [weak self] _ in
                     self?.clearFailure()
                     self?.web?.go(to: item)
                 }
-                action.subtitle = item.url.host
+                action.subtitle = url.host
                 return action
             })
         }])
@@ -363,7 +462,7 @@ final class BrowserViewController: UIViewController, WKNavigationDelegate, WKUID
     // MARK: Share
 
     /// The page as it is now: where it went, or the address that failed.
-    private var currentURL: URL { (problem != nil ? failedURL : nil) ?? web?.url ?? originalURL }
+    private var currentURL: URL { BrowserPolicy.Loopback.shown((problem != nil ? failedURL : nil) ?? web?.url ?? originalURL) }
     private var shareURL: URL { artifactID == nil ? currentURL : originalURL }
 
     func shareActions() -> [UIMenuElement] {
@@ -400,6 +499,7 @@ final class BrowserViewController: UIViewController, WKNavigationDelegate, WKUID
         super.viewDidDisappear(animated)
         if isMovingFromParent || isBeingDismissed || navigationController?.isBeingDismissed == true || parent?.isMovingFromParent == true || parent?.isBeingDismissed == true {
             loading?.cancel(); trickling?.cancel(); linkWatch = nil
+            computeWatch?.cancel(); computeProbe?.cancel(); reopenRetrying?.cancel()
             web?.stopLoading(); web?.removeFromSuperview(); web = nil; page = nil; observations = []
         }
     }
@@ -423,6 +523,7 @@ final class BrowserViewController: UIViewController, WKNavigationDelegate, WKUID
     func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
         // A page arrived: whatever failed before it is behind it now.
         if problem != nil { clearFailure() }
+        reopenRetry.end()
         failedURL = nil
     }
 
@@ -479,6 +580,10 @@ final class BrowserViewController: UIViewController, WKNavigationDelegate, WKUID
         guard let url = action.request.url else { return .cancel }
         let mainFrame = action.targetFrame?.isMainFrame != false
         if BrowserPolicy.isInPage(url) { return .allow }
+        if mainFrame, action.navigationType == .linkActivated, HappyShareLink.parse(url.absoluteString) != nil {
+            openHappyLink(url.absoluteString)
+            return .cancel
+        }
         if BrowserPolicy.route(url) == .system {
             guard mainFrame, action.navigationType == .linkActivated || webView.backForwardList.currentItem == nil else { return .cancel }
             let nothingShown = webView.backForwardList.currentItem == nil
@@ -488,9 +593,15 @@ final class BrowserViewController: UIViewController, WKNavigationDelegate, WKUID
             return .cancel
         }
         if mainFrame, let page,
-           BrowserPolicy.Authority(url: url) != BrowserPolicy.Authority(url: page.url),
+           BrowserPolicy.Authority(url: BrowserPolicy.Loopback.alias(url) ?? url) != BrowserPolicy.Authority(url: page.url),
            artifactID != nil, action.navigationType == .linkActivated {
             openBrowser(url, session: session, agentID: agentID)
+            return .cancel
+        }
+        // WebKit would go to the phone's own loopback: the computer's
+        // opens instead, on its alias. Frames and fetches there are blocked.
+        if mainFrame, let alias = BrowserPolicy.Loopback.alias(url) {
+            DispatchQueue.main.async { [weak self, weak webView] in if let webView { self?.load(alias, in: webView) } }
             return .cancel
         }
         if mainFrame { pendingURL = url }
@@ -516,8 +627,11 @@ final class BrowserViewController: UIViewController, WKNavigationDelegate, WKUID
 
 extension UIViewController {
     func openBrowser(_ url: URL, session: Session? = nil, agentID: String? = nil) {
-        guard BrowserPolicy.route(url) != .system else { UIApplication.shared.open(url); return }
-        let browser = BrowserViewController(url: url, session: session ?? browserConnection(), agentID: agentID)
+        // A share link is a Happy link, opened in the app and never in a browser.
+        if HappyShareLink.parse(url.absoluteString) != nil { return openHappyLink(url.absoluteString) }
+        let session = session ?? browserConnection()
+        guard BrowserPolicy.route(url, connected: session != nil) != .system else { UIApplication.shared.open(url); return }
+        let browser = BrowserViewController(url: url, session: session, agentID: agentID)
         if let navigationController { navigationController.pushViewController(browser, animated: true) }
         else {
             let navigation = UINavigationController(rootViewController: browser)
@@ -555,6 +669,15 @@ extension UIView {
             if let controller = current as? UIViewController { controller.openBrowser(url); return }
             responder = current.next
         }
+    }
+}
+
+extension UIViewController {
+    /// A Happy link, `happy://<instanceId>/…` or a link.happy.page share
+    /// link, opened as one from outside the app opens (`InstanceLinkRoute`):
+    /// on the connection to the server it names, or not at all.
+    func openHappyLink(_ text: String) {
+        NotificationCenter.default.post(name: AppCoordinator.openLinkRequested, object: view.window, userInfo: ["link": text])
     }
 }
 #endif

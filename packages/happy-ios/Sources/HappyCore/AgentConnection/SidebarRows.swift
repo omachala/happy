@@ -14,8 +14,10 @@ public enum SidebarRows {
     }
 
     /// `users`: the team members the tasks belong to, as last read, by ID.
-    /// `feed`: the Feed's row, nil for none.
-    public static func make(_ desktop: DesktopSnapshot, settings: [String: JSONValue], users: [String: TeamUser] = [:], feed: FeedRow? = nil) -> [Row] {
+    /// `feed`: the Feed's row, nil for none. `plugins`: a Happy Cloud
+    /// server's Plugins row under Artifacts. `pipelines`: its Pipelines row,
+    /// directly under Plugins, as desktop places it.
+    public static func make(_ desktop: DesktopSnapshot, settings: [String: JSONValue], users: [String: TeamUser] = [:], feed: FeedRow? = nil, plugins: Bool = false, pipelines: Bool = false) -> [Row] {
         var rows: [Row] = []
         var descendants = Set<String>()
         let tasksByID = Dictionary((desktop.tasks ?? []).map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
@@ -47,12 +49,20 @@ public enum SidebarRows {
                 status: muted ? .none : status(agent), unread: !muted && agent.unread != nil,
                 isHappy: owner?.systemKey == "chief_of_staff", agentId: agent.id, workspaceId: agent.workspaceId, targetKind: kind)
             row.targetId = owner?.id
-            row.canArchive = owner?.canArchive ?? false
+            // The Chief of Staff never, whatever an older server says.
+            row.canArchive = owner?.systemKey != "chief_of_staff" && owner?.canArchive == true
             row.activityTime = agent.activityAt.map(Rows.minute)
+            row.muted = muted
             rows.append(row)
             for child in children { agentRow(child, depth: depth + 1, muted: muted) }
         }
         rows.append(Row(id: "direct:artifacts", nodeId: "direct:artifacts", kind: .space, label: "Artifacts", mark: .glyph("doc"), targetKind: "artifacts"))
+        if plugins {
+            rows.append(Row(id: "direct:plugins", nodeId: "direct:plugins", kind: .space, label: "Plugins", mark: .glyph("plugin"), targetKind: "plugins"))
+        }
+        if pipelines {
+            rows.append(Row(id: "direct:pipelines", nodeId: "direct:pipelines", kind: .space, label: "Pipelines", mark: .glyph("pipeline"), targetKind: "pipelines"))
+        }
         if let feed {
             // Bold while something is unread, with how many beside it.
             var row = Row(id: "direct:feed", nodeId: "direct:feed", kind: .space, label: "Activity", mark: .glyph("feed"), unread: feed.unread > 0, targetKind: "feed")
@@ -66,7 +76,7 @@ public enum SidebarRows {
         }.sorted { ($0.1, $0.0.id) < ($1.1, $1.0.id) }
         for (surface, _) in joined {
             var row = Row(id: "surface:\(surface.id)", nodeId: "surface:\(surface.id)", kind: .space,
-                label: surface.name, mark: .glyph(Rows.surfaceGlyph(surface.type)), agentId: surface.chatAgentId, targetKind: "surface")
+                label: surface.name, mark: .glyph(Rows.surfaceGlyph(surface.type, access: surface.access, policyVault: surface.policyVault)), agentId: surface.chatAgentId, targetKind: "surface")
             row.targetId = surface.id
             row.surfaceType = surface.type
             rows.append(row)
@@ -101,6 +111,40 @@ public enum SidebarRows {
             }
         }
         return rows
+    }
+
+    /// What of an agent's row its agent draws (`make`): its status, its
+    /// dot, a session's name, its time to the minute. An update that moves
+    /// none of these draws nothing.
+    struct Drawn: Equatable {
+        var status: Row.Status
+        var unread: Bool
+        var title: String?
+        var minute: Double?
+        var archived: Bool
+
+        init(_ agent: AgentWire.Agent) {
+            status = Rows.activity(agent)
+            unread = agent.unread != nil
+            title = agent.title
+            minute = agent.activityAt.map(Rows.minute)
+            archived = agent.archivedAt != nil
+        }
+    }
+
+    /// `row`, an agent's as `make` drew it, drawn again for `agent` as it
+    /// is now: what `Drawn` names, the rest as it was.
+    static func redraw(_ row: inout Row, for agent: AgentWire.Agent) {
+        row.status = row.muted ? .none : Rows.activity(agent)
+        row.unread = !row.muted && agent.unread != nil
+        if row.kind == .session { row.label = agent.title ?? "Untitled" }
+        row.activityTime = agent.activityAt.map(Rows.minute)
+    }
+
+    /// Whether `make` drew the row for an agent (a session, a bot's or a
+    /// task's), so `redraw` may draw it again.
+    static func drawsAgent(_ row: Row) -> Bool {
+        row.agentId != nil && (row.kind == .session || row.targetKind == "bot" || row.targetKind == "task")
     }
 
     /// A project's face, as desktop's sidebar shows it: its picture (the
@@ -160,12 +204,18 @@ public enum SidebarRows {
         return .image(path: TeamUser.photoPath(author), thumbhash: photo.thumbhash)
     }
 
-    /// The members whose faces the listed tasks wear, other than the
-    /// signed-in person, whose own is the profile's; none outside a team.
-    public static func authors(_ desktop: DesktopSnapshot) -> Set<String> {
-        guard let me = desktop.profile?.userId else { return [] }
+    /// The active tasks the person isn't in, as rows that open their
+    /// conversations: what desktop's palette finds among its task
+    /// directory, which home doesn't list.
+    public static func unjoinedTasks(_ desktop: DesktopSnapshot) -> [Row] {
         let joined = Set((desktop.taskMemberships ?? []).map(\.taskId))
-        let listed = (desktop.tasks ?? []).filter { joined.contains($0.id) && $0.status != "archived" }
-        return Set(listed.compactMap(\.ownerUserId)).subtracting([me])
+        return (desktop.tasks ?? []).compactMap { task in
+            guard !joined.contains(task.id), task.status != "archived", let agent = task.agent, agent.archivedAt == nil else { return nil }
+            var row = Row(id: "unjoined:\(task.id)", nodeId: "unjoined:\(task.id)", kind: .space, label: task.name ?? agent.title ?? "",
+                          agentId: agent.id, workspaceId: agent.workspaceId, targetKind: "task")
+            row.targetId = task.id
+            row.activityTime = agent.activityAt
+            return row
+        }
     }
 }

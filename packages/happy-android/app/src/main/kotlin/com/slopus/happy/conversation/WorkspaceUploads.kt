@@ -16,7 +16,14 @@ import java.util.Base64
  */
 class OutgoingFile(val file: File, val name: String, val mimeType: String, val size: Long, val path: String) {
     @Volatile var uploaded: Boolean = false
+    /** Its attachment once uploaded ([ConversationApi.uploadAttachment], [AttachmentUploads]). */
+    @Volatile var attachmentId: String? = null
+    /** Its SHA-256, once hashed: what its attachment upload is named by. */
+    @Volatile var digest: String? = null
 }
+
+/** A file a message carries as an attachment: its id, the name it goes by, and whether it is one of the message's pictures. */
+data class SentAttachment(val id: String, val name: String, val picture: Boolean = false)
 
 /**
  * What a message with attachments sends (iOS's AttachmentRules and
@@ -106,10 +113,16 @@ object WorkspaceUploads {
     fun hex(bytes: ByteArray): String = bytes.joinToString("") { "%02x".format(it) }
 
     /** iOS AttachmentRules.text: the message's words, then the files it carries, by path. */
-    fun text(text: String, files: List<OutgoingFile>): String {
-        if (files.isEmpty()) return text
-        val heading = if (files.size == 1) "Attached file:" else "Attached files:"
-        val paths = files.joinToString("\n") { "- ./${it.path}" }
-        return (if (text.isEmpty()) "" else "$text\n\n") + heading + "\n" + paths
+    fun text(text: String, files: List<OutgoingFile>): String = listed(text, files.map { "./${it.path}" })
+
+    /** The message's words, then [names] as [text] lists paths: how a Happy Cloud message's files read in its bubble. */
+    fun listed(text: String, names: List<String>): String {
+        if (names.isEmpty()) return text
+        val heading = if (names.size == 1) "Attached file:" else "Attached files:"
+        val lines = names.joinToString("\n") { "- $it" }
+        return (if (text.isEmpty()) "" else "$text\n\n") + heading + "\n" + lines
     }
+
+    /** Happy Cloud's largest attachment (`413 attachment_too_large` past it). */
+    const val CLOUD_MAX_BYTES = 25L * 1024 * 1024
 }

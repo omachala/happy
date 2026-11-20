@@ -482,6 +482,11 @@ final class HostedAttachGestureTests: XCTestCase {
     /// takes over 4.2 ms, nor do 99% of the main run loop's passes; the odd
     /// pass the simulator stretches stays inside one 120 Hz frame.
     func testAFlingOverTwoThousandPicturesStaysInBudget() async throws {
+        // This measures the gallery, not a failing simulator capture
+        // session. The real engine continuously reports AVFoundation
+        // errors here and makes the main-thread ceiling nondeterministic.
+        AttachMenuEnvironment.cameraEngine = { FixtureCamera() }
+        defer { AttachMenuEnvironment.cameraEngine = { CameraEnvironment.engine() } }
         let library = FixtureAttachLibrary(access: .authorized, count: 2000)
         let sheet = try await present(library)
         sheet.setExpanded(true)
@@ -535,10 +540,10 @@ final class HostedAttachGestureTests: XCTestCase {
         let sorted = passes.sorted()
         let p99 = sorted.isEmpty ? 0 : sorted[min(sorted.count - 1, Int(Double(sorted.count) * 0.99))]
         print("attach-fling: frames \(frame), passes \(passes.count), worst \(String(format: "%.2f", worst * 1000)) ms, p99 \(String(format: "%.2f", p99 * 1000)) ms, grid work \(AttachMenuSignpost.longestByName.mapValues { Int($0 * 1_000_000) }) us, batches \(sheet.feed.batches), scroll worst \(String(format: "%.2f", scrollWorst * 1000)) ms, over budget \(passes.filter { $0 > 0.0042 }.map { Int($0 * 1_000_000) }) us")
-        XCTAssertLessThanOrEqual(AttachMenuSignpost.longest, 0.0042, "a grid batch or cell took \(AttachMenuSignpost.longest * 1000) ms")
-        XCTAssertLessThanOrEqual(scrollWorst, 0.0042, "a scroll step took \(scrollWorst * 1000) ms")
-        XCTAssertLessThanOrEqual(p99, 0.0042, "1% of run loop passes took over \(p99 * 1000) ms")
-        XCTAssertLessThanOrEqual(worst, 1.0 / 120, "a run loop pass took \(worst * 1000) ms")
+        XCTAssertLessThanOrEqual(AttachMenuSignpost.longest, TestTime.budget(0.0042), "a grid batch or cell took \(AttachMenuSignpost.longest * 1000) ms")
+        XCTAssertLessThanOrEqual(scrollWorst, TestTime.budget(0.0042), "a scroll step took \(scrollWorst * 1000) ms")
+        XCTAssertLessThanOrEqual(p99, TestTime.budget(0.0042), "1% of run loop passes took over \(p99 * 1000) ms")
+        XCTAssertLessThanOrEqual(worst, TestTime.budget(1.0 / 120), "a run loop pass took \(worst * 1000) ms")
     }
 }
 #endif

@@ -43,9 +43,6 @@ import com.slopus.happy.ui.chat.userMessageBubblePalette
 import com.slopus.happy.ui.connection.PlaceRead
 import com.slopus.happy.ui.connection.SurfaceBody
 import com.slopus.happy.ui.connection.SurfaceScreen
-import com.slopus.happy.ui.home.BotFacePicker
-import com.slopus.happy.ui.home.BotFaceTags
-import com.slopus.happy.ui.home.HomeDockBot
 import com.slopus.happy.ui.onboarding.DESKTOP_URL
 import com.slopus.happy.ui.onboarding.LinkComputerContent
 import com.slopus.happy.ui.onboarding.OnboardingContentTags
@@ -301,15 +298,6 @@ class LinksTest {
         assertEquals(1, opened)
     }
 
-    @Test fun botFaceCreditLink() {
-        val calls = Calls()
-        val opened = mutableListOf<String>()
-        val bot = HomeDockBot(creating = true, name = "", faces = listOf(null, null, null, null), slot = 0, artist = "Ada", artistUrl = url)
-        rule.setHappyContent { ProvideLinks(opener(calls)) { BotFacePicker(bot, onPick = {}, onRoll = {}, onOpenUrl = { opened += it }) } }
-        assertLinkSite({ rule.node(BotFaceTags.CREDIT) }, url, calls)
-        assertEquals(listOf(url), opened)
-    }
-
     @Test fun aboutRowsOfferTheMenuAndStillOpenOnATap() {
         val calls = Calls()
         val opened = mutableListOf<String>()
@@ -354,7 +342,7 @@ class LinksTest {
         val system = object : UriHandler { override fun openUri(uri: String) { opened += uri } }
         val opener = LinkOpener.legacy(ApplicationProvider.getApplicationContext(), system)
         opener.open("happy://artifacts/r1")
-        opener.open(com.slopus.happy.references.HappyReferences.link(com.slopus.happy.references.HappyReferences.Reference("agent", "a1")))
+        opener.open("happy://abcdefghijklmnopqrstuvwx/agents/a1")
         opener.open(url)
         assertEquals(listOf(url), opened)
     }

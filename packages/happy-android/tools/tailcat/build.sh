@@ -8,13 +8,9 @@
 #
 # patches/*.patch are applied on top of the commit, in order, and named in
 # the version (-p<count>). They are fixes not yet in tailcat-kotlin itself;
-# drop each one once the pinned commit has it:
-#   0001  tailcat-swift 69a661b's closing-flow limits: application-closed TCP
-#         flows finish FIN/ACK and TIME-WAIT outside the live 1024 / 256
-#         budgets (at most 1024 of them, oldest evicted), so a browser's
-#         short requests can't exhaust the stack.
+# drop each one once the pinned commit has it.
 set -euo pipefail
-COMMIT=06303967c95dc6a05454037cbc931f68e0570c48
+COMMIT=705a8682c5ff954b8758f8fa9d91168e9d4612d1
 here="$(cd "$(dirname "$0")" && pwd)"
 patches=("$here"/patches/*.patch)
 [ -e "${patches[0]}" ] || patches=()

@@ -1,25 +1,52 @@
 package com.slopus.happy.call
 
+import com.slopus.happy.agent.AgentLinkStatus
 import com.slopus.happy.agent.AgentSession
+import com.slopus.happy.conversation.NewTask
 import com.slopus.happy.conversation.Conversation
 import com.slopus.happy.conversation.FailureReason
 import com.slopus.happy.conversation.HeldConversations
 import com.slopus.happy.conversation.RowTypesetter
+import com.slopus.happy.conversation.ConversationState
+import com.slopus.happy.conversation.WorkChoice
+import com.slopus.happy.conversation.WorkKind
 import com.slopus.happy.ui.conversation.makeConversation
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 
-/** What a call needs of the screen: which conversation is on top, and a way to open another. */
+/** A control the call presses as the person would ([CallScreen.press]). */
+sealed interface CallControl {
+    /** The top page's back button. */
+    data object Back : CallControl
+    /** Home's compose. */
+    data object Compose : CallControl
+    /** Home's row that opens [agentId]. */
+    data class Row(val agentId: String) : CallControl
+}
+
+/** What a call needs of the screen: which conversation is on top, a way to open another, and back and home. */
 interface CallScreen {
-    /** The conversation on top of the stack, if one is. */
+    /**
+     * Shows [control] pressed, as a finger would press it, without pressing it (iOS's `VoiceTouch`): scrolled on
+     * screen first if it is a row, lit in the call's colours, pressed; returns when the action is due. Nothing
+     * shows, and it returns at once, where the person can't see that control.
+     */
+    suspend fun press(control: CallControl) {}
+    /** The conversation on top of the stack, if one is: new work's too, once its screen holds it. */
     val focused: String?
     fun open(agentId: String)
+    /** Pops the page on top; false at home, with nothing to go back to. */
+    fun back(): Boolean
+    val atHome: Boolean
+    /** Pops every page over home. */
+    fun home()
 }
 
 /**
@@ -28,9 +55,12 @@ interface CallScreen {
  * followed ones say, the connection's one conversation of each
  * ([AgentSession.conversations]), the same one its screen shows. A send
  * made here shows there at once, goes once and is kept once; the
- * composer's draft is never touched ([Conversation.sendAs]). A call reads
- * what comes, but never marks it read: that is the screen's. Runs on the
- * main thread.
+ * composer's draft is never touched ([Conversation.sendAs]). New work the
+ * call starts is compose's ([NewTask]), off screen, held by the call as that
+ * one conversation, which the call's first message to it makes; a screen that
+ * opens it shares it. A call reads what comes, but never marks it read: that is the
+ * screen's. On a team, who wrote each message is named as the computer names
+ * its members. Runs on the main thread.
  */
 class ConnectionCallTargets(
     private val session: AgentSession,
@@ -45,6 +75,8 @@ class ConnectionCallTargets(
     }
 
     private val held = HashMap<String, Held>()
+    /** New work the call started, off screen, until it is let go with the call. */
+    private val started = HashMap<String, Held>()
     private val watching = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     /** A followed conversation changed. */
     var onChange: ((CallTargetState) -> Unit)? = null
@@ -55,6 +87,9 @@ class ConnectionCallTargets(
         closed = true
         for (hold in held.values) release(hold)
         held.clear()
+        // Let go of, they close once their first message, if any, has gone ([HeldConversations]).
+        for (hold in started.values) release(hold)
+        started.clear()
         watching.coroutineContext[Job]?.cancel()
         onChange = null
     }
@@ -66,38 +101,166 @@ class ConnectionCallTargets(
     override suspend fun directory(): List<CallTarget> = CallTarget.from(session.feed.value)
 
     override suspend fun state(agentId: String): CallTargetState? = onMain {
-        val target = target(agentId) ?: return@onMain null
+        val target = target(agentId) ?: run {
+            // New work the call started or its screen holds: empty until its first message, which it takes.
+            val draft = unmade(agentId) ?: return@onMain null
+            val state = draft.state.value
+            return@onMain named(withModels(CallTargetState.from(state, draftTarget(agentId, state), failureText).copy(writable = state.error == null, fresh = true), state))
+        }
         // Held by the call, its screen or anyone: as it is now.
-        session.conversations.peek(agentId)?.state?.value?.takeIf { it.loaded }?.let { return@onMain CallTargetState.from(it, target, failureText) }
-        // One bounded read: about three seconds for its first page.
+        session.conversations.peek(agentId)?.state?.value?.takeIf { it.loaded }?.let { return@onMain named(withModels(read(it, target), it)) }
+        // One bounded read: about three seconds for its first page, and the computer's models, read beside it,
+        // which a send that changes the model needs; without them, the page alone.
         val hold = make(agentId)
         try {
-            val state = withTimeoutOrNull(READ_MILLIS) { hold.conversation.state.first { it.loaded } } ?: return@onMain null
-            CallTargetState.from(state, target, failureText)
+            val state = withTimeoutOrNull(READ_MILLIS) { hold.conversation.state.first { it.loaded && it.catalog != null } }
+                ?: hold.conversation.state.value.takeIf { it.loaded } ?: return@onMain null
+            named(withModels(read(state, target), state))
         } finally {
             release(hold)
         }
     }
 
+    /**
+     * As opening it would: the connection's one conversation of it held, a failed read asked for again
+     * ([Conversation.catchUp]), until the computer's history is in and the live link is up, or [limitMillis] runs
+     * out. One the call doesn't hear from is let go of after. New work has nothing on the computer to read: as it is.
+     */
+    override suspend fun refreshed(agentId: String, limitMillis: Long): CallTargetState? = onMain {
+        val target = target(agentId) ?: return@onMain state(agentId)
+        val own = held[agentId] ?: make(agentId)
+        try {
+            val conversation = own.conversation
+            val deadline = System.nanoTime() + limitMillis * 1_000_000
+            var asked = System.nanoTime()
+            conversation.catchUp()
+            // Current, and the computer's models beside it if they come in the time.
+            while (!(isCurrent(conversation.state.value) && conversation.state.value.catalog != null) && System.nanoTime() < deadline && !closed) {
+                delay(50)
+                // A read that failed meanwhile is asked for again, once a second at most.
+                if (System.nanoTime() - asked >= 1_000_000_000L) {
+                    asked = System.nanoTime()
+                    conversation.catchUp()
+                }
+            }
+            val state = conversation.state.value.takeIf { it.loaded } ?: return@onMain null
+            named(withModels(read(state, target(agentId) ?: target), state))
+        } finally {
+            if (held[agentId] !== own) release(own)
+        }
+    }
+
+    /** Read from the computer and following the connection's live events. */
+    private fun isCurrent(state: ConversationState): Boolean = state.synced && session.status.value == AgentLinkStatus.Connected
+
+    /** [state] as the call reads it, `fresh` only while it is current. */
+    private fun read(state: ConversationState, target: CallTarget): CallTargetState =
+        CallTargetState.from(state, target, failureText).copy(fresh = isCurrent(state))
+
+    private fun named(state: CallTargetState): CallTargetState = state.named(session.team.names(state.authors), session.catalog.value.userId)
+
+    private fun namedNow(state: CallTargetState): CallTargetState = named(state)
+
+    /** [read] with the model its next message goes with and the models the pickers offer, once the computer's are read. */
+    private fun withModels(read: CallTargetState, state: ConversationState): CallTargetState {
+        val catalog = state.catalog ?: return read
+        val mode = state.mode ?: catalog.defaults
+        return read.copy(models = CallModel.options(catalog), mode = mode?.let { CallMode.of(it, catalog) })
+    }
+
+    /** New work under [agentId] the call started or a screen holds, not made yet. */
+    private fun unmade(agentId: String): Conversation? =
+        (started[agentId]?.conversation ?: session.conversations.peek(agentId))?.takeIf { it.state.value.newWork != null && target(agentId) == null }
+
+    /** New work as the call names it: its name, else home's "New Task" or "New Bot" until its first message names it. */
+    private fun draftTarget(agentId: String, state: ConversationState): CallTarget {
+        val choice = state.newWork?.choice ?: WorkChoice()
+        val kind = if (choice.kind == WorkKind.Bot) CallTarget.Kind.Bot else CallTarget.Kind.Task
+        val name = CallTarget.clean(choice.name)
+        return CallTarget(agentId, name.ifEmpty { if (kind == CallTarget.Kind.Bot) "New Bot" else "New Task" }, kind, CallTarget.Status.Idle)
+    }
+
+    override suspend fun unlisted(agentId: String): CallTarget? = onMain {
+        unmade(agentId)?.let { draftTarget(agentId, it.state.value) }
+    }
+
+    /**
+     * New work as compose starts it ([NewTask]), chosen as the call asks, off screen: what is in front stays. Its
+     * conversation is the connection's one of its agent, held by the call, for [send] to make it with its first
+     * message; on this computer and in no project, as compose makes it from any screen.
+     */
+    override suspend fun draft(kind: CallTarget.Kind, name: String): CallTarget? = onMain {
+        if (closed) return@onMain null
+        val task = NewTask.make()
+        val choice = WorkChoice(if (kind == CallTarget.Kind.Bot) WorkKind.Bot else WorkKind.Task, name)
+        val hold = Held(session.conversations.hold(task.agentId) { session.makeConversation(task.agentId, typesetter, newTask = task, initialChoice = choice) })
+        started[task.agentId] = hold
+        draftTarget(task.agentId, hold.conversation.state.value)
+    }
+
+    override suspend fun discard(agentId: String) = onMain {
+        // Nothing was sent to it: let go of, it closes with nothing made.
+        started.remove(agentId)?.let(::release)
+        Unit
+    }
+
+    override suspend fun back(): CallScreenMove = onMain {
+        val screen = screen() ?: return@onMain CallScreenMove.Refused("The call has ended.")
+        if (closed) return@onMain CallScreenMove.Refused("The call has ended.")
+        if (screen.atHome) return@onMain CallScreenMove.Refused("This is home; there is nothing to go back to.")
+        screen.press(CallControl.Back)
+        if (closed) return@onMain CallScreenMove.Refused("The call has ended.")
+        if (!screen.back()) return@onMain CallScreenMove.Refused("This is home; there is nothing to go back to.")
+        CallScreenMove.Moved(screen.atHome)
+    }
+
+    override suspend fun home(): CallScreenMove = onMain {
+        val screen = screen() ?: return@onMain CallScreenMove.Refused("The call has ended.")
+        if (closed) return@onMain CallScreenMove.Refused("The call has ended.")
+        if (!screen.atHome) screen.press(CallControl.Back)
+        if (closed) return@onMain CallScreenMove.Refused("The call has ended.")
+        screen.home()
+        CallScreenMove.Moved(true)
+    }
+
     override suspend fun focused(): String? = onMain { focusedNow }
 
     override suspend fun open(agentId: String): Boolean = onMain {
-        if (closed || target(agentId) == null) return@onMain false
+        if (closed) return@onMain false
+        // New work the call started: shown as it is being made, the screen sharing its conversation.
+        if (target(agentId) == null && started[agentId] == null) return@onMain false
         val screen = screen() ?: return@onMain false
-        if (screen.focused != agentId) screen.open(agentId)
+        if (screen.focused != agentId) {
+            // Its row, where the person sees home, is pressed as they would.
+            screen.press(CallControl.Row(agentId))
+            if (closed) return@onMain false
+            screen.open(agentId)
+        }
         true
     }
 
-    override suspend fun send(agentId: String, text: String, id: String): CallSendOutcome = onMain {
-        val target = target(agentId)
-        if (closed || target == null) return@onMain CallSendOutcome.Refused("The call has ended.")
+    override suspend fun send(agentId: String, text: String, id: String, change: CallModeChange?): CallSendOutcome = onMain {
+        if (closed) return@onMain CallSendOutcome.Refused("The call has ended.")
+        val target = target(agentId) ?: run {
+            // New work: its first message makes it, in the conversation the call or its screen holds.
+            val draft = unmade(agentId) ?: return@onMain CallSendOutcome.Refused("That new work was closed before anything was sent.")
+            if (draft.has(id)) return@onMain CallSendOutcome.Queued
+            if (change != null) withTimeoutOrNull(READ_MILLIS) { draft.state.first { it.catalog != null } }
+            if (!switch(draft, change)) return@onMain CallSendOutcome.Refused(MODELS_UNREAD)
+            // Compose, where the person sees home, is pressed as they would.
+            if (started[agentId]?.conversation === draft) screen()?.press(CallControl.Compose)
+            if (closed) return@onMain CallSendOutcome.Refused("The call has ended.")
+            return@onMain if (draft.sendAs(id, text)) CallSendOutcome.Queued else CallSendOutcome.Refused("It couldn't be kept on this phone.")
+        }
         // A conversation the call doesn't hear from is read for the send alone, and let go after it.
         val own = held[agentId] ?: make(agentId)
         val conversation = own.conversation
         val outcome = run {
             // Under an ID it already has, it went the first time.
             if (conversation.has(id)) return@run CallSendOutcome.Queued
-            val state = withTimeoutOrNull(READ_MILLIS) { conversation.state.first { it.loaded } }
+            // A change of model waits for the computer's models too, read beside the first page.
+            val state = withTimeoutOrNull(READ_MILLIS) { conversation.state.first { it.loaded && (change == null || it.catalog != null) } }
+                ?: conversation.state.value.takeIf { it.loaded }
                 ?: return@run CallSendOutcome.Refused("That conversation can't be read now.")
             // Checked again here, where the send happens: a question that came
             // while the call's context read the conversation still stops it.
@@ -105,12 +268,28 @@ class ConnectionCallTargets(
             when {
                 !now.writable -> CallSendOutcome.Refused("That conversation can't take a message now.")
                 now.needsInput -> CallSendOutcome.Refused("It's waiting for the person in the app; answer there first.")
-                conversation.sendAs(id, text) -> CallSendOutcome.Queued
-                else -> CallSendOutcome.Refused("It couldn't be kept on this phone.")
+                // Never with the old model when another was asked for.
+                !switch(conversation, change) -> CallSendOutcome.Refused(MODELS_UNREAD)
+                else -> if (conversation.sendAs(id, text)) CallSendOutcome.Queued else CallSendOutcome.Refused("It couldn't be kept on this phone.")
             }
         }
         if (held[agentId] !== own) release(own)
         outcome
+    }
+
+    /**
+     * The composer's model pick, made for the call: [change] on what the next message goes with, as the pickers make
+     * it ([ModeCatalog.pick]), in the conversation its screen shows, so the chips say so at once. False when
+     * it can't be made: the computer's models aren't read.
+     */
+    private fun switch(conversation: Conversation, change: CallModeChange?): Boolean {
+        change ?: return true
+        val state = conversation.state.value
+        val catalog = state.catalog ?: return false
+        val current = state.mode ?: catalog.defaults ?: return false
+        val next = change.applied(current, catalog)
+        if (next != current) conversation.setMode(next)
+        return true
     }
 
     /** The conversations held for the call. */
@@ -124,7 +303,7 @@ class ConnectionCallTargets(
             hold.watch = watching.launch {
                 hold.conversation.state.collect { state ->
                     val target = target(agentId) ?: return@collect
-                    if (state.loaded) onChange?.invoke(CallTargetState.from(state, target, failureText))
+                    if (state.loaded) onChange?.invoke(namedNow(CallTargetState.from(state, target, failureText)))
                 }
             }
         } else {
@@ -145,5 +324,6 @@ class ConnectionCallTargets(
 
     private companion object {
         const val READ_MILLIS = 3_000L
+        const val MODELS_UNREAD = "This computer's models can't be read now, so the model and effort can't change."
     }
 }

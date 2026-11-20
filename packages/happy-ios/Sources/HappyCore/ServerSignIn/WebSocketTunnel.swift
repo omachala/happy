@@ -139,6 +139,9 @@ public final class WebSocketTunnel: BrowserStream, @unchecked Sendable {
                 lock.withLock { ended = true }
                 try? await writer.send(opcode: 0x8, payload: Data([0x03, 0xE8]))
                 if code == 1000 || code == 1005 { return Data() }
+                // Happy Cloud closes an open tunnel so when the agent's compute goes.
+                let reason = String(decoding: frame.payload.dropFirst(2), as: UTF8.self)
+                if code == 1001, reason == "no_compute" || reason == "compute_offline" { throw BrowserError.computeGone }
                 throw WebSocketTunnelError.closed(code: code)
             case 0x9: try await writer.send(opcode: 0xA, payload: frame.payload)
             case 0xA: break
@@ -235,7 +238,7 @@ public final class WebSocketTunnel: BrowserStream, @unchecked Sendable {
         var frame = Data([0x80 | opcode])
         let count = payload.count
         if count <= 125 { frame.append(0x80 | UInt8(count)) }
-        else if count <= 0xFFFF { frame.append(contentsOf: [0x80 | 126, UInt8(count >> 8), UInt8(count & 0xFF)]) }
+        else if count <= 0xFFFF { frame.append(contentsOf: [0x80 | 126, UInt8(count >> 8), UInt8(count & 0xFF)] as [UInt8]) }
         else {
             frame.append(0x80 | 127)
             for shift in stride(from: 56, through: 0, by: -8) { frame.append(UInt8((UInt64(count) >> UInt64(shift)) & 0xFF)) }

@@ -42,12 +42,36 @@ identity, avatar, selection and revocation state. Keychain enumeration recovers
 entries after metadata corruption; Keychain access errors preserve them.
 The legacy registry and RN-compatible shared item keep their current format.
 
+A launch into the foreground connects the open pairing before anything
+else (`StartupLink`, from `application(_:didFinishLaunchingWithOptions:)`):
+it reads `direct-accounts.json`'s open account and its Keychain item off the
+main thread and connects its main Tailcat client, beside the scene, the
+account's restore and home. That account's engine takes the transport
+(`AgentConnections.syncEngine(for:)`), so there is one transport and one main
+client. Until then it is let go when another account opens (a Happy
+account included), the pairing is removed, revoked or signed out, or the app
+leaves the foreground; an engine that asked before it was read makes its own.
+
 `DirectAccounts` connects each stored instance independently on launch and
-foreground. It checks health and refreshes `config.node` every minute, using
-`GET /v0/node/avatar` with `If-None-Match` even when ThumbHash is unchanged.
+foreground. It checks health and refreshes `config.node` then and every ten
+minutes after (in the last minute of the ten, with traffic already moving:
+`RadioWake`), using `GET /v0/node/avatar` with `If-None-Match` even when
+ThumbHash is unchanged. Each check has a transport of its own, closed after
+it, so its Tailcat clients don't sit on the radio between checks; an open
+account's own event stream says whether its computer is there.
 Transient failures reconnect with 1–30 second backoff. Background cancels and
 awaits the loops; 401/403 marks the device revoked and prevents retries across
-relaunch. Disconnecting takes the agent off the list and out of the open
+relaunch. An engine kept through a suspension is resumed before its stream
+asks for anything (`AgentTransport.resumed`): each Tailcat client is woken
+(`TailcatClient.wake`), which checks rather than assumes anything broke. The
+relay is pinged and replaced only if it doesn't answer within two seconds,
+every direct path is probed and one that stopped answering dropped, a dead
+socket rebound, and a session past WireGuard's 180 seconds rekeyed at once
+instead of at the next 30-second idle mark. The clients wake together, and
+the engine waits for them five seconds at most: a client whose relay iOS
+reclaimed wakes only once a new relay connection is up. Every pairing's
+identity check starts at once on coming back, the open account's first, and
+the open engine is resumed before any other is paused. Disconnecting takes the agent off the list and out of the open
 slot at once (`AgentConnections.forget`): its identity loop and engine can
 no longer publish or save anything of it, so nothing waits for them.
 `finishRemoval` then erases the credentials and cached identity, gives the
@@ -76,6 +100,13 @@ SHA-256 matching make a lost acknowledgement safe to retry. Per-file upload
 progress is saved before the message is sent with relative file paths.
 The API prepends the required top-level caption to the optional rich blocks;
 image blocks use `mimeType`, and image-only sends supply a short caption.
+
+A send the computer refuses (a 4xx) shows "Not sent. Tap to retry." and holds
+the conversation's later sends in the outbox behind it. Its retry goes with
+the mode the composer shows now, not the refused one (`Conversation.retry`,
+`SyncEngine.retryMessage(_:mode:)`): a refusal is usually about the mode, a
+provider switched off or a model gone, and the same mode again was refused
+at once, so the tap seemed to do nothing and the later sends waited for good.
 
 An upload can take up to 15 minutes and writes its request body in cancellable
 chunks. Acknowledging the outbox row retains local copies: an older cached

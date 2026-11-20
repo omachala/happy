@@ -1,5 +1,16 @@
 package com.slopus.happy.ui.connection
 
+import kotlinx.coroutines.launch
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.DisposableEffect
+import com.slopus.happy.ui.call.voiceTouch
+import com.slopus.happy.ui.call.rememberVoiceTouchSource
+import com.slopus.happy.ui.call.VoiceTouch
+import com.slopus.happy.call.CallControl
+import androidx.compose.ui.graphics.RectangleShape
+import androidx.compose.foundation.LocalIndication
+import androidx.compose.foundation.indication
 import com.slopus.happy.ui.tablet.MainPanelKey
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Image
@@ -13,6 +24,7 @@ import androidx.compose.ui.layout.LayoutCoordinates
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -99,7 +111,9 @@ object AgentHomeTags {
     const val SPINNER = "agentHome.spinner"
     const val STATUS = "agentHome.status"
     const val EMPTY = "agentHome.empty"
-    const val OFFLINE = "agentHome.offline"
+    const val UNAVAILABLE = "agentHome.unavailable"
+    /** A team server whose session ended: its Sign in alone ([AgentSignedOutHome]). */
+    const val SIGNED_OUT = "agentHome.signedOut"
     const val BANNER = "agentHome.banner"
     const val BANNER_ACTION = "agentHome.bannerAction"
     const val SEARCH = "agentHome.search"
@@ -113,6 +127,8 @@ object AgentHomeTags {
     const val ROW_COUNT = "agentHome.rowCount"
     const val ROW_DIVIDER = HomeCardTags.DIVIDER
     const val ROW_DOT = "agentHome.rowDot"
+    /** The square at a row's end its status mark is centred in ([AgentHomeSpec.statusSlot]). */
+    const val ROW_STATUS = "agentHome.rowStatus"
     const val ROW_CHANGES = "agentHome.rowChanges"
     /** A Surface row's held menu: Leave. */
     const val LEAVE = "agentHome.leave"
@@ -148,8 +164,16 @@ object AgentHomeSpec {
     val tileRadius = 8.dp
     val tileGlyph = 18.dp
     val dot = HomeCardSpec.dot
-    /** Between the title and the dot. */
+    /** Between the title and the line counts after it. */
     val cornerGap = 12.dp
+    /**
+     * The square every status mark stands in, centred, ending at the row's
+     * end: as iOS's (`Metrics.statusSlot`), so its signal, question, clock
+     * and dots share one column. The title and the counts stop [statusGap]
+     * before it; its own room puts a [dot]'s ink 10 off.
+     */
+    val statusSlot = 14.dp
+    val statusGap = 8.dp
     /** The bar's title, the agent's name: smaller than Material's large title. */
     val barTitle = happyTextStyle(fontSize = 18, lineHeight = 24, weight = FontWeight.SemiBold)
     /** The compose button's margin from the window's corner, and the room under the last card to scroll it clear. */
@@ -161,6 +185,14 @@ object AgentHomeSpec {
     val title = happyTextStyle(fontSize = 17, lineHeight = TITLE_LINE)
     /** A time at a row's end, where a place lists one (home's rows show none). */
     val timestamp = happyTextStyle(fontSize = 13, lineHeight = TITLE_LINE).copy(fontFeatureSettings = "tnum")
+
+    const val DETAIL_LINE = 18
+    /** A search result's second line: what it was found by. */
+    val detail = happyTextStyle(fontSize = 13, lineHeight = DETAIL_LINE)
+
+    /** A row with [detail] under its title: 13 + 22 + 18 + 13. */
+    @Composable
+    fun detailRowHeight(): Dp = with(LocalDensity.current) { paddingVertical * 2 + (TITLE_LINE + DETAIL_LINE).sp.toDp() }
 
     /** 13 + a 22 line + 13: 48 at the default font scale, iOS's row. */
     @Composable
@@ -345,6 +377,8 @@ fun LazyListScope.agentHomeRows(
     selected: String? = null,
     onOpenFeed: () -> Unit = {},
     onOpenTodos: () -> Unit = {},
+    onOpenPlugins: () -> Unit = {},
+    onOpenPipelines: () -> Unit = {},
 ) {
     items(items, key = { it.key }, contentType = { (it as? AgentHomeItem.Row)?.row?.let { row -> row::class } ?: it::class }) { item ->
         val motion = if (reduceMotion) Modifier else Modifier.animateItem(
@@ -362,7 +396,7 @@ fun LazyListScope.agentHomeRows(
             // Drawn from what its line shows: a change to nothing on it composes nothing.
             is AgentHomeItem.Row -> AgentHomeCardRow(
                 item.drawn(), motion, selected != null && selected == item.row.panelKey(), AgentHomeTags.row(item.key),
-                onOpen, onOpenArtifacts, onOpenSurface, onLeaveSurface, onHold, onOpenFeed, onOpenTodos,
+                onOpen, onOpenArtifacts, onOpenSurface, onLeaveSurface, onHold, onOpenFeed, onOpenTodos, onOpenPlugins, onOpenPipelines,
             )
         }
     }
@@ -386,6 +420,8 @@ internal fun AgentHomeCardRow(
     onHold: ((AgentFeedRow.Conversation, Rect) -> Unit)? = null,
     onOpenFeed: () -> Unit = {},
     onOpenTodos: () -> Unit = {},
+    onOpenPlugins: () -> Unit = {},
+    onOpenPipelines: () -> Unit = {},
 ) {
     HomeCardRow(
         place = HomeCardPlace(item.first, item.last),
@@ -399,6 +435,8 @@ internal fun AgentHomeCardRow(
             is AgentFeedRow.Conversation -> ConversationRow(row, onOpen, onHold)
             is AgentFeedRow.Folder -> FolderRow(row)
             AgentFeedRow.Artifacts -> PlaceRow(stringResource(R.string.artifacts_title), { TileMark(Ionicon.DocumentTextOutline, RowTile.Purple) }, onOpenArtifacts)
+            AgentFeedRow.Plugins -> PlaceRow(stringResource(R.string.plugins_title), { TileMark(Ionicon.ExtensionPuzzleOutline, RowTile.Orange) }, onOpenPlugins)
+            AgentFeedRow.Pipelines -> PlaceRow(stringResource(R.string.pipelines_title), { TileMark(Ionicon.GitNetworkOutline, RowTile.Teal) }, onOpenPipelines)
             is AgentFeedRow.Feed -> FeedPlaceRow(row.unread, onOpenFeed)
             AgentFeedRow.Todos -> PlaceRow(stringResource(R.string.agent_search_todos), { TileMark(Ionicon.CheckboxOutline, RowTile.Green) }, onOpenTodos)
             is AgentFeedRow.Surface -> SurfaceRow(row, { onOpenSurface(row) }, onLeaveSurface)
@@ -413,34 +451,51 @@ internal fun AgentHomeCardRow(
  * its title as a home row's.
  */
 @Composable
-internal fun AgentSearchEntryRow(title: String, glyph: Ionicon, place: HomeCardPlace, tag: String, onClick: () -> Unit) {
+internal fun AgentSearchEntryRow(
+    title: String,
+    glyph: Ionicon,
+    place: HomeCardPlace,
+    tag: String,
+    detail: String? = null,
+    /** What stands in the mark's lane in place of [glyph]: a found home row's own mark. */
+    mark: (@Composable () -> Unit)? = null,
+    onClick: (() -> Unit)?,
+) {
     val colors = HappyTheme.colors
     HomeCardRow(
         place = place,
-        height = AgentHomeSpec.rowHeight(),
+        height = if (detail == null) AgentHomeSpec.rowHeight() else AgentHomeSpec.detailRowHeight(),
         dividerStart = AgentHomeSpec.markInset + AgentHomeSpec.mark + AgentHomeSpec.markGap,
         tag = tag,
     ) {
         Row(
             modifier = Modifier
                 .fillMaxSize()
-                .clickable(role = Role.Button, onClick = onClick)
+                .then(if (onClick != null) Modifier.clickable(role = Role.Button, onClick = onClick) else Modifier)
                 .padding(start = AgentHomeSpec.markInset, end = AgentHomeSpec.paddingEnd),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Box(modifier = Modifier.size(AgentHomeSpec.mark), contentAlignment = Alignment.Center) { Icon(glyph, 22.dp, colors.text) }
-            Text(
-                title,
-                style = AgentHomeSpec.title,
-                color = colors.text,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier
-                    .padding(start = AgentHomeSpec.markGap)
-                    .weight(1f)
-                    .wrapContentHeight(unbounded = true)
-                    .agentTitleBaseline(),
-            )
+            Box(modifier = Modifier.size(AgentHomeSpec.mark), contentAlignment = Alignment.Center) { if (mark != null) mark() else Icon(glyph, 22.dp, colors.text) }
+            if (detail == null) {
+                Text(
+                    title,
+                    style = AgentHomeSpec.title,
+                    color = colors.text,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier
+                        .padding(start = AgentHomeSpec.markGap)
+                        .weight(1f)
+                        .wrapContentHeight(unbounded = true)
+                        .agentTitleBaseline(),
+                )
+            } else {
+                // What the daemon found it by, a line under its name.
+                Column(Modifier.padding(start = AgentHomeSpec.markGap).weight(1f)) {
+                    Text(title, style = AgentHomeSpec.title, color = colors.text, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text(detail, style = AgentHomeSpec.detail, color = colors.textSecondary, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+            }
         }
     }
 }
@@ -450,6 +505,8 @@ internal fun AgentFeedRow.panelKey(): String? = when (val row = this) {
     is AgentFeedRow.Conversation -> MainPanelKey.conversation(row.agentId)
     is AgentFeedRow.Surface -> MainPanelKey.surface(row.id)
     AgentFeedRow.Artifacts -> MainPanelKey.ARTIFACTS
+    AgentFeedRow.Plugins -> MainPanelKey.PLUGINS
+    AgentFeedRow.Pipelines -> MainPanelKey.PIPELINES
     is AgentFeedRow.Feed -> MainPanelKey.FEED
     AgentFeedRow.Todos -> MainPanelKey.TODOS
     else -> null
@@ -460,7 +517,7 @@ private fun titleStart(row: AgentFeedRow): Dp {
     val (depth, marked) = when (row) {
         is AgentFeedRow.Conversation -> row.depth to AgentHomeSpec.hasMark(row.kind)
         is AgentFeedRow.Folder -> row.depth to (row.mark != null)
-        AgentFeedRow.Artifacts, is AgentFeedRow.Feed, AgentFeedRow.Todos, is AgentFeedRow.Surface -> 0 to true
+        AgentFeedRow.Artifacts, AgentFeedRow.Plugins, AgentFeedRow.Pipelines, is AgentFeedRow.Feed, AgentFeedRow.Todos, is AgentFeedRow.Surface -> 0 to true
         is AgentFeedRow.Section -> return 0.dp
     }
     return AgentHomeSpec.markInset + AgentHomeSpec.indent * depth + if (marked) AgentHomeSpec.mark + AgentHomeSpec.markGap else 0.dp
@@ -468,8 +525,9 @@ private fun titleStart(row: AgentFeedRow): Dp {
 
 /**
  * One conversation, on one line: a bot's or task's 30 mark, the title 17/22
- * (desktop's sheen while it runs, [AgentFeedRow.Conversation.running]),
- * and a 10 dot 12 after it while it waits or is unread. No time. The whole
+ * (desktop's sheen while it runs, [AgentFeedRow.Conversation.running];
+ * cut with its last 14 fading where it runs out of room, [com.slopus.happy.ui.components.TitleFade]),
+ * and a 10 dot in its status slot while it waits or is unread. No time. The whole
  * row opens it.
  */
 @Composable
@@ -482,10 +540,14 @@ private fun ConversationRow(row: AgentFeedRow.Conversation, onOpen: (String) -> 
     val marked = AgentHomeSpec.hasMark(row.kind)
     val title = row.title ?: stringResource(R.string.session_new_chat)
     val working = stringResource(R.string.agent_home_working)
+    // The call's press of this row ([VoiceTouch]): its light in the card's shape, which clips it, and the ripple.
+    val voice = rememberVoiceTouchSource()
     Row(
         modifier = Modifier
             .fillMaxSize()
             .onPlaced { placed[0] = it }
+            .voiceTouch(CallControl.Row(row.agentId), RectangleShape, voice)
+            .indication(voice, LocalIndication.current)
             .combinedClickable(
                 role = Role.Button,
                 onLongClick = onHold?.let { hold ->
@@ -516,11 +578,12 @@ private fun ConversationRow(row: AgentFeedRow.Conversation, onOpen: (String) -> 
                 baseColor = colors.text,
                 highlightColor = ShimmerSpec.sheen(colors.text, colors.surfaceHigh),
                 shimmering = row.running,
+                fade = true,
                 modifier = Modifier.wrapContentHeight(unbounded = true).agentTitleBaseline(),
             )
         }
         WorkspaceCounts(row.lineChanges)
-        Corner(row.blocked, row.unread, row.lineChanges?.visible == true)
+        Corner(row.blocked, row.unread)
     }
 }
 
@@ -532,7 +595,7 @@ private fun ConversationRow(row: AgentFeedRow.Conversation, onOpen: (String) -> 
 @Composable
 private fun SurfaceRow(row: AgentFeedRow.Surface, onOpen: () -> Unit, onLeave: ((AgentFeedRow.Surface) -> Unit)?) {
     var menu by remember { mutableStateOf(false) }
-    val (glyph, tile) = RowTile.surface(row.type)
+    val (glyph, tile) = RowTile.surface(row.type).let { if (row.locked) Ionicon.LockClosedOutline to it.second else it }
     Box(Modifier.fillMaxSize()) {
         PlaceRow(row.name, { TileMark(glyph, tile) }, onOpen, onLongClick = onLeave?.let { { menu = true } })
         if (onLeave != null) {
@@ -562,7 +625,7 @@ private fun FeedPlaceRow(unread: Int, onClick: () -> Unit) {
     PlaceRow(stringResource(R.string.feed_title), { TileMark(Octicon.Pulse, RowTile.Red) }, onClick, count = count, countLabel = label)
 }
 
-/** Artifacts, the Feed, or a Surface: its [mark] (a glyph on its tile), and its name; bold with a [count] after it while something in it is unread. */
+/** Artifacts, the Feed, or a Surface: its [mark] (a glyph on its tile), and its name, its end fading where it runs out of room ([com.slopus.happy.ui.components.TitleFade]); bold with a [count] after it while something in it is unread. */
 @Composable
 private fun PlaceRow(name: String, mark: @Composable () -> Unit, onClick: () -> Unit, onLongClick: (() -> Unit)? = null, count: Int? = null, countLabel: String? = null) {
     Row(
@@ -573,12 +636,13 @@ private fun PlaceRow(name: String, mark: @Composable () -> Unit, onClick: () -> 
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Box(modifier = Modifier.size(AgentHomeSpec.mark).testTag(AgentHomeTags.ROW_MARK)) { mark() }
-        Text(
+        ShimmerText(
             name,
             style = if (count != null) AgentHomeSpec.title.copy(fontWeight = FontWeight.SemiBold) else AgentHomeSpec.title,
-            color = HappyTheme.colors.text,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
+            baseColor = HappyTheme.colors.text,
+            highlightColor = HappyTheme.colors.text,
+            shimmering = false,
+            fade = true,
             modifier = Modifier
                 .padding(start = AgentHomeSpec.markGap)
                 .weight(1f)
@@ -602,8 +666,9 @@ private fun PlaceRow(name: String, mark: @Composable () -> Unit, onClick: () -> 
 }
 
 /**
- * A project or a worktree: its name, shimmering while work runs inside it,
- * and a project's mark before it ([FolderMarkView]). It opens nothing.
+ * A project or a worktree: its name, shimmering while work runs inside it
+ * and fading at its end where it runs out of room ([com.slopus.happy.ui.components.TitleFade]), and a
+ * project's mark before it ([FolderMarkView]). It opens nothing.
  */
 @Composable
 private fun FolderRow(row: AgentFeedRow.Folder) {
@@ -631,6 +696,7 @@ private fun FolderRow(row: AgentFeedRow.Folder) {
                 baseColor = colors.text,
                 highlightColor = ShimmerSpec.sheen(colors.text, colors.surfaceHigh),
                 shimmering = row.running,
+                fade = true,
                 modifier = Modifier.wrapContentHeight(unbounded = true).agentTitleBaseline(),
             )
         }
@@ -653,28 +719,36 @@ private fun WorkspaceCounts(changes: WorkspaceLineChanges?) {
             if (changes.deletions > 0) "−${compactCount(changes.deletions)}" else null,
         ),
         color = HappyTheme.colors.textSecondary,
-        modifier = Modifier.padding(start = 8.dp).testTag(AgentHomeTags.ROW_CHANGES)
+        modifier = Modifier.padding(start = AgentHomeSpec.cornerGap).testTag(AgentHomeTags.ROW_CHANGES)
             .clearAndSetSemantics { contentDescription = exact },
     )
 }
 
 /**
  * A dot at the row's end while it needs something: orange waiting, blue
- * unread; nothing otherwise (home shows no times). The title gives way to
- * it, on the same line, so the row's height never changes.
+ * unread; nothing otherwise (home shows no times). It is centred in the
+ * row's [AgentHomeSpec.statusSlot], so the dots stand in one column. The
+ * title gives way to it, on the same line, so the row's height never changes.
  */
 @Composable
-private fun Corner(blocked: Boolean, unread: Boolean, hasCounts: Boolean = false) {
+private fun Corner(blocked: Boolean, unread: Boolean) {
     if (!blocked && !unread) return
     val label = stringResource(if (blocked) R.string.status_input_required else R.string.status_unread)
-    StatusDot(
-        color = if (blocked) BlockedDotColor else UnreadDotColor,
-        size = AgentHomeSpec.dot,
+    Box(
         modifier = Modifier
-            .padding(start = if (hasCounts) 6.dp else AgentHomeSpec.cornerGap)
-            .semantics { contentDescription = label }
-            .testTag(AgentHomeTags.ROW_DOT),
-    )
+            .padding(start = AgentHomeSpec.statusGap)
+            .size(AgentHomeSpec.statusSlot)
+            .testTag(AgentHomeTags.ROW_STATUS),
+        contentAlignment = Alignment.Center,
+    ) {
+        StatusDot(
+            color = if (blocked) BlockedDotColor else UnreadDotColor,
+            size = AgentHomeSpec.dot,
+            modifier = Modifier
+                .semantics { contentDescription = label }
+                .testTag(AgentHomeTags.ROW_DOT),
+        )
+    }
 }
 
 /** The list itself; [header] rows (a banner) go above the conversations. */
@@ -694,15 +768,53 @@ fun AgentHomeList(
     selected: String? = null,
     onOpenFeed: () -> Unit = {},
     onOpenTodos: () -> Unit = {},
+    onOpenPlugins: () -> Unit = {},
+    onOpenPipelines: () -> Unit = {},
 ) {
     val reduceMotion = rememberReduceMotion()
+    // The call brings a conversation's row on screen here before it presses it ([VoiceTouch.rows]).
+    val currentItems by rememberUpdatedState(items)
+    // Scrolled on the list's own frame clock, whoever asks.
+    val scrolling = rememberCoroutineScope()
+    DisposableEffect(state) {
+        val reveal: suspend (String, Boolean) -> Unit = { agentId, glides ->
+            scrolling.launch { revealRow(state, currentItems, agentId, glides) }.join()
+        }
+        VoiceTouch.rows = reveal
+        onDispose { if (VoiceTouch.rows === reveal) VoiceTouch.rows = null }
+    }
     LazyColumn(
         state = state,
         modifier = modifier.fillMaxSize().background(HappyTheme.colors.surface).testTag(AgentHomeTags.LIST),
         contentPadding = contentPadding,
     ) {
         header?.invoke(this)
-        agentHomeRows(items, reduceMotion, onOpen, onOpenArtifacts, onOpenSurface, onLeaveSurface, onHold, selected, onOpenFeed, onOpenTodos)
+        agentHomeRows(items, reduceMotion, onOpen, onOpenArtifacts, onOpenSurface, onLeaveSurface, onHold, selected, onOpenFeed, onOpenTodos, onOpenPlugins, onOpenPipelines)
         item(key = "bottom", contentType = "bottom") { bottom() }
     }
 }
+
+/**
+ * Scrolls [agentId]'s row of [items] to the middle of [state]'s list unless it is wholly on screen already, clear
+ * of the glass bar and the compose button: gliding as a finger's fling would ([LazyListState.animateScrollToItem]),
+ * at once when [glides] is false. Returns once the list stands still.
+ */
+private suspend fun revealRow(state: LazyListState, items: List<AgentHomeItem>, agentId: String, glides: Boolean) {
+    val at = items.indexOfFirst { item -> ((item as? AgentHomeItem.Row)?.row as? AgentFeedRow.Conversation)?.agentId == agentId }
+    if (at < 0) return
+    val info = state.layoutInfo
+    // The list's own rows come after its header (the search field, a banner) and before its bottom spacer.
+    val index = info.totalItemsCount - 1 - items.size + at
+    if (index < 0) return
+    // Item offsets start under the bar's padding; the compose button stands over the foot.
+    val clearBottom = info.viewportEndOffset - bottomClearancePx(info.viewportSize.height)
+    val shown = info.visibleItemsInfo.firstOrNull { it.index == index }
+    if (shown != null && shown.offset >= 0 && shown.offset + shown.size <= clearBottom) return
+    val size = shown?.size ?: info.visibleItemsInfo.firstOrNull { it.index > 0 }?.size ?: 0
+    val middle = clearBottom / 2 - size / 2
+    // A negative offset leaves the row that far down from the top.
+    if (glides) state.animateScrollToItem(index, -middle) else state.scrollToItem(index, -middle)
+}
+
+/** Room the compose button takes at the foot of the list's viewport: a rough eighth, at least. */
+private fun bottomClearancePx(viewport: Int): Int = viewport / 8

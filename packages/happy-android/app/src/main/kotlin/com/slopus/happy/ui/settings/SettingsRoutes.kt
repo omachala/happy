@@ -32,6 +32,7 @@ import androidx.navigation.toRoute
 import com.slopus.happy.ui.components.ProvideRowReveal
 import com.slopus.happy.ui.voice.voicePageEntries
 import com.slopus.happy.AppGraph
+import com.slopus.happy.analytics.setAnalyticsOptOut
 import com.slopus.happy.BuildConfig
 import com.slopus.happy.R
 import com.slopus.happy.auth.AuthState
@@ -51,6 +52,7 @@ import com.slopus.happy.ui.AccountSwitcher
 import com.slopus.happy.ui.ProvideSettingsDissolve
 import com.slopus.happy.ui.connection.AgentConnectionSettings
 import com.slopus.happy.ui.connection.LegacyDataStorageRoute
+import com.slopus.happy.ui.connection.PrivacyRoute
 import com.slopus.happy.ui.connection.SupportRoute
 import com.slopus.happy.ui.connection.dataStorageRoutes
 import androidx.compose.foundation.ScrollState
@@ -79,7 +81,6 @@ import com.slopus.happy.ui.voice.VoiceSettingsRoute
 @Serializable data object AppearanceRoute
 @Serializable data class LanguageRoute(val reveal: String? = null)
 @Serializable data object AgentsRoute
-@Serializable data object ConnectClaudeRoute
 @Serializable data object ChangelogRoute
 
 /** Settings' screens; [SettingsRoute] itself is HappyApp's ([AccountSettings]). */
@@ -90,7 +91,6 @@ fun NavGraphBuilder.settingsRoutes(graph: AppGraph, nav: NavHostController) {
     page<BackupRoute> { entry -> ProvideRowReveal(entry.toRoute<BackupRoute>().reveal) { Backup(graph, nav) } }
     page<AppearanceRoute> { Appearance(graph, nav) }
     page<AgentsRoute> { Agents(graph, nav) }
-    page<ConnectClaudeRoute> { ConnectClaudeScreen(onBack = { nav.popBackStack() }) }
     page<ChangelogRoute> {
         val resources = LocalResources.current
         val changelog = remember(resources) { Changelog.bundled(resources) }
@@ -345,6 +345,7 @@ private fun SettingsIndex(graph: AppGraph, nav: NavHostController, scroll: Scrol
                 onVoice = { nav.navigate(VoiceSettingsRoute()) },
                 onAgents = { nav.navigate(AgentsRoute) },
                 onDataStorage = { nav.navigate(LegacyDataStorageRoute) },
+                onPrivacy = { nav.navigate(PrivacyRoute) },
                 onScanTerminal = connect::scan,
                 onEnterTerminal = { enteringUrl = true },
                 onSignOut = { if (switcher != null) switcher.removingFromSettings { graph.logout().join() } else graph.logout() },
@@ -447,7 +448,11 @@ private fun Account(graph: AppGraph, nav: NavHostController) {
         anonId = account.encryption.anonId,
         publicId = account.publicId,
         analyticsOptOut = settings.analyticsOptOut,
-        onAnalyticsOptOutChange = { optOut -> graph.settings.change { it.copy(analyticsOptOut = optOut) } },
+        onAnalyticsOptOutChange = { optOut ->
+            scope.setAnalyticsOptOut(graph.settings, optOut) { off ->
+                showError(resources.getString(if (off) R.string.settings_analytics_not_saved else R.string.settings_analytics_not_turned_on))
+            }
+        },
         onBack = { nav.popBackStack() },
         displayName = profile.displayName,
         username = profile.github?.login,

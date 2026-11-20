@@ -4,10 +4,14 @@ import android.text.format.DateFormat
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.layout
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.slopus.happy.artifacts.ArtifactCover
 import com.slopus.happy.feed.FeedCovers
@@ -18,11 +22,8 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.Immutable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -56,7 +57,11 @@ import com.slopus.happy.ui.components.HappyMenuItem
 import com.slopus.happy.ui.components.HomeCardPlace
 import com.slopus.happy.ui.components.Icon
 import com.slopus.happy.ui.components.Ionicon
+import com.slopus.happy.ui.components.GlassSpec
+import com.slopus.happy.ui.components.LocalBarInset
 import com.slopus.happy.ui.components.MenuSpec
+import com.slopus.happy.ui.components.StateAnimation
+import com.slopus.happy.ui.components.StateArt
 import com.slopus.happy.ui.connection.AgentSearchField
 import com.slopus.happy.ui.connection.AgentSearchTags
 import com.slopus.happy.ui.connection.AgentTopBar
@@ -83,6 +88,8 @@ object ArtifactsTags {
     const val PREVIEW = "artifacts.preview"
     const val MENU_OPEN = "artifacts.menu.open"
     const val MENU_COPY = "artifacts.menu.copy"
+    const val MENU_LINK = "artifacts.menu.link"
+    const val NOTE = "artifacts.note"
 }
 
 object ArtifactListSpec {
@@ -189,6 +196,7 @@ fun rememberArtifactListWords(): ArtifactListWords {
         "image_series" to stringResource(R.string.artifact_kind_image_series),
         "video" to stringResource(R.string.artifact_kind_video),
         "document" to stringResource(R.string.artifact_kind_document),
+        "gen_ui" to stringResource(R.string.artifact_kind_gen_ui),
     )
     val live = stringResource(R.string.artifact_kind_live)
     val unknown = stringResource(R.string.artifact_kind_unknown)
@@ -205,7 +213,7 @@ fun rememberArtifactListWords(): ArtifactListWords {
     }
 }
 
-/** One slot of the list: a date's heading over its card, an artifact's row, or a note in place of them. */
+/** One slot of the list: a date's heading over its card, an artifact's row, or a note in place of them (under its [Note.art], if any). */
 @Immutable
 sealed interface ArtifactListItem {
     val key: String
@@ -218,7 +226,7 @@ sealed interface ArtifactListItem {
         override val key: String get() = artifact.id
     }
 
-    data class Note(val text: String) : ArtifactListItem {
+    data class Note(val text: String, val art: StateArt? = null) : ArtifactListItem {
         override val key: String get() = "note"
     }
 }
@@ -228,22 +236,20 @@ sealed interface ArtifactListItem {
  * match [query], grouped by when each last changed under a heading per
  * bucket, newest first; or one note in their place: this Happy Agent keeps
  * none, nothing matches, it couldn't be read, it is being read, or it is
- * empty.
+ * empty. Empty, the note sits under the yellow ticket ([StateArt.Tickets]).
  */
 fun artifactListItems(state: ArtifactCatalogFeed.State, query: String, words: ArtifactListWords, now: Long): List<ArtifactListItem> {
     val shown = ArtifactCatalog.matching(query, state.items) { words.kind(it.type, it.live) }
     if (shown.isEmpty()) {
         val notes = words.notes
         return listOf(
-            ArtifactListItem.Note(
-                when {
-                    state.unsupported -> notes.unsupported
-                    state.items.isNotEmpty() -> notes.noMatches
-                    state.error != null -> notes.unavailable
-                    !state.loaded -> notes.loading
-                    else -> notes.empty
-                },
-            ),
+            when {
+                state.unsupported -> ArtifactListItem.Note(notes.unsupported)
+                state.items.isNotEmpty() -> ArtifactListItem.Note(notes.noMatches)
+                state.error != null -> ArtifactListItem.Note(notes.unavailable)
+                !state.loaded -> ArtifactListItem.Note(notes.loading)
+                else -> ArtifactListItem.Note(notes.empty, StateArt.Tickets)
+            },
         )
     }
     val items = ArrayList<ArtifactListItem>(shown.size + 8)
@@ -264,6 +270,7 @@ internal fun artifactTile(artifact: ArtifactSummary): Pair<Ionicon, RowTile> = w
     artifact.type == "image" -> Ionicon.ImageOutline to RowTile.Orange
     artifact.type == "image_series" -> Ionicon.AlbumsOutline to RowTile.Orange
     artifact.type == "video" -> Ionicon.FilmOutline to RowTile.Red
+    artifact.type == "gen_ui" -> Ionicon.CodeWorkingOutline to RowTile.Teal
     else -> Ionicon.DocumentOutline to RowTile.Indigo
 }
 
@@ -275,26 +282,31 @@ internal fun artifactTile(artifact: ArtifactSummary): Pair<Ionicon, RowTile> = w
  * row is its 16:9 slot ([ArtifactSlot]: the cover, or the kind's glyph
  * or an older daemon's picture itself, [ArtifactThumbnail]), the
  * title on up to two lines, the kind under it and when it changed beside
- * it. A tap opens the artifact on its latest version; a hold offers Open
- * and Copy Title. The bar's search filters by every word of the title or
- * kind; a pull past the top reads the catalog again.
+ * it. A tap opens the artifact on its latest version; a hold offers Open,
+ * Copy Title and, where the server has an instance id, Copy link to artifact. The bar's search filters by every word of the title or
+ * kind. There is no pull to refresh: the catalog keeps itself current
+ * ([ArtifactCatalogFeed]). A note in place of the rows stands in the
+ * middle of the screen rather than of the room under the bar: centred in
+ * the list's room inside its padding, then lifted by half the bar's height
+ * (status bar included), never above the room's top. With none yet, it
+ * sits under the yellow ticket's 128 box, 24 above its text.
  *
  * The slots are derived off the main thread whenever the catalog, the
  * search or the day changes; the first frame derives them in place.
  */
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ArtifactsScreen(
     state: ArtifactCatalogFeed.State,
     onBack: () -> Unit,
     onOpen: (ArtifactSummary) -> Unit,
-    onRefresh: () -> Unit,
     thumbnails: ArtifactThumbnails? = null,
     clock: () -> Long = System::currentTimeMillis,
     /** Reads the rows' covers: the Feed's, so both keep one copy. */
     covers: FeedCovers? = null,
     /** The connection's link, debounced: its status stands in the title while it is on its way (iOS `watchHeader`). */
     link: LinkState = LinkState.Online,
+    /** An artifact's share link, for its held row's Copy link to artifact; null where the server has no instance id, and then it isn't offered. */
+    shareLink: (ArtifactSummary) -> String? = { null },
 ) {
     val words = rememberArtifactListWords()
     var searching by rememberSaveable { mutableStateOf(false) }
@@ -316,8 +328,6 @@ fun ArtifactsScreen(
     val items by produceState(seed, state, query, words, day) {
         value = withContext(Dispatchers.Default) { artifactListItems(state, query, words, clock()) }
     }
-    var pulled by remember { mutableStateOf(false) }
-    LaunchedEffect(state.refreshing) { if (!state.refreshing) pulled = false }
     val searchLabel = stringResource(R.string.artifact_list_search)
     val locale = LocalConfiguration.current.locales[0]
     PlaceScaffold(
@@ -341,33 +351,46 @@ fun ArtifactsScreen(
             }
         },
     ) {
-        PullToRefreshBox(
-            isRefreshing = pulled && state.refreshing,
-            onRefresh = {
-                pulled = true
-                onRefresh()
-            },
-            modifier = Modifier.fillMaxSize(),
+        val bottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
+        // The bar's own height; read, not claimed, so the list stays held below the bar.
+        val bar = LocalBarInset.current?.let { it.top - GlassSpec.feather } ?: 0.dp
+        LazyColumn(
+            Modifier.fillMaxSize(),
+            contentPadding = PaddingValues(top = CardListSpec.contentTop, bottom = CardListSpec.contentBottom + bottom),
         ) {
-            val bottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
-            LazyColumn(
-                Modifier.fillMaxSize(),
-                contentPadding = PaddingValues(top = CardListSpec.contentTop, bottom = CardListSpec.contentBottom + bottom),
-            ) {
-                items(items, key = { it.key }, contentType = { it::class }) { item ->
-                    when (item) {
-                        is ArtifactListItem.Heading -> CardHeading(item.text, item.afterCard)
-                        is ArtifactListItem.Note -> CardNote(item.text)
-                        is ArtifactListItem.Row -> ArtifactRow(item, thumbnails, covers, onOpen)
-                    }
+            items(items, key = { it.key }, contentType = { it::class }) { item ->
+                when (item) {
+                    is ArtifactListItem.Heading -> CardHeading(item.text, item.afterCard)
+                    is ArtifactListItem.Note -> ArtifactNote(item, bar, Modifier.fillParentMaxSize())
+                    is ArtifactListItem.Row -> ArtifactRow(item, thumbnails, covers, onOpen, shareLink)
                 }
             }
         }
     }
 }
 
+/** [item] in its [modifier]'s room, centred and then lifted by half of [bar], never above the room's top. */
 @Composable
-private fun ArtifactRow(item: ArtifactListItem.Row, thumbnails: ArtifactThumbnails?, covers: FeedCovers?, onOpen: (ArtifactSummary) -> Unit) {
+private fun ArtifactNote(item: ArtifactListItem.Note, bar: Dp, modifier: Modifier) {
+    Column(
+        modifier
+            .testTag(ArtifactsTags.NOTE)
+            .layout { measurable, constraints ->
+                val placeable = measurable.measure(constraints.copy(minHeight = 0))
+                val height = if (constraints.hasBoundedHeight) constraints.maxHeight else placeable.height
+                val slack = (height - placeable.height).coerceAtLeast(0)
+                layout(placeable.width, height) { placeable.place(0, (slack - bar.roundToPx()).coerceAtLeast(0) / 2) }
+            }
+            .fillMaxWidth(),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        if (item.art != null) StateAnimation(item.art)
+        CardNote(item.text)
+    }
+}
+
+@Composable
+private fun ArtifactRow(item: ArtifactListItem.Row, thumbnails: ArtifactThumbnails?, covers: FeedCovers?, onOpen: (ArtifactSummary) -> Unit, shareLink: (ArtifactSummary) -> String?) {
     val context = LocalContext.current
     val haptics = LocalHapticFeedback.current
     val colors = HappyTheme.colors
@@ -405,6 +428,17 @@ private fun ArtifactRow(item: ArtifactListItem.Row, thumbnails: ArtifactThumbnai
                     leading = { Icon(Ionicon.CopyOutline, MenuSpec.icon, colors.text) },
                     modifier = Modifier.testTag(ArtifactsTags.MENU_COPY),
                 )
+                shareLink(item.artifact)?.let { link ->
+                    HappyMenuItem(
+                        stringResource(R.string.share_link_copy_artifact),
+                        onClick = {
+                            menu = false
+                            if (copyToClipboard(context, link)) haptics.performHapticFeedback(HapticFeedbackType.Confirm)
+                        },
+                        leading = { Icon(Ionicon.LinkOutline, MenuSpec.icon, colors.text) },
+                        modifier = Modifier.testTag(ArtifactsTags.MENU_LINK),
+                    )
+                }
             }
         },
     )

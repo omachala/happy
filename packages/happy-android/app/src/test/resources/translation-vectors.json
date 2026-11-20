@@ -1,4 +1,4 @@
-{"sources":{"en.json":"9a1bb7abb6ae2dbfe23ca8bbf19916eb16a9b9ddee5769e3108b19b54bb1925b","ru.json":"081c0282105373d74136240f5146af44eff1550e3244151330398c5bc492b0a2","pl.json":"b813abfad46e232d109fa960d82c251ef0ec92818ee52619dd0ff12902f457f6","es.json":"62f432006243110d6015d1982f47b05514f6c552e0c359758580fd869a97a98c","it.json":"5844b038428af8356c8a205ded1afb5eca9b6e42542ae17e684266b58bc5e1aa","pt.json":"cecc90d2c55e828ee2143286c583a3a9c265119154a6a71ea8fc83c11736d67e","ca.json":"32305a9d1f7ce21023963d82597d69aaa301291708be439ca81345ebd7de27a4","zh-Hans.json":"0b9d90832018dbf7209aa68f1a45aebcef3b58570693ca615588a7b462401620","zh-Hant.json":"361f22f3f60df594ef614037d53bf4fbc42bc10575c0a9f1a609be2467282f79","ja.json":"cc3a55ec014b15cb8074377ef4007186ff2b090e1c9fe5fdf665d32c46aa8e0f","parameters.json":"a85bd4f79d210fda0562ce933f6f4d1a12d3c34d5a89427ab838dd1719ade10c"},
+{"sources":{"en.json":"c13160719f63b32967b8778a6ce963f57a7229cb2e439c05a13744f87d5b557f","ru.json":"7ad103b5ac41ad4abbd6c38a62219e9113f3efcc193b8625d193c717d4bba563","pl.json":"f7e46dc37636c5d8dbb9296392ff4cd02b550692de52611f5cdc02e9c01a3a72","es.json":"302ca4c487eacf8d932541f416f996c0ecee280b31dc83ab44e2e58e274141c7","it.json":"906c4e354048ef4b78374a2a9a472c0c7c458c9b887a3d371ae048e000554e27","pt.json":"0090a6d841ca1e8e1f9b3385bdb7f7dc800ac4cc5d4b88adbdd59bdb11bb1ae1","ca.json":"17e2a8244940d2bb92508a71f52011706e2d5f747ec11a04152ffc14e0847b12","zh-Hans.json":"9fb6222558b2b2d97b1b17e0bce88016a7bf2d79dfc1cfb9fa9d924c9104d7b8","zh-Hant.json":"7071a5c04dfbfb15df7d2699b647dd4cbc637254642a11baef61ed2f365b7c8e","ja.json":"30472885bdfc5acf5794a92aae7a930311628d9b79409f72806d54b0336d8353","parameters.json":"a85bd4f79d210fda0562ce933f6f4d1a12d3c34d5a89427ab838dd1719ade10c"},
 "keys":{
 "voiceStatusBar.tapToEnd":{"name":"voice_status_bar_tap_to_end","kind":"string","value":"tap to end"},
 "voiceStatusBar.connecting":{"name":"voice_status_bar_connecting","kind":"string","value":"Connecting…"},
@@ -578,7 +578,7 @@
 "settingsVoice.promptGuideTitle":{"name":"settings_voice_prompt_guide_title","kind":"string","value":"Agent Prompt Guide"},
 "settingsVoice.promptGuideDescription":{"name":"settings_voice_prompt_guide_description","kind":"string","value":"Your ElevenLabs agent needs:\n\n• Tool: sendMessageToSession — parameters: sessionId (string), message (string). Sends a message to the specified coding session.\n• Tool: processPermissionRequest — parameters: requestId (string), decision (\"allow\" or \"deny\"). Approves or denies a pending tool permission.\n• Dynamic variable: {{initialConversationContext}} — receives session history and context on start.\n\nThe agent acts as a voice bridge between the user and coding agents. It should be concise, only respond when addressed, and report when a coding agent finishes work."},
 "settingsVoice.usageTitle":{"name":"settings_voice_usage_title","kind":"string","value":"Usage (Last 30 Days)"},
-"settingsVoice.usageFooter":{"name":"settings_voice_usage_footer","kind":"string","value":"Voice time used in the last 30 days. Free tier: 20 min. Subscribed: 5 hours. Max 100 conversations per month."},
+"settingsVoice.usageFooter":{"name":"settings_voice_usage_footer","kind":"string","value":"Voice time used in the last 30 days. Free tier: 20 min. Subscribed: 2 hours. Max 100 conversations per month."},
 "settingsVoice.usageLabel":{"name":"settings_voice_usage_label","kind":"string","value":"Voice Time"},
 "settingsVoice.conversationsLabel":{"name":"settings_voice_conversations_label","kind":"string","value":"Conversations"},
 "settingsVoice.usageUsed":{"name":"settings_voice_usage_used","kind":"format","params":["used","limit"]},
@@ -905,8 +905,8 @@
 "newWork.task":{"name":"new_work_task","kind":"string","value":"Task"},
 "newWork.bot":{"name":"new_work_bot","kind":"string","value":"Bot"},
 "newWork.name":{"name":"new_work_name","kind":"string","value":"Name (optional)"},
-"newWork.taskNote":{"name":"new_work_task_note","kind":"string","value":"A task names itself from its first message unless you name it."},
-"newWork.botNote":{"name":"new_work_bot_note","kind":"string","value":"A bot is one lasting conversation with a folder of its own."},
+"newWork.taskNote":{"name":"new_work_task_note","kind":"string","value":"A task is one piece of work, big or small. It can reach across several projects and hand parts off to subtasks."},
+"newWork.botNote":{"name":"new_work_bot_note","kind":"string","value":"A bot is like a colleague: one lasting conversation with a folder of its own. Tell it what to do in your first message."},
 "newWork.taskFailed":{"name":"new_work_task_failed","kind":"format","params":["reason"]},
 "newWork.botFailed":{"name":"new_work_bot_failed","kind":"format","params":["reason"]}
 },

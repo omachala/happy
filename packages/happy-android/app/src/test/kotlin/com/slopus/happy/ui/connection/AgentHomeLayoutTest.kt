@@ -137,8 +137,12 @@ class AgentHomeLayoutTest {
         val counts = rule.onNode(hasTestTag(AgentHomeTags.ROW_CHANGES) and hasAnyAncestor(hasTestTag(rowTag)), useUnmergedTree = true).bounds
         val title = rule.onNode(hasTestTag(AgentHomeTags.ROW_TITLE) and hasAnyAncestor(hasTestTag(rowTag)), useUnmergedTree = true).bounds
         val dot = rule.onNode(hasTestTag(AgentHomeTags.ROW_DOT) and hasAnyAncestor(hasTestTag(rowTag)), useUnmergedTree = true).bounds
+        val slot = rule.onNode(hasTestTag(AgentHomeTags.ROW_STATUS) and hasAnyAncestor(hasTestTag(rowTag)), useUnmergedTree = true).bounds
         assertTrue(title.right <= counts.left)
-        assertTrue(counts.right <= dot.left)
+        assertDp("counts to the status slot", AgentHomeSpec.statusGap, slot.left - counts.right)
+        assertDp("the slot's width", AgentHomeSpec.statusSlot, slot.width)
+        assertDp("the dot centred across", (slot.left + slot.right) / 2, (dot.left + dot.right) / 2)
+        assertDp("the dot centred down", (slot.top + slot.bottom) / 2, (dot.top + dot.bottom) / 2)
         assertDp("unchanged row", 48, rule.node(rowTag).bounds.height)
         rule.onNodeWithContentDescription("≈ +12345 −1234", useUnmergedTree = true).assertExists()
     }
@@ -148,8 +152,8 @@ class AgentHomeLayoutTest {
         val changes = com.slopus.happy.agent.WorkspaceLineChanges("ready", 12345, 1234, false, 1.0)
         show(AgentFeed.derive(catalog(sample), git = mapOf("wat1" to changes)))
         val counts = rule.onNode(hasTestTag(AgentHomeTags.ROW_CHANGES), useUnmergedTree = true).bounds
-        val dot = rule.onNode(hasTestTag(AgentHomeTags.ROW_DOT) and hasAnyAncestor(hasTestTag(AgentHomeTags.row("agent-at2"))), useUnmergedTree = true).bounds
-        assertDp("counts and activity right edge", dot.right, counts.right)
+        val slot = rule.onNode(hasTestTag(AgentHomeTags.ROW_STATUS) and hasAnyAncestor(hasTestTag(AgentHomeTags.row("agent-at2"))), useUnmergedTree = true).bounds
+        assertDp("counts and the status slot share the right edge", slot.right, counts.right)
         assertDp("stable line height", AgentHomeSpec.TITLE_LINE, counts.height)
         rule.onAllNodesWithText("≈", useUnmergedTree = true).assertCountEquals(0)
     }
@@ -169,6 +173,19 @@ class AgentHomeLayoutTest {
 
     private fun show(feed: AgentFeed, status: AgentLinkStatus = AgentLinkStatus.Connected, dark: Boolean = false) =
         rule.setHappyContent(dark) { AgentHomeScreen("Studio", feed, status, accounts, actions) }
+
+    @Test
+    fun aPolicyVaultKeepsTheNormalRowAndOpensItsDocuments() {
+        val policy = AgentFeedRow.Surface("policy", "Policy", "vault", locked = true)
+        show(AgentFeed(loaded = true, rows = listOf(policy)))
+        val row = rule.node(AgentHomeTags.row(policy.key))
+        assertDp("vault row height", 48, row.bounds.height)
+        val mark = rule.node(AgentHomeTags.ROW_MARK).bounds
+        assertDp("lock tile width", AgentHomeSpec.mark, mark.width)
+        assertDp("lock tile height", AgentHomeSpec.mark, mark.height)
+        row.performClick()
+        assertEquals(listOf(policy), surfaces)
+    }
 
     @Test
     fun rowsHaveTheirHeightAndNoComposer() {
@@ -431,9 +448,9 @@ class AgentHomeLayoutTest {
 
         rule.node(AgentSearchTags.FIELD).performTextInput("number 3")
         rule.waitForIdle()
-        // Home's rows, drawn as home draws them: the grouped list's 8 under the bar.
-        val found = rule.node(AgentSearchTags.result("agent-at3")).bounds
-        assertBox("a found row", found, 0.dp, results.top + 8.dp, 411.dp, 48.dp)
+        // A found row, the grouped list's 8 under the bar, says what it is under its title, as desktop's palette does.
+        val found = rule.node(AgentSearchTags.result("agent:at3")).bounds
+        assertBox("a found row", found, 0.dp, results.top + 8.dp, 411.dp, 66.dp)
         // Home stays composed under the results, rows and scroll as they were.
         assertEquals(row, rule.node(AgentHomeTags.row("agent-at20")).bounds)
 
@@ -445,11 +462,11 @@ class AgentHomeLayoutTest {
 
         // What a result opens leaves the search as it was, for coming back.
         rule.node(AgentSearchTags.FIELD).performTextReplacement("number 3")
-        rule.node(AgentSearchTags.result("agent-at3")).performClick()
+        rule.node(AgentSearchTags.result("agent:at3")).performClick()
         rule.waitForIdle()
         assertEquals(listOf("at3"), opened)
         rule.node(AgentSearchTags.FIELD).assertTextEquals("number 3")
-        rule.node(AgentSearchTags.result("agent-at3")).assertExists()
+        rule.node(AgentSearchTags.result("agent:at3")).assertExists()
         assertEquals(row, rule.node(AgentHomeTags.row("agent-at20")).bounds)
     }
 
@@ -509,17 +526,22 @@ class AgentHomeLayoutTest {
         rule.onAllNodesWithTag(AgentSearchTags.RESULTS, useUnmergedTree = true).assertCountEquals(0)
     }
 
-    /** Search.rows: a nested match keeps what it nests under, the project and the worktree over a worktree's chat. */
+    /**
+     * Search's one flat card: a worktree's chat stands at the card's edge,
+     * without its project and worktree over it, and says where it is under
+     * its title, as desktop's palette does.
+     */
     @Test
-    fun aNestedMatchKeepsItsProjectAndWorktree() {
+    fun aNestedMatchStandsAlone() {
         show(feed())
         rule.node(AgentHomeTags.SEARCH).performClick()
         rule.node(AgentSearchTags.FIELD).performTextInput("jumps")
         rule.waitForIdle()
-        val project = rule.node(AgentSearchTags.result("folder-p1")).bounds
-        val chat = rule.node(AgentSearchTags.result("agent-aw1")).bounds
-        assertTrue("the project over its worktree's chat", project.bottom < chat.top)
-        rule.onAllNodesWithTag(AgentSearchTags.result("agent-ap1"), useUnmergedTree = true).assertCountEquals(0)
+        val chat = rule.node(AgentSearchTags.result("agent:aw1")).bounds
+        assertBox("the chat, the card's only row", chat, 0.dp, rule.node(AgentSearchTags.RESULTS).bounds.top + 8.dp, 411.dp, 66.dp)
+        rule.onNodeWithText("happy / fix-scroll").assertExists()
+        rule.onAllNodesWithTag(AgentSearchTags.result("project:p1"), useUnmergedTree = true).assertCountEquals(0)
+        rule.onAllNodesWithTag(AgentSearchTags.result("agent:ap1"), useUnmergedTree = true).assertCountEquals(0)
     }
 
     @Test
@@ -555,9 +577,9 @@ class AgentHomeLayoutTest {
     }
 
     /**
-     * Desktop's ⌘K sources (28342477) after home's rows: a Surface not
-     * joined, an open todo and an artifact, each under its heading, read
-     * while search is open; a todo opens its list, an artifact itself.
+     * Search's phone half: a Surface not joined, an open todo and an
+     * artifact in the one card with home's rows, read while search is
+     * open; a todo opens its list, an artifact itself.
      */
     @Test
     fun searchFindsSurfacesTodosAndArtifactsAfterHomesRows() {
@@ -566,7 +588,7 @@ class AgentHomeLayoutTest {
         val sources = AgentSearchSources(
             surfaces = listOf(AgentSearchSources.Surface(AgentFeedRow.Surface("d2", "Plan for Q3", "document"), joined = false)),
             todos = listOf(AgentSearchSources.Todo("todo1", "Plan the offsite", errands)),
-            artifacts = listOf(com.slopus.happy.artifacts.ArtifactRef("a1", 2, "html", "Sprint plan", followsLatest = true)),
+            artifacts = listOf(AgentSearchSources.Artifact(com.slopus.happy.artifacts.ArtifactRef("a1", 2, "html", "Sprint plan", followsLatest = true))),
         )
         rule.setHappyContent { AgentHomeScreen("Studio", feed(), AgentLinkStatus.Connected, accounts, actions, searchSources = { reads++; sources }) }
         assertEquals(0, reads)
@@ -574,22 +596,66 @@ class AgentHomeLayoutTest {
         rule.node(AgentSearchTags.FIELD).performTextInput("plan")
         rule.waitForIdle()
         assertTrue(reads >= 1)
-        for (heading in listOf("Documents", "Todos", "Artifacts")) {
-            rule.onNode(androidx.compose.ui.test.hasText(heading) and androidx.compose.ui.test.hasAnyAncestor(androidx.compose.ui.test.hasTestTag(AgentSearchTags.RESULTS)), useUnmergedTree = true).assertExists()
-        }
-        val home = rule.node(AgentSearchTags.result("agent-at3")).bounds
-        val document = rule.node(AgentSearchTags.result("surface-d2")).bounds
-        val todo = rule.node(AgentSearchTags.result("todo-todo1")).bounds
-        val artifact = rule.node(AgentSearchTags.result("artifact-a1")).bounds
-        assertTrue(home.bottom < document.top && document.bottom < todo.top && todo.bottom < artifact.top)
-        // iOS's rows: 48 high, as home's.
-        for (row in listOf(document, todo, artifact)) assertDp("result row height", 48, row.height)
-        rule.node(AgentSearchTags.result("todo-todo1")).performClick()
+        // One card, as desktop ranks it: the task that starts with it, the document not joined, the todo; then the artifact a word of which does.
+        val home = rule.node(AgentSearchTags.result("agent:at3")).bounds
+        val document = rule.node(AgentSearchTags.result("document:d2")).bounds
+        val todo = rule.node(AgentSearchTags.result("todo:todo1")).bounds
+        val artifact = rule.node(AgentSearchTags.result("artifact:a1")).bounds
+        assertTrue(home.bottom <= document.top && document.bottom <= todo.top && todo.bottom <= artifact.top)
+        // Each says what it is, or where, on a second line: 66 high.
+        for (row in listOf(document, todo, artifact)) assertDp("result row height", 66, row.height)
+        rule.onNodeWithText("Errands").assertExists()
+        rule.node(AgentSearchTags.result("todo:todo1")).performClick()
         assertEquals(listOf(errands), surfaces)
-        rule.node(AgentSearchTags.result("artifact-a1")).performClick()
+        rule.node(AgentSearchTags.result("artifact:a1")).performClick()
         assertEquals(listOf("a1"), openedArtifacts)
         // What a result opens leaves the search for coming back.
         rule.node(AgentSearchTags.FIELD).assertExists()
+    }
+
+    /**
+     * Search's daemon half, asked once the typing rests: what it finds
+     * joins the card by key, a content match with its line under its name,
+     * and a vault file opens its vault's page. The phone's rows are there
+     * before it answers.
+     */
+    @Test
+    fun whatTheDaemonFindsJoinsTheCard() {
+        val asked = mutableListOf<String>()
+        val vaultItems = mutableListOf<String>()
+        val opening = AgentHomeActions(onOpenConversation = { opened += it }, onCompose = {}, onSettings = {}, onSettingsRow = {}, onSwitchAccount = {}, onAdd = {}, onOpenVaultItem = { surfaceId, id, folder, name -> vaultItems += "$surfaceId/$id/$folder/$name" })
+        val answer = { query: String ->
+            com.slopus.happy.search.SearchAnswer(
+                query,
+                listOf(com.slopus.happy.search.SearchHit.VaultFile("vault_file:f1", 1, "v1", "f1", "Number plan.md", "/Docs/Number plan.md", match = "content", line = 3, snippet = "the plan moves to Friday")),
+            )
+        }
+        // The daemon answers only when let.
+        val gate = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val search: suspend (String) -> com.slopus.happy.search.SearchAnswer? = { query ->
+            asked += query
+            gate.await()
+            answer(query)
+        }
+        rule.setHappyContent { AgentHomeScreen("Studio", feed(), AgentLinkStatus.Connected, accounts, opening, search = search) }
+        rule.node(AgentHomeTags.SEARCH).performClick()
+        rule.node(AgentSearchTags.FIELD).performTextInput("plan")
+        rule.waitForIdle()
+        // The phone's own row at once, before the typing has rested long enough to ask.
+        rule.node(AgentSearchTags.result("agent:at3")).assertExists()
+        assertTrue(asked.isEmpty())
+        rule.mainClock.advanceTimeBy(200)
+        rule.waitForIdle()
+        // Asked once, for what was typed; until it answers, the phone's rows alone.
+        assertEquals(listOf("plan"), asked)
+        rule.onAllNodesWithTag(AgentSearchTags.result("vault_file:f1"), useUnmergedTree = true).assertCountEquals(0)
+        gate.complete(Unit)
+        rule.waitForIdle()
+        val file = rule.node(AgentSearchTags.result("vault_file:f1"))
+        rule.onNodeWithText("the plan moves to Friday").assertExists()
+        assertDp("a row with its line", 66, file.bounds.height)
+        file.performClick()
+        assertEquals(listOf("v1/f1/false/Number plan.md"), vaultItems)
     }
 
     /**
@@ -632,15 +698,15 @@ class AgentHomeLayoutTest {
         // Online says nothing: the name stands alone.
         rule.onAllNodesWithTag(AgentHomeTags.STATUS, useUnmergedTree = true).assertCountEquals(0)
         rule.onAllNodesWithText("online", useUnmergedTree = true).assertCountEquals(0)
-        val flips = listOf(AgentLinkStatus.Connecting, AgentLinkStatus.Connected, AgentLinkStatus.Offline, AgentLinkStatus.Connecting, AgentLinkStatus.Connected)
+        val flips = listOf(AgentLinkStatus.Connecting, AgentLinkStatus.Connected, AgentLinkStatus.Revoked, AgentLinkStatus.Connecting, AgentLinkStatus.Connected)
         for (next in flips) {
             status = next
             rule.waitForIdle()
             assertEquals("bar, on $next", bar, rule.node(AgentHomeTags.BAR).bounds)
-            // A computer that doesn't answer is said by the list's first row, which pushes the rows down (iOS ba0d7da0e).
-            if (next == AgentLinkStatus.Offline) {
+            // A pairing to redo is said by the list's first row, which pushes the rows down (iOS ba0d7da0e).
+            if (next == AgentLinkStatus.Revoked) {
                 val notice = rule.node(AgentHomeTags.BANNER).bounds
-                rule.onNodeWithText("The computer did not answer.", useUnmergedTree = true).assertExists()
+                rule.onNodeWithText("This phone was removed in Happy Agent. Connect the agent again to use it.", useUnmergedTree = true).assertExists()
                 val pushed = rule.node(AgentHomeTags.row("section-places")).bounds
                 assertDp("notice content at the top with its 8 outer and 16 inner padding", first.top + 24.dp, notice.top)
                 assertTrue("the rows pushed under it", pushed.top >= notice.bottom && pushed.top > first.top)
@@ -648,47 +714,48 @@ class AgentHomeLayoutTest {
                 rule.onAllNodesWithTag(AgentHomeTags.BANNER, useUnmergedTree = true).assertCountEquals(0)
                 assertEquals("first row, on $next", first, rule.node(AgentHomeTags.row("section-places")).bounds)
             }
-            // Connecting stands in the name's place; offline keeps the name, which TalkBack hears offline after.
-            if (next == AgentLinkStatus.Connecting) {
+            // Not connected, for whatever reason, is connecting, standing in the name's place: never offline.
+            if (next != AgentLinkStatus.Connected) {
                 rule.onAllNodesWithTag(AgentHomeTags.TITLE, useUnmergedTree = true).assertCountEquals(0)
                 rule.node(AgentHomeTags.STATUS).assertExists()
                 rule.onNodeWithText("Connecting…", useUnmergedTree = true).assertExists()
             } else {
                 assertEquals("title, on $next", title, rule.node(AgentHomeTags.TITLE).bounds)
                 rule.onAllNodesWithTag(AgentHomeTags.STATUS, useUnmergedTree = true).assertCountEquals(0)
-                rule.onAllNodes(hasStateDescription("offline"), useUnmergedTree = true)
-                    .assertCountEquals(if (next == AgentLinkStatus.Offline) 1 else 0)
             }
+            rule.onAllNodes(hasStateDescription("offline"), useUnmergedTree = true).assertCountEquals(0)
         }
     }
 
     @Test
-    fun loadingOfflineAndEmptyHaveTheirOwnPages() {
+    fun loadingUnavailableAndEmptyHaveTheirOwnPages() {
         var status by mutableStateOf(AgentLinkStatus.Connecting)
         var current by mutableStateOf(AgentFeed.Empty)
         rule.setHappyContent { AgentHomeScreen("Studio", current, status, accounts, actions) }
         rule.node(AgentHomeTags.SPINNER).assertExists()
         rule.node(AgentHomeTags.STATUS).assertExists()
-        status = AgentLinkStatus.Offline
+        // A link that only doesn't answer keeps loading, connecting: no page says it is offline, no notice.
+        rule.onAllNodesWithTag(AgentHomeTags.BANNER, useUnmergedTree = true).assertCountEquals(0)
+        status = AgentLinkStatus.Revoked
         rule.waitForIdle()
-        rule.node(AgentHomeTags.OFFLINE).assertExists()
-        // Offline with a cached home: the rows, and the name.
+        rule.node(AgentHomeTags.UNAVAILABLE).assertExists()
+        rule.onNodeWithText("This phone was removed in Happy Agent. Connect the agent again to use it.", useUnmergedTree = true).assertExists()
+        // With a cached home: the rows, the notice, and connecting in the name's place.
         current = feed()
         rule.waitForIdle()
         rule.node(AgentHomeTags.row("agent-ab1")).assertExists()
-        rule.node(AgentHomeTags.TITLE).assertExists()
-        rule.onAllNodesWithTag(AgentHomeTags.STATUS, useUnmergedTree = true).assertCountEquals(0)
         rule.node(AgentHomeTags.BANNER).assertExists()
-        rule.onNodeWithText("The computer did not answer.", useUnmergedTree = true).assertExists()
-        status = AgentLinkStatus.Revoked
+        rule.node(AgentHomeTags.STATUS).assertExists()
+        status = AgentLinkStatus.Connecting
         rule.waitForIdle()
-        rule.node(AgentHomeTags.BANNER).assertExists()
+        rule.onAllNodesWithTag(AgentHomeTags.BANNER, useUnmergedTree = true).assertCountEquals(0)
         status = AgentLinkStatus.Connected
         current = feed(Wire.bootstrap())
         rule.waitForIdle()
         rule.node(AgentHomeTags.EMPTY).assertExists()
         rule.onAllNodesWithTag(AgentHomeTags.STATUS, useUnmergedTree = true).assertCountEquals(0)
     }
+
 
     @Test
     fun rowsGrowWithTheFontButStayFixed() {
