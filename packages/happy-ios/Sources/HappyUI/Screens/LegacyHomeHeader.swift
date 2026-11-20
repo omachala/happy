@@ -7,9 +7,10 @@ import UIKit
 ///   - left, the Happy logo, the only way to Settings;
 ///   - the title, no words of its own, only the socket's status (a dot and
 ///     its word), which opens the connection error while the socket is
-///     down and something went wrong;
-///   - right, the Claude usage pill, then `+` to the new-session screen on
-///     the draft as it was left.
+///     down and something went wrong, and beside it the Claude usage pill
+///     (session and weekly);
+///   - right, only `+` to the new-session screen on the draft as it was
+///     left.
 ///
 /// The same items stay in the bar for the account's life: a button
 /// rebuilt under a finger drops its tap.
@@ -45,7 +46,8 @@ final class LegacyHomeHeader {
         return item
     }()
 
-    private(set) lazy var usageItem = UIBarButtonItem(customView: pill)
+    /// The status and the pill side by side as the bar's title.
+    private(set) lazy var title = LegacyHomeTitleView(status: status, pill: pill)
 
     init(session: AccountSession) {
         diagnostics = session.realtime.diagnostics
@@ -62,9 +64,10 @@ final class LegacyHomeHeader {
 
     func install(on item: UINavigationItem) {
         item.leftBarButtonItem = logoItem
-        item.titleView = status
-        // Outermost first: `+` at the edge, the pill inside it.
-        item.rightBarButtonItems = [plusItem, usageItem]
+        // The usage pill sits beside the status, not in the right group, so
+        // `+` has its container to itself.
+        item.titleView = title
+        item.rightBarButtonItems = [plusItem]
     }
 
     /// apiSocket.ts's status and, read as it arrives, whether an error was
@@ -81,6 +84,51 @@ final class LegacyHomeHeader {
     /// With a number, the sheet; otherwise fetch again at once.
     private func usageTapped() {
         if case .loaded(let usage) = usage { onUsage?(usage) } else { onUsageRefresh?() }
+    }
+}
+
+/// The bar's title: the connection status, then the usage pill. Each stays
+/// its own control (the status opens the connection error, the pill the
+/// usage sheet); this view only places them and resizes when either does.
+final class LegacyHomeTitleView: UIView {
+    let status: LegacyConnectionStatusView
+    let pill: UsagePillView
+
+    init(status: LegacyConnectionStatusView, pill: UsagePillView) {
+        self.status = status
+        self.pill = pill
+        super.init(frame: .zero)
+        addSubview(status)
+        addSubview(pill)
+        accessibilityIdentifier = "home-title"
+        frame.size = sizeThatFits(.zero)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+
+    private func measured() -> LegacyHomeTitleLayout {
+        LegacyHomeTitleLayout(status: status.sizeThatFits(.zero), pill: pill.sizeThatFits(.zero))
+    }
+
+    override func sizeThatFits(_ size: CGSize) -> CGSize { measured().size }
+    override var intrinsicContentSize: CGSize { measured().size }
+
+    /// A child changed size: grow or shrink to fit, and let the bar re-centre.
+    func fit() {
+        setNeedsLayout()
+        let size = measured().size
+        guard frame.size != size else { return }
+        frame.size = size
+        invalidateIntrinsicContentSize()
+        superview?.setNeedsLayout()
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        let layout = measured()
+        status.setLayoutFrame(layout.status)
+        pill.setLayoutFrame(layout.pill)
     }
 }
 
@@ -126,6 +174,7 @@ final class LegacyConnectionStatusView: UIControl {
         invalidateIntrinsicContentSize()
         frame.size = sizeThatFits(.zero)
         setNeedsLayout()
+        (superview as? LegacyHomeTitleView)?.fit()
     }
 
     static func color(_ status: RealtimeStatus) -> ColorToken {
@@ -158,12 +207,17 @@ final class LegacyConnectionStatusView: UIControl {
     }
 }
 
-/// UsagePill.tsx: a capsule with a dot and the 5-hour use ("42%"), or the
+/// UsagePill.tsx: a capsule with a dot and the 5-hour use ("42%"), then the
+/// weekly use beside it ("W 81%") when the answer has one, or the
 /// reason there is none ("Timed out"). Never hidden.
 final class UsagePillView: UIControl {
     private let ground = UIView()
     private let dot = UIView()
     private let label = StyledLabel(style: TextStyles.usagePill, color: Palette.text, lines: 1)
+    /// The weekly window, "W 41%", beside the session's; hidden when the
+    /// answer has no weekly figure.
+    private let weeklyDot = UIView()
+    private let weeklyLabel = StyledLabel(style: TextStyles.usagePill, color: Palette.text, lines: 1)
 
     var usage: ClaudeUsageState = .loading {
         didSet { if usage != oldValue { render() } }
@@ -173,7 +227,9 @@ final class UsagePillView: UIControl {
         super.init(frame: frame)
         ground.backgroundColor = UIColor(Palette.claudeUsagePillGround)
         ground.layer.cornerCurve = .continuous
-        for view in [ground, dot, label] {
+        weeklyDot.isHidden = true
+        weeklyLabel.isHidden = true
+        for view in [ground, dot, label, weeklyDot, weeklyLabel] {
             view.isUserInteractionEnabled = false
             addSubview(view)
         }
@@ -187,25 +243,37 @@ final class UsagePillView: UIControl {
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
 
     private func render() {
+        let spoken: String
+        var week: ClaudeUsage.Window?
         switch usage {
         case .loading:
             dot.backgroundColor = UIColor(Palette.claudeUsagePending)
             label.string = Strings.LegacyHome.usageLoading
+            spoken = label.string
             accessibilityHint = Strings.LegacyHome.usageRefresh
         case .failed(let reason):
             dot.backgroundColor = UIColor(Palette.claudeUsagePending)
             label.string = reason
+            spoken = label.string
             accessibilityHint = Strings.LegacyHome.usageRefresh
         case .loaded(let usage):
             dot.backgroundColor = UIColor(Self.color(usage.fiveHour.utilization))
             label.string = ClaudeUsageFormat.percent(usage.fiveHour.utilization)
+            spoken = ClaudeUsageFormat.spoken(usage)
+            week = usage.sevenDay
             accessibilityHint = nil
         }
-        accessibilityLabel = [Strings.LegacyHome.usageLabel, label.string].joined(separator: ", ")
+        if let week {
+            weeklyDot.backgroundColor = UIColor(Self.color(week.utilization))
+            weeklyLabel.string = ClaudeUsageFormat.weekly(week.utilization)
+        }
+        weeklyDot.isHidden = week == nil
+        weeklyLabel.isHidden = week == nil
+        accessibilityLabel = [Strings.LegacyHome.usageLabel, spoken].joined(separator: ", ")
         invalidateIntrinsicContentSize()
         frame.size = sizeThatFits(.zero)
         setNeedsLayout()
-        superview?.setNeedsLayout()
+        (superview as? LegacyHomeTitleView)?.fit()
     }
 
     static func color(_ percent: Double) -> ColorToken {
@@ -217,7 +285,8 @@ final class UsagePillView: UIControl {
     }
 
     private func measured() -> UsagePillLayout {
-        UsagePillLayout(text: label.sizeThatFits(CGSize(width: CGFloat.greatestFiniteMagnitude, height: .greatestFiniteMagnitude)))
+        let unbounded = CGSize(width: CGFloat.greatestFiniteMagnitude, height: .greatestFiniteMagnitude)
+        return UsagePillLayout(text: label.sizeThatFits(unbounded), weekly: weeklyLabel.isHidden ? nil : weeklyLabel.sizeThatFits(unbounded))
     }
 
     override func sizeThatFits(_ size: CGSize) -> CGSize { measured().size }
@@ -231,6 +300,11 @@ final class UsagePillView: UIControl {
         dot.setLayoutFrame(layout.dot)
         dot.layer.cornerRadius = UsagePillLayout.Metrics.dotSize / 2
         label.setLayoutFrame(layout.text)
+        if let wDot = layout.weeklyDot, let wText = layout.weeklyText {
+            weeklyDot.setLayoutFrame(wDot)
+            weeklyDot.layer.cornerRadius = UsagePillLayout.Metrics.dotSize / 2
+            weeklyLabel.setLayoutFrame(wText)
+        }
     }
 
     override var isHighlighted: Bool {

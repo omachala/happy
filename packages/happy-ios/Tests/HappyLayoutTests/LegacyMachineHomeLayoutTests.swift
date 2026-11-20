@@ -87,7 +87,16 @@ final class LegacyMachineHomeLayoutTests: XCTestCase {
         assertSize(plain.size, CGSize(width: 82, height: 16))
     }
 
-    func testThePill() {
+    /// The title: the status, then the usage pill 8 after it, both centred
+    /// on the taller one's line.
+    func testTheTitleHoldsTheStatusThenThePill() {
+        let title = LegacyHomeTitleLayout(status: CGSize(width: 82, height: 16), pill: CGSize(width: 112, height: 26))
+        assertFrame(title.status, rect(0, 5, 82, 16))
+        assertFrame(title.pill, rect(90, 0, 112, 26))
+        assertSize(title.size, CGSize(width: 202, height: 26))
+    }
+
+    func testThePill() throws {
         let layout = UsagePillLayout(text: CGSize(width: 24, height: 16))
         assertFrame(layout.dot, rect(10, 10, 6, 6))
         assertFrame(layout.text, rect(22, 5, 24, 16))
@@ -97,6 +106,15 @@ final class LegacyMachineHomeLayoutTests: XCTestCase {
         let long = UsagePillLayout(text: CGSize(width: 230, height: 16))
         assertFrame(long.text, rect(22, 5, 120, 16))
         assertSize(long.size, CGSize(width: 152, height: 26))
+        XCTAssertNil(layout.weeklyDot)
+        XCTAssertNil(layout.weeklyText)
+        // The weekly figure follows the session's, 8 on, with its own dot.
+        let both = UsagePillLayout(text: CGSize(width: 24, height: 16), weekly: CGSize(width: 36, height: 16))
+        assertFrame(both.dot, rect(10, 10, 6, 6))
+        assertFrame(both.text, rect(22, 5, 24, 16))
+        assertFrame(try XCTUnwrap(both.weeklyDot), rect(54, 10, 6, 6))
+        assertFrame(try XCTUnwrap(both.weeklyText), rect(66, 5, 36, 16))
+        assertSize(both.size, CGSize(width: 112, height: 26))
     }
 
     // MARK: Usage sheet

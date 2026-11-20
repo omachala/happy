@@ -4,13 +4,17 @@ import CoreGraphics
 #endif
 
 /// The usage pill in the home header (UsagePill.tsx `pill`): a dot, 6, the
-/// words, in a capsule 10 across and 5 down.
+/// words, in a capsule 10 across and 5 down. With a weekly figure its own
+/// dot and words follow 8 after the session's, so both windows read at a
+/// glance: `( ● 26%  ● W 41% )`.
 public struct UsagePillLayout: Equatable, Sendable {
     public enum Metrics {
         public static let paddingX: CGFloat = 10
         public static let paddingY: CGFloat = 5
         public static let dotSize: CGFloat = 6
         public static let dotGap: CGFloat = 6
+        /// Between the session's words and the weekly dot.
+        public static let segmentGap: CGFloat = 8
         /// The longest reason ("Anthropic account not connected") is cut
         /// here, so the bar's status title keeps its room.
         public static let maxTextWidth: CGFloat = 120
@@ -19,17 +23,29 @@ public struct UsagePillLayout: Equatable, Sendable {
     public var size: CGSize
     public var dot: CGRect
     public var text: CGRect
+    /// The weekly figure's dot and words; nil without one.
+    public var weeklyDot: CGRect?
+    public var weeklyText: CGRect?
     public var cornerRadius: CGFloat { size.height / 2 }
 
-    public init(text measured: CGSize) {
+    public init(text measured: CGSize, weekly: CGSize? = nil) {
         typealias M = Metrics
         let text = CGSize(width: min(measured.width, M.maxTextWidth), height: measured.height)
-        let inner = max(M.dotSize, text.height)
+        let weekly = weekly.map { CGSize(width: min($0.width, M.maxTextWidth), height: $0.height) }
+        let inner = max(M.dotSize, text.height, weekly?.height ?? 0)
         let height = inner + 2 * M.paddingY
         let mid = height / 2
         dot = CGRect(x: M.paddingX, y: mid - M.dotSize / 2, width: M.dotSize, height: M.dotSize)
         self.text = CGRect(x: dot.maxX + M.dotGap, y: mid - text.height / 2, width: text.width, height: text.height)
-        size = CGSize(width: self.text.maxX + M.paddingX, height: height)
+        var end = self.text.maxX
+        if let weekly {
+            let wDot = CGRect(x: end + M.segmentGap, y: mid - M.dotSize / 2, width: M.dotSize, height: M.dotSize)
+            let wText = CGRect(x: wDot.maxX + M.dotGap, y: mid - weekly.height / 2, width: weekly.width, height: weekly.height)
+            weeklyDot = wDot
+            weeklyText = wText
+            end = wText.maxX
+        }
+        size = CGSize(width: end + M.paddingX, height: height)
     }
 }
 
