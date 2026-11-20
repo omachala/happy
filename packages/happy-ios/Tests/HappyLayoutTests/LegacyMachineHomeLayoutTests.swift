@@ -87,7 +87,49 @@ final class LegacyMachineHomeLayoutTests: XCTestCase {
         assertSize(plain.size, CGSize(width: 82, height: 16))
     }
 
-    func testThePill() {
+    /// The title: the status, then the usage pill 8 after it, both centred
+    /// on the taller one's line.
+    func testTheTitleHoldsTheStatusThenThePill() {
+        let title = LegacyHomeTitleLayout(status: CGSize(width: 82, height: 16), pillText: CGSize(width: 24, height: 16),
+                                          pillWeekly: CGSize(width: 36, height: 16))
+        assertFrame(title.status, rect(0, 5, 82, 16))
+        assertFrame(title.pill, rect(90, 0, 112, 26))
+        XCTAssertNotNil(title.pillLayout.weeklyText)
+        assertSize(title.size, CGSize(width: 202, height: 26))
+    }
+
+    /// Less room than that (an iPhone SE's bar): the weekly figure goes
+    /// first, then the pill's words are cut; the status keeps its own.
+    func testANarrowTitleDropsTheWeeklyFigureThenCutsThePill() {
+        let status = CGSize(width: 82, height: 16)
+        let text = CGSize(width: 24, height: 16)
+        let weekly = CGSize(width: 36, height: 16)
+
+        let roomy = LegacyHomeTitleLayout(status: status, pillText: text, pillWeekly: weekly, width: 202)
+        XCTAssertNotNil(roomy.pillLayout.weeklyText, "exactly enough")
+
+        let narrow = LegacyHomeTitleLayout(status: status, pillText: text, pillWeekly: weekly, width: 180)
+        assertFrame(narrow.status, rect(0, 5, 82, 16))
+        assertFrame(narrow.pill, rect(90, 0, 56, 26))
+        XCTAssertNil(narrow.pillLayout.weeklyText)
+        XCTAssertNil(narrow.pillLayout.weeklyDot)
+        assertFrame(narrow.pillLayout.text, rect(22, 5, 24, 16))
+        XCTAssertLessThanOrEqual(narrow.size.width, 180)
+
+        // A long reason is cut to what is left.
+        let reason = LegacyHomeTitleLayout(status: status, pillText: CGSize(width: 230, height: 16), pillWeekly: nil, width: 200)
+        assertFrame(reason.pill, rect(90, 0, 110, 26))
+        assertFrame(reason.pillLayout.text, rect(22, 5, 78, 16))
+        assertSize(reason.size, CGSize(width: 200, height: 26))
+
+        // Hardly any room: the pill keeps its dot, the status gives way.
+        let tiny = LegacyHomeTitleLayout(status: status, pillText: text, pillWeekly: weekly, width: 120)
+        assertFrame(tiny.status, rect(0, 5, 80, 16))
+        assertFrame(tiny.pill, rect(88, 0, 32, 26))
+        assertSize(tiny.size, CGSize(width: 120, height: 26))
+    }
+
+    func testThePill() throws {
         let layout = UsagePillLayout(text: CGSize(width: 24, height: 16))
         assertFrame(layout.dot, rect(10, 10, 6, 6))
         assertFrame(layout.text, rect(22, 5, 24, 16))
@@ -97,6 +139,22 @@ final class LegacyMachineHomeLayoutTests: XCTestCase {
         let long = UsagePillLayout(text: CGSize(width: 230, height: 16))
         assertFrame(long.text, rect(22, 5, 120, 16))
         assertSize(long.size, CGSize(width: 152, height: 26))
+        XCTAssertNil(layout.weeklyDot)
+        XCTAssertNil(layout.weeklyText)
+        // The weekly figure follows the session's, 8 on, with its own dot.
+        let both = UsagePillLayout(text: CGSize(width: 24, height: 16), weekly: CGSize(width: 36, height: 16))
+        assertFrame(both.dot, rect(10, 10, 6, 6))
+        assertFrame(both.text, rect(22, 5, 24, 16))
+        assertFrame(try XCTUnwrap(both.weeklyDot), rect(54, 10, 6, 6))
+        assertFrame(try XCTUnwrap(both.weeklyText), rect(66, 5, 36, 16))
+        assertSize(both.size, CGSize(width: 112, height: 26))
+        // Within a width: the weekly figure goes, then the words are cut.
+        XCTAssertNil(UsagePillLayout(text: CGSize(width: 24, height: 16), weekly: CGSize(width: 36, height: 16), maxWidth: 110).weeklyText)
+        // A width snapped to the pixel grid a hair under the natural one still fits whole.
+        XCTAssertNotNil(UsagePillLayout(text: CGSize(width: 24, height: 16), weekly: CGSize(width: 36.4, height: 16), maxWidth: 112.33).weeklyText)
+        let cut = UsagePillLayout(text: CGSize(width: 24, height: 16), weekly: CGSize(width: 36, height: 16), maxWidth: 40)
+        assertFrame(cut.text, rect(22, 5, 8, 16))
+        assertSize(cut.size, CGSize(width: 40, height: 26))
     }
 
     // MARK: Usage sheet

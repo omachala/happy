@@ -38,7 +38,7 @@ public enum HomeState: Equatable, Sendable {
         }
         let choices = MachineChoice.collect(machines.machines)
         let list = machineSections.map {
-            SessionList(machineSections: snapshot, fallbackTitles: $0.fallbackTitles, words: .init(unknownMachine: unknownMachine, home: $0.home))
+            SessionList(machineSections: snapshot, fallbackTitles: $0.fallbackTitles, words: .init(unknownMachine: unknownMachine, home: $0.home), now: clock.now)
         } ?? SessionList(snapshot, clock: clock, unknownMachine: unknownMachine)
         let offline = !choices.isEmpty && !choices.contains(where: \.online) ? choices : nil
         if list.visibleCount > 0 {

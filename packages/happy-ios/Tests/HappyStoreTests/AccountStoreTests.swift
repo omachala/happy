@@ -98,7 +98,7 @@ final class SessionLocalStateTests: XCTestCase {
         let reopened = try XCTUnwrap(try LocalStore(writer: queue).session(id: "s"))
         XCTAssertFalse(reopened.thinking)
         XCTAssertFalse(reopened.archiving)
-        XCTAssertFalse(reopened.unread, "unread lasts one run, as the fork's in-memory set")
+        XCTAssertTrue(reopened.unread, "unread lasts until the chat is read, across launches")
     }
 
     func testRigSessionsStayLiveWhileDisconnected() {

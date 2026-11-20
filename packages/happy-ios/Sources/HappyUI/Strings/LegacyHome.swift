@@ -27,6 +27,15 @@ extension Strings {
         static let usageExtra = "Extra (monthly)"
         static func resetsIn(_ value: String) -> String { "Resets in \(value)" }
         static let usageLabel = "Claude usage"
+        /// The pill's weekly figure, "W 41%".
+        static func usageWeeklyFigure(_ percent: Double) -> String { "W \(ClaudeUsageFormat.percent(percent))" }
+        /// The pill's spoken value: "session 26%, weekly 41%", or the
+        /// session alone when there is no weekly window.
+        static func usageSpoken(_ usage: ClaudeUsage) -> String {
+            var parts = ["session \(ClaudeUsageFormat.percent(usage.fiveHour.utilization))"]
+            if let week = usage.sevenDay { parts.append("weekly \(ClaudeUsageFormat.percent(week.utilization))") }
+            return parts.joined(separator: ", ")
+        }
         static let usageRefresh = "Fetch Claude usage again"
 
         // connection-error.tsx

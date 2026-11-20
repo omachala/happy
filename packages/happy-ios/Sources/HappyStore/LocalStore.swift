@@ -64,8 +64,12 @@ public final class LocalStore: Sendable {
             """)
         // Async consumers must use SharedObservationBridge: GRDB invokes
         // shared callbacks while holding its client lock.
+        // Opening or leaving a chat and its newest message, to the minute
+        // (LocalStore+Unread): the fork's home order. Read markers' seq is
+        // left out.
+        let homeActivityRegion = SQLRequest<Row>(sql: "SELECT sessionId, readAt, messageAt FROM sessionRead")
         homeObservation = ValueObservation.tracking(
-            region: homeSessionRegion, MachineRecord.all(), ProjectRecord.all(),
+            region: homeSessionRegion, homeActivityRegion, MachineRecord.all(), ProjectRecord.all(),
             AccountSettingsRecord.all(), PendingSettingsRecord.all(), AccountProfileRecord.all(),
             SyncStateRecord.select(Column("key")).filter([SyncCursor.machinesLastSync.rawValue, SyncCursor.sessionsChangedSince.rawValue].contains(Column("key"))),
             fetch: { db in try Self.fetchHomeSnapshot(db) }
@@ -100,11 +104,10 @@ public final class LocalStore: Sendable {
         // Live state from a previous run is stale: the server re-sends
         // `thinking` every few seconds while it holds. An archive or leave
         // still waiting in `intent` keeps its session out of the list; any
-        // other was answered. Unread lasts one run, as the fork's in-memory
-        // set does (`markSessionUnread`).
+        // other was answered. Unread is kept: a turn that ended while the
+        // app was away stays unread until its chat is read.
         try performWrite { db in
             try db.execute(sql: "UPDATE session SET thinking = 0, thinkingAt = 0 WHERE thinking = 1")
-            try db.execute(sql: "UPDATE session SET unread = 0 WHERE unread = 1")
             try db.execute(sql: "UPDATE session SET archiving = \(Self.removalPending) WHERE archiving != \(Self.removalPending)")
             try db.execute(sql: "UPDATE outbox SET state = 'queued' WHERE state = 'sending'")
         }
@@ -255,13 +258,6 @@ public final class LocalStore: Sendable {
         }
     }
 
-    /// The person has seen the session's latest turn.
-    public func markSessionRead(id: String) throws {
-        try performWrite { db in
-            try db.execute(sql: "UPDATE session SET unread = 0 WHERE id = ? AND unread = 1", arguments: [id])
-        }
-    }
-
     /// Takes a session out of the live list while its archive is in flight,
     /// or puts it back when the archive failed.
     public func setSessionArchiving(id: String, _ archiving: Bool) throws {
@@ -379,6 +375,7 @@ public final class LocalStore: Sendable {
                 for message in page.messages {
                     try Self.insertMessage(message, db)
                 }
+                if let newest = page.messages.map(\.createdAt).max() { try Self.noteMessageAt(page.sessionId, newest, db) }
                 let last = max(page.messages.map(\.seq).max() ?? 0, page.syncedThrough ?? 0)
                 if last > session.syncedMessageSeq {
                     session.syncedMessageSeq = last
@@ -408,6 +405,7 @@ public final class LocalStore: Sendable {
             }
             let old = session
             try Self.insertMessage(message, db)
+            try Self.noteMessageAt(message.sessionId, message.createdAt, db)
             session.seq = max(session.seq, message.seq)
             // The server bumps the session row in the same write that
             // allocates the message seq.
@@ -624,7 +622,8 @@ public final class LocalStore: Sendable {
             sessions: try SessionRecord.order(Column("updatedAt").desc).fetchAll(db),
             projects: try ProjectRecord.fetchAll(db),
             settings: try fetchSettingsSnapshot(db),
-            sessionsSynced: try SyncStateRecord.exists(db, key: SyncCursor.sessionsChangedSince.rawValue)
+            sessionsSynced: try SyncStateRecord.exists(db, key: SyncCursor.sessionsChangedSince.rawValue),
+            activity: try fetchActivity(db)
         )
     }
 
@@ -912,7 +911,7 @@ public final class LocalStore: Sendable {
         try performWrite { db in
             for table in [
                 "message", "outbox", "chatHistory", "session", "machine", "project", "accountSettings", "pendingSettings",
-                "accountProfile", "syncState", "attachment", "draft", "composerState", "intent",
+                "accountProfile", "syncState", "attachment", "draft", "composerState", "intent", "sessionRead",
             ] {
                 try db.execute(sql: "DELETE FROM \(table)")
             }
@@ -939,6 +938,7 @@ public final class LocalStore: Sendable {
             fresh.archiving = false
             fresh.avatarVersion = incoming.avatarVersion ?? incoming.avatar?.version
             try fresh.insert(db)
+            try seedReadMarker(fresh, db)
             return (nil, fresh)
         }
         let old = record
@@ -1063,14 +1063,19 @@ public struct LegacyHomeSnapshot: Equatable, Sendable {
     /// Updated only when disconnected last-seen text crosses its display
     /// granularity. Consumers use this clock when deriving status text.
     public var presenceNow: Int64?
+    /// Each chat's latest activity (ms) as this device saw it: its newest
+    /// message, either side, to the minute, or when it was last opened or
+    /// left, whichever is later. Absent for a chat with neither.
+    public var activity: [String: Int64]
 
-    public init(machines: MachinesSnapshot, sessions: [SessionRecord], projects: [ProjectRecord] = [], settings: SettingsSnapshot = SettingsSnapshot(), sessionsSynced: Bool = false) {
+    public init(machines: MachinesSnapshot, sessions: [SessionRecord], projects: [ProjectRecord] = [], settings: SettingsSnapshot = SettingsSnapshot(), sessionsSynced: Bool = false, activity: [String: Int64] = [:]) {
         self.machines = machines
         self.sessions = sessions
         self.projects = projects
         self.settings = settings
         self.sessionsSynced = sessionsSynced
         self.presenceNow = nil
+        self.activity = activity
     }
 }
 

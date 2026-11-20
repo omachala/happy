@@ -232,8 +232,8 @@ final class HostedHeaderBarTests: XCTestCase {
     }
 
     /// This fork's Happy CLI home header (MainView.tsx): the logo to
-    /// Settings on the left, the socket's status as the title, the usage
-    /// pill and `+` on the right; a clear bar. The pill and the status are
+    /// Settings on the left, the socket's status and the usage pill as the
+    /// title, only `+` on the right; a clear bar. The pill and the status are
     /// plain controls, so they must listen for `.touchUpInside`: on
     /// `.primaryActionTriggered` a tap did nothing.
     func testLegacyHomeHasTheForksHeaderAndTheClearBar() async throws {
@@ -255,11 +255,16 @@ final class HostedHeaderBarTests: XCTestCase {
         window.layoutIfNeeded()
         try await Task.sleep(for: .milliseconds(500))
         XCTAssertEqual(home.navigationItem.leftBarButtonItem?.accessibilityIdentifier, "settings")
-        let status = try XCTUnwrap(home.navigationItem.titleView as? LegacyConnectionStatusView)
-        // Outermost first: `+` at the edge, the pill inside it.
+        // The title holds the status and the usage pill beside it; `+` is
+        // alone on the right, in a container of its own.
+        let title = try XCTUnwrap(home.navigationItem.titleView as? LegacyHomeTitleView)
+        let status = title.status
+        let pill = title.pill
+        XCTAssertTrue(status.isDescendant(of: title))
+        XCTAssertTrue(pill.isDescendant(of: title))
+        XCTAssertGreaterThan(pill.frame.minX, status.frame.maxX)
         let items = home.navigationItem.rightBarButtonItems ?? []
-        XCTAssertEqual(items.first?.accessibilityIdentifier, "compose")
-        let pill = try XCTUnwrap(items.last?.customView as? UsagePillView)
+        XCTAssertEqual(items.map(\.accessibilityIdentifier), ["compose"])
         for control in [pill, status] as [UIControl] {
             var onTap = false
             control.enumerateEventHandlers { action, _, event, _ in
@@ -271,6 +276,77 @@ final class HostedHeaderBarTests: XCTestCase {
         XCTAssertNil(home.navigationItem.standardAppearance)
         Self.assertClear(navigation.navigationBar)
         keep(window, "legacy-home-light")
+    }
+
+    /// The title on a full phone and an iPhone SE (320 wide): Connected with
+    /// both figures, Disconnected with its info glyph, and a long reason.
+    /// It stays inside what the bar gives it, clear of the logo and `+`:
+    /// the weekly figure goes first, then the pill's words are cut.
+    func testTheLegacyTitleFitsANarrowBar() async throws {
+        let controller = AccountController(
+            serverConfig: ServerConfig(storage: InMemoryKeyValueStore()), clientID: "ios/test",
+            credentialStore: InMemoryCredentialStore(), storeDirectory: nil,
+            rnServerImport: { .confirmed(ServerConfig.defaultServerURL) },
+            transport: HeaderNoNetwork(), connector: HeaderNoSockets()
+        )
+        try await controller.signIn(Credentials(token: "t", secret: Data(repeating: 9, count: 32)))
+        let account = try XCTUnwrap(controller.session)
+        let context = AppContext(account: controller, variant: .preview, version: "test")
+        let both = ClaudeUsage(fiveHour: .init(utilization: 26, resetsAt: nil), sevenDay: .init(utilization: 41, resetsAt: nil), extra: nil)
+        let states: [(String, RealtimeStatus, Bool, ClaudeUsageState)] = [
+            ("connected", .connected, false, .loaded(both)),
+            ("disconnected", .disconnected, true, .loaded(both)),
+            ("reason", .connected, false, .failed("Anthropic account not connected")),
+        ]
+        for width in [CGFloat(393), 320] {
+            let home = LegacyHomeViewController(context: context, session: account)
+            let navigation = UINavigationController(rootViewController: home)
+            AppCoordinator.applyAppearance(to: navigation.navigationBar)
+            let scene = try await hostedActiveScene()
+            let window = hostedKeyWindow(in: scene, root: navigation)
+            window.frame = CGRect(x: 0, y: 0, width: width, height: width == 320 ? 568 : 852)
+            window.layoutIfNeeded()
+            try await Task.sleep(for: .milliseconds(400))
+            let title = try XCTUnwrap(home.navigationItem.titleView as? LegacyHomeTitleView)
+            for (name, status, tappable, usage) in states {
+                title.status.show(status, tappable: tappable)
+                title.pill.usage = usage
+                navigation.navigationBar.setNeedsLayout()
+                window.layoutIfNeeded()
+                title.layoutIfNeeded()
+                title.pill.layoutIfNeeded()
+                let inWindow = title.convert(title.bounds, to: window)
+                XCTAssertGreaterThanOrEqual(inWindow.minX, 0, "\(name) @\(width)")
+                XCTAssertLessThanOrEqual(inWindow.maxX, width, "\(name) @\(width)")
+                XCTAssertLessThanOrEqual(title.pill.frame.maxX, title.bounds.maxX + 0.5, "\(name) @\(width): the pill runs out of the title")
+                XCTAssertLessThanOrEqual(title.status.frame.maxX, title.pill.frame.minX, "\(name) @\(width)")
+                for frame in Self.barButtonFrames(navigation.navigationBar, in: window) {
+                    XCTAssertFalse(frame.intersects(inWindow.insetBy(dx: 1, dy: 1)), "\(name) @\(width): the title runs under a bar button \(frame) vs \(inWindow)")
+                }
+                if width > 390, case .loaded = usage {
+                    XCTAssertEqual(title.pill.subviews.filter { !$0.isHidden }.count, 5, "\(name) @\(width): a full phone shows the weekly figure")
+                }
+                keep(window, "legacy-title-\(name)-\(Int(width))")
+            }
+            window.isHidden = true
+        }
+    }
+
+    /// The bar buttons' frames (logo and `+`), in the window.
+    private static func barButtonFrames(_ bar: UINavigationBar, in window: UIWindow) -> [CGRect] {
+        var frames: [CGRect] = []
+        func walk(_ view: UIView) {
+            if let control = view as? UIControl, !(control is LegacyConnectionStatusView), !(control is UsagePillView),
+               ["settings", "compose"].contains(control.accessibilityIdentifier ?? "") || String(describing: Swift.type(of: control)).contains("Button") {
+                if !control.isHidden, control.bounds.width > 0 {
+                    frames.append(control.convert(control.bounds, to: window))
+                }
+                return
+            }
+            for child in view.subviews where !(child is LegacyHomeTitleView) { walk(child) }
+        }
+        walk(bar)
+        return frames
     }
 
     /// A signed-in Happy account and an open agent connection each report

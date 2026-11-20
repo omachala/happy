@@ -492,13 +492,8 @@ final class LegacyChatViewController: UIViewController, ChatListViewDelegate, Ch
         #if DEBUG
         composeTrace?.event("willAppear built=\(construction?.stageSeconds.map { String(format: "%.3f", $0) } ?? [])")
         #endif
-        // A store write: never on the main thread.
-        let actions = account.actions
-        let chatId = self.chatId
         if !isComposing {
-            // On screen: the server's `session-event` leaves it read.
-            account.sync.viewing.show(chatId)
-            Task.detached(priority: .userInitiated) { actions.markRead(sessionId: chatId) }
+            readingChanged(onScreen: true)
             // sync.ts `onSessionVisible`: a session someone has opened is no
             // longer an abandoned start, in this account.
             account.spawnRequests.release(sessionId: chatId)
@@ -544,6 +539,9 @@ final class LegacyChatViewController: UIViewController, ChatListViewDelegate, Ch
         super.viewDidDisappear(animated)
         // ChatList's `active`: a chat not shown asks for no older page.
         historyPager?.isActive = false
+        // Covered or gone: a turn ending from now on marks it unread, and
+        // what was read here stays read.
+        if appeared, !isComposing { readingChanged(onScreen: false) }
         appeared = false
         updateViewing()
         if let keyboard = ultraKeyboard, keyboard.isActive {
@@ -1778,10 +1776,7 @@ final class LegacyChatViewController: UIViewController, ChatListViewDelegate, Ch
         observeChat()
         scheduleMeasure()
         if view.window != nil {
-            // A store write: never on the main thread.
-            let actions = account.actions
-            account.sync.viewing.show(real)
-            Task.detached(priority: .userInitiated) { actions.markRead(sessionId: real) }
+            readingChanged(onScreen: true)
             account.spawnRequests.release(sessionId: real)
         }
         updateViewing()
@@ -2530,8 +2525,21 @@ final class LegacyChatViewController: UIViewController, ChatListViewDelegate, Ch
         list.scrollToNewest(animated: true)
     }
 
+    /// The chat came on screen or left it (pushed, popped, covered, the app
+    /// backgrounded or back). `viewing` keeps the server's `session-event`
+    /// off the chat on screen; reading moves its read marker both ways, so
+    /// what was read here never comes back as unread after a sync.
+    private func readingChanged(onScreen: Bool) {
+        let chatId = self.chatId
+        if onScreen { account.sync.viewing.show(chatId) } else { account.sync.viewing.hide(chatId) }
+        // A store write: never on the main thread.
+        let actions = account.actions
+        Task.detached(priority: .userInitiated) { actions.markRead(sessionId: chatId) }
+    }
+
     @objc private func didEnterBackground() {
         inForeground = false
+        if appeared, !isComposing { readingChanged(onScreen: false) }
         // Coming back to an idle session should not land on a wall of
         // expanded tool calls.
         windowRequests.backgrounds += 1
@@ -2540,6 +2548,7 @@ final class LegacyChatViewController: UIViewController, ChatListViewDelegate, Ch
 
     @objc private func willEnterForeground() {
         inForeground = true
+        if appeared, !isComposing { readingChanged(onScreen: true) }
         scheduleMeasure()
     }
 }

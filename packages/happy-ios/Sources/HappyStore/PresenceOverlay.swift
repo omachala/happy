@@ -70,6 +70,12 @@ final class PresenceOverlay: @unchecked Sendable {
         }
     }
 
+    /// The session's newest heartbeat (`latestAt`), which moves on every
+    /// ping, unlike the shown stamps; nil when no presence is held for it.
+    func sessionLatestAt(_ id: String) -> Int64? {
+        lock.withLock { sessions[id]?.latestAt }
+    }
+
     /// One computer as `machineSnapshot` shows it.
     func machine(_ row: MachineRecord) -> MachineRecord {
         lock.withLock {

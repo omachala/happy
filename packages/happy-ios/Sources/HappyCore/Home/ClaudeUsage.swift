@@ -30,18 +30,21 @@ public struct ClaudeUsage: Equatable, Sendable {
     }
 
     public var fiveHour: Window
-    public var sevenDay: Window
+    /// Nil when the answer has no `seven_day` (null or missing, e.g. an
+    /// older server or a plan without a weekly cap): the pill then shows
+    /// the session alone rather than a made-up 0%.
+    public var sevenDay: Window?
     /// Nil unless `extra_usage.is_enabled`.
     public var extra: Extra?
 
-    public init(fiveHour: Window, sevenDay: Window, extra: Extra? = nil) {
+    public init(fiveHour: Window, sevenDay: Window?, extra: Extra? = nil) {
         self.fiveHour = fiveHour
         self.sevenDay = sevenDay
         self.extra = extra
     }
 
     /// The body as useClaudeUsage.ts reads it: anything missing is 0 or
-    /// null, never a failure.
+    /// null, never a failure; a weekly window that isn't there is nil.
     public init(json: JSONValue) {
         func number(_ value: JSONValue?) -> Double {
             if let number = value?.numberValue { return number }
@@ -52,7 +55,11 @@ public struct ClaudeUsage: Equatable, Sendable {
             Window(utilization: number(value?["utilization"]), resetsAt: value?["resets_at"]?.stringValue)
         }
         fiveHour = window(json["five_hour"])
-        sevenDay = window(json["seven_day"])
+        if let weekly = json["seven_day"], let used = weekly["utilization"], used != .null {
+            sevenDay = window(weekly)
+        } else {
+            sevenDay = nil
+        }
         let extra = json["extra_usage"]
         self.extra = extra?["is_enabled"]?.boolValue == true
             ? Extra(utilization: number(extra?["utilization"]), usedCents: number(extra?["used_credits"]), limitCents: number(extra?["monthly_limit"]))

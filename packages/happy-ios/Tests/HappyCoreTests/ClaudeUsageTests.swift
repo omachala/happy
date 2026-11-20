@@ -19,7 +19,22 @@ final class ClaudeUsageTests: XCTestCase {
         XCTAssertEqual(usage.extra, .init(utilization: 50, usedCents: 1234, limitCents: 5000))
 
         let sparse = ClaudeUsage(json: try JSONValue.decode(Data(#"{"extra_usage":{"is_enabled":false,"utilization":9}}"#.utf8)))
-        XCTAssertEqual(sparse, ClaudeUsage(fiveHour: .init(utilization: 0, resetsAt: nil), sevenDay: .init(utilization: 0, resetsAt: nil), extra: nil))
+        XCTAssertEqual(sparse, ClaudeUsage(fiveHour: .init(utilization: 0, resetsAt: nil), sevenDay: nil, extra: nil))
+    }
+
+    /// The weekly window shows beside the session's when the answer has it,
+    /// and is left out (never a made-up 0%) when it is null or missing, as
+    /// from an older server or a plan without a weekly cap.
+    func testTheWeeklyFigure() throws {
+        func read(_ text: String) throws -> ClaudeUsage { ClaudeUsage(json: try JSONValue.decode(Data(text.utf8))) }
+        let both = try read(#"{"five_hour":{"utilization":26},"seven_day":{"utilization":"41.2","resets_at":"2026-11-23T08:00:00+00:00"}}"#)
+        XCTAssertEqual(both.sevenDay, .init(utilization: 41.2, resetsAt: "2026-11-23T08:00:00+00:00"))
+        XCTAssertEqual(ClaudeUsageFormat.percent(both.sevenDay?.utilization ?? 0), "41%")
+
+        for missing in [#"{"five_hour":{"utilization":26}}"#, #"{"five_hour":{"utilization":26},"seven_day":null}"#, #"{"five_hour":{"utilization":26},"seven_day":{"utilization":null}}"#] {
+            let usage = try read(missing)
+            XCTAssertNil(usage.sevenDay, missing)
+        }
     }
 
     func testPercentagesAndBuckets() {
@@ -126,7 +141,7 @@ final class ClaudeUsageTests: XCTestCase {
         await monitor.settled()
         let loaded = await monitor.latest
         guard case .loaded(let usage) = loaded else { return XCTFail("not loaded") }
-        XCTAssertEqual(usage.sevenDay.utilization, 81)
+        XCTAssertEqual(usage.sevenDay?.utilization, 81)
         await monitor.refresh()
         await monitor.settled()
         await monitor.stop()

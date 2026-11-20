@@ -237,9 +237,9 @@ public struct SessionList: Equatable, Sendable {
     }
 
     /// The fork's home: only live sessions, by computer, with no archive.
-    public init(machineSections snapshot: LegacyHomeSnapshot, fallbackTitles: [String: String] = [:], words: LegacyMachineHome.Words = .init()) {
+    public init(machineSections snapshot: LegacyHomeSnapshot, fallbackTitles: [String: String] = [:], words: LegacyMachineHome.Words = .init(), now: Date = Date()) {
         let settings = AccountSettings(snapshot.settings)
-        let machines = LegacyMachineHome(snapshot, fallbackTitles: fallbackTitles, words: words)
+        let machines = LegacyMachineHome(snapshot, fallbackTitles: fallbackTitles, words: words, now: Int64(now.timeIntervalSince1970 * 1000))
         self.items = []
         self.visibleCount = machines.sessionCount
         self.hasArchived = false

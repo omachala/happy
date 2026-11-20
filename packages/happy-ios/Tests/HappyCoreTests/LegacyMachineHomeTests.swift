@@ -73,7 +73,7 @@ final class LegacyMachineHomeTests: XCTestCase {
         let home = LegacyMachineHome(snapshot([machine("m1", name: "Studio")], [session("a", machine: "m1", path: "/work/a", created: 1)]))
         XCTAssertEqual(home.rows, [
             .machine(LegacyMachineHeader(machineId: "m1", name: "Studio", first: true, firstPath: "/work/a")),
-            .session(LegacyMachineSessionRow(id: "a", projectName: "A", status: .waiting)),
+            .session(LegacyMachineSessionRow(id: "a", projectName: "A", status: .waiting, stale: true)),
         ])
     }
 
@@ -95,30 +95,95 @@ final class LegacyMachineHomeTests: XCTestCase {
         XCTAssertEqual(headers.map(\.firstPath), [nil, "/Users/me", "/work/alpha"])
     }
 
-    /// Projects in the order of their newest session, newest first inside
-    /// each, then flattened; a worktree sits with its repository.
-    func testProjectsByTheirNewestSessionAndWorktreesWithTheirRepository() {
+    /// Newest activity first, by session, whatever its project; a worktree
+    /// keeps its repository's name and its own badge.
+    func testSessionsByLatestActivity() {
+        let now: Int64 = 10 * LegacyMachineHome.staleAfterMs
         let home = LegacyMachineHome(snapshot([machine("m1", name: "Studio")], [
-            session("happy-old", machine: "m1", path: "/work/happy", created: 1),
-            session("alpha", machine: "m1", path: "/work/alpha", created: 2),
-            session("happy-tree", machine: "m1", path: "/work/happy/.dev/worktree/swift-ocean", created: 3),
-            session("happy-new", machine: "m1", path: "/work/happy", created: 4),
-        ]))
+            session("happy-old", machine: "m1", path: "/work/happy", created: now - 4_000),
+            session("alpha", machine: "m1", path: "/work/alpha", created: now - 3_000),
+            session("happy-tree", machine: "m1", path: "/work/happy/.dev/worktree/swift-ocean", created: now - 9_000, activity: now - 1_000),
+            session("happy-new", machine: "m1", path: "/work/happy", created: now - 2_000),
+        ]), now: now)
         let rows = home.sections[0].sessions
-        XCTAssertEqual(rows.map(\.id), ["happy-new", "happy-tree", "happy-old", "alpha"])
-        XCTAssertEqual(rows.map(\.projectName), ["Happy", "Happy", "Happy", "Alpha"])
-        XCTAssertEqual(rows.map(\.worktreeName), [nil, "swift-ocean", nil, nil])
+        XCTAssertEqual(rows.map(\.id), ["happy-tree", "happy-new", "alpha", "happy-old"])
+        XCTAssertEqual(rows.map(\.projectName), ["Happy", "Happy", "Alpha", "Happy"])
+        XCTAssertEqual(rows.map(\.worktreeName), ["swift-ocean", nil, nil, nil])
+        XCTAssertEqual(rows.map(\.stale), [false, false, false, false])
     }
 
-    func testActivityOrderWhenTheSettingIsOn() {
+    /// Activity is the default now; the synced setting no longer picks
+    /// creation order.
+    func testActivityOrderWhateverTheSetting() {
+        let now: Int64 = 10 * LegacyMachineHome.staleAfterMs
         let sessions = [
-            session("older-but-busy", machine: "m1", path: "/work/a", created: 1, activity: 100),
-            session("newer", machine: "m1", path: "/work/b", created: 2, activity: 10),
+            session("older-but-busy", machine: "m1", path: "/work/a", created: now - 9_000, activity: now - 100),
+            session("newer", machine: "m1", path: "/work/b", created: now - 5_000, activity: now - 1_000),
         ]
-        let byCreation = LegacyMachineHome(snapshot([machine("m1", name: "S")], sessions, byActivity: false))
-        XCTAssertEqual(byCreation.sections[0].sessions.map(\.id), ["newer", "older-but-busy"])
-        let byActivity = LegacyMachineHome(snapshot([machine("m1", name: "S")], sessions, byActivity: true))
-        XCTAssertEqual(byActivity.sections[0].sessions.map(\.id), ["older-but-busy", "newer"])
+        for byActivity in [false, true] {
+            let home = LegacyMachineHome(snapshot([machine("m1", name: "S")], sessions, byActivity: byActivity), now: now)
+            XCTAssertEqual(home.sections[0].sessions.map(\.id), ["older-but-busy", "newer"])
+        }
+    }
+
+    /// Opening or leaving a chat (or its newest message seen here) counts
+    /// as activity, from `LegacyHomeSnapshot.activity`.
+    func testOpeningAChatCountsAsActivity() {
+        let now: Int64 = 10 * LegacyMachineHome.staleAfterMs
+        var home = snapshot([machine("m1", name: "S")], [
+            session("a", machine: "m1", path: "/work/a", created: now - 5_000),
+            session("b", machine: "m1", path: "/work/b", created: now - 4_000),
+        ])
+        XCTAssertEqual(LegacyMachineHome(home, now: now).sections[0].sessions.map(\.id), ["b", "a"])
+        home.activity = ["a": now - 10]
+        XCTAssertEqual(LegacyMachineHome(home, now: now).sections[0].sessions.map(\.id), ["a", "b"])
+    }
+
+    /// A day without activity: below every fresh row, still by activity,
+    /// muted. Exactly a day is not stale yet.
+    func testStaleRowsSinkBelowTheRest() {
+        let now: Int64 = 10 * LegacyMachineHome.staleAfterMs
+        let day = LegacyMachineHome.staleAfterMs
+        let home = LegacyMachineHome(snapshot([machine("m1", name: "S")], [
+            session("two-days", machine: "m1", path: "/work/a", created: now - 2 * day),
+            session("fresh", machine: "m1", path: "/work/b", created: now - 10 * 60_000),
+            session("just-a-day", machine: "m1", path: "/work/c", created: now - day),
+            session("day-and-a-bit", machine: "m1", path: "/work/d", created: now - day - 1),
+        ]), now: now)
+        let rows = home.sections[0].sessions
+        XCTAssertEqual(rows.map(\.id), ["fresh", "just-a-day", "day-and-a-bit", "two-days"])
+        XCTAssertEqual(rows.map(\.stale), [false, false, true, true])
+    }
+
+    /// Unread, working or asking is never stale, however old.
+    func testUnreadThinkingAndAskingAreNeverStale() {
+        let now: Int64 = 10 * LegacyMachineHome.staleAfterMs
+        let old = now - 3 * LegacyMachineHome.staleAfterMs
+        var unread = session("unread", machine: "m1", path: "/work/a", created: old - 3)
+        unread.unread = true
+        var thinking = session("thinking", machine: "m1", path: "/work/b", created: old - 2)
+        thinking.thinking = true
+        var asking = session("asking", machine: "m1", path: "/work/c", created: old - 1)
+        asking.agentState = .object(["requests": .object(["r": .object([:])])])
+        let idle = session("idle", machine: "m1", path: "/work/d", created: old)
+        let home = LegacyMachineHome(snapshot([machine("m1", name: "S")], [unread, thinking, asking, idle]), now: now)
+        let rows = home.sections[0].sessions
+        XCTAssertEqual(rows.map(\.id), ["asking", "thinking", "unread", "idle"])
+        XCTAssertEqual(rows.map(\.stale), [false, false, false, true])
+        XCTAssertEqual(rows.map(\.status), [.permissionRequired, .thinking, .unread, .waiting])
+    }
+
+    /// Presence and `thinking` never move a row: only activity does.
+    func testThinkingDoesNotReorder() {
+        let now: Int64 = 10 * LegacyMachineHome.staleAfterMs
+        var a = session("a", machine: "m1", path: "/work/a", created: now - 2_000)
+        let b = session("b", machine: "m1", path: "/work/b", created: now - 1_000)
+        let before = LegacyMachineHome(snapshot([machine("m1", name: "S")], [a, b]), now: now).sections[0].sessions.map(\.id)
+        a.thinking = true
+        a.activeAt = now
+        let after = LegacyMachineHome(snapshot([machine("m1", name: "S")], [a, b]), now: now).sections[0].sessions.map(\.id)
+        XCTAssertEqual(before, ["b", "a"])
+        XCTAssertEqual(after, before)
     }
 
     func testProjectNames() {
@@ -179,7 +244,7 @@ final class LegacyMachineHomeTests: XCTestCase {
         XCTAssertEqual(model.ids, [
             .machineHeader(""), .machineSession("s5"),
             .machineHeader("m2"), .machineSession("s4"),
-            .machineHeader("m1"), .machineSession("b1"), .machineSession("s1"), .machineSession("s2"), .machineSession("s3"),
+            .machineHeader("m1"), .machineSession("b1"), .machineSession("s1"), .machineSession("s3"), .machineSession("s2"),
         ])
         // One card per computer; the headings stand outside them.
         XCTAssertNil(model.places[0])

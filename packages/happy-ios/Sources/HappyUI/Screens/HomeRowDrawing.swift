@@ -276,7 +276,8 @@ struct HomeRowDrawing: Sendable {
             )
             plan.size = layout.size
             separatorX = M.paddingX
-            text(row.projectName, titleStyle, Palette.text, layout.title)
+            // A stale row (nothing new for a day) is muted and has no dot.
+            text(row.projectName, titleStyle, row.stale ? Palette.textSecondary : Palette.text, layout.title)
             if let badge = layout.badge, let icon = layout.badgeIcon, let name = layout.badgeName, let worktree = row.worktreeName {
                 plan.marks.append(.roundedFill(Palette.groupedSeparator, badge, radius: M.badgeRadius))
                 plan.marks.append(.icon("git-branch-outline", M.badgeIconSize, Palette.textSecondary, icon))
@@ -291,7 +292,7 @@ struct HomeRowDrawing: Sendable {
             case .waiting: Palette.legacyHomeDotGreen
             case .disconnected: Palette.legacyHomeDotGrey
             }
-            if row.status.pulses { plan.pulsingDots.append((dot, layout.dot)) } else { fill(dot, layout.dot, round: true) }
+            if row.status.pulses { plan.pulsingDots.append((dot, layout.dot)) } else if !row.stale { fill(dot, layout.dot, round: true) }
             let state: String? = switch row.status {
             case .unread: catalog("status.unread")
             case .permissionRequired: catalog("status.permissionRequired")
