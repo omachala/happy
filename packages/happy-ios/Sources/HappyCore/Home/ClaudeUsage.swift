@@ -94,16 +94,18 @@ public enum ClaudeUsageFormat {
         return .low
     }
 
-    /// The weekly window's length.
+    /// The windows' lengths.
     public static let week: TimeInterval = 7 * 24 * 3600
+    public static let session: TimeInterval = 5 * 3600
 
-    /// The weekly figure's colour: its use against even use across the week.
-    /// At or under the share of the week gone is green, up to 10 points
-    /// ahead orange, further ahead red. Without a reset time to measure
-    /// the week by, the fixed buckets of `level(_:)` apply.
-    public static func paceLevel(_ window: ClaudeUsage.Window, now: Date) -> Level {
+    /// A window's colour: its use against even use across its length (the
+    /// week's or the 5-hour session's). At or under the share of the window
+    /// gone is green, up to 10 points ahead orange, further ahead red.
+    /// Without a reset time to measure it by, the fixed buckets of
+    /// `level(_:)` apply.
+    public static func paceLevel(_ window: ClaudeUsage.Window, length: TimeInterval = week, now: Date) -> Level {
         guard let resetsAt = window.resetsAt, let reset = parseDate(resetsAt) else { return level(window.utilization) }
-        let elapsed = min(max(1 - reset.timeIntervalSince(now) / week, 0), 1) * 100
+        let elapsed = min(max(1 - reset.timeIntervalSince(now) / length, 0), 1) * 100
         if window.utilization <= elapsed { return .low }
         if window.utilization <= elapsed + 10 { return .medium }
         return .high

@@ -39,7 +39,7 @@ final class ClaudeUsageSheetViewController: UIViewController {
             return views
         }
         sections = [
-            section(Strings.LegacyHome.usageSession, usage.fiveHour.utilization, Strings.LegacyHome.resetsIn(ClaudeUsageFormat.resetIn(usage.fiveHour.resetsAt, now: now))),
+            section(Strings.LegacyHome.usageSession, usage.fiveHour.utilization, Strings.LegacyHome.resetsIn(ClaudeUsageFormat.resetIn(usage.fiveHour.resetsAt, now: now)), level: ClaudeUsageFormat.paceLevel(usage.fiveHour, length: ClaudeUsageFormat.session, now: now)),
         ]
         if let week = usage.sevenDay {
             sections.append(section(Strings.LegacyHome.usageWeekly, week.utilization, Strings.LegacyHome.resetsIn(ClaudeUsageFormat.resetIn(week.resetsAt, now: now)), level: ClaudeUsageFormat.paceLevel(week, now: now)))

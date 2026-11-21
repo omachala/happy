@@ -264,7 +264,7 @@ final class UsagePillView: UIControl {
             spoken = label.string
             accessibilityHint = Strings.LegacyHome.usageRefresh
         case .loaded(let usage):
-            dot.backgroundColor = UIColor(Self.color(usage.fiveHour.utilization))
+            dot.backgroundColor = UIColor(Self.color(ClaudeUsageFormat.paceLevel(usage.fiveHour, length: ClaudeUsageFormat.session, now: Date())))
             label.string = ClaudeUsageFormat.percent(usage.fiveHour.utilization)
             spoken = Strings.LegacyHome.usageSpoken(usage)
             week = usage.sevenDay

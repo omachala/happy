@@ -71,6 +71,22 @@ final class ClaudeUsageTests: XCTestCase {
         XCTAssertEqual(ClaudeUsageFormat.paceLevel(.init(utilization: 60, resetsAt: nil), now: now), .medium)
     }
 
+    func testSessionColourFollowsPaceAcrossFiveHours() {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        func window(_ used: Double, hoursLeft: Double) -> ClaudeUsage.Window {
+            .init(utilization: used, resetsAt: ISO8601DateFormatter().string(from: now.addingTimeInterval(hoursLeft * 3600)))
+        }
+        let length = ClaudeUsageFormat.session
+        // 2.5 hours gone: even use is 50%.
+        XCTAssertEqual(ClaudeUsageFormat.paceLevel(window(50, hoursLeft: 2.5), length: length, now: now), .low)
+        XCTAssertEqual(ClaudeUsageFormat.paceLevel(window(60, hoursLeft: 2.5), length: length, now: now), .medium)
+        XCTAssertEqual(ClaudeUsageFormat.paceLevel(window(61, hoursLeft: 2.5), length: length, now: now), .high)
+        // 4 hours left: 20% gone, so 40% used is far ahead of a 5-hour pace...
+        XCTAssertEqual(ClaudeUsageFormat.paceLevel(window(40, hoursLeft: 4), length: length, now: now), .high)
+        // ...but behind a week's, which is nearly all gone at that reset.
+        XCTAssertEqual(ClaudeUsageFormat.paceLevel(window(40, hoursLeft: 4), now: now), .low)
+    }
+
     func testResetsIn() {
         let now = Date(timeIntervalSince1970: 1_000_000)
         func at(_ seconds: TimeInterval) -> String {
