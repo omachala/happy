@@ -271,7 +271,7 @@ final class UsagePillView: UIControl {
             accessibilityHint = nil
         }
         if let week {
-            weeklyDot.backgroundColor = UIColor(Self.color(week.utilization))
+            weeklyDot.backgroundColor = UIColor(Self.color(ClaudeUsageFormat.paceLevel(week, now: Date())))
             weeklyLabel.string = Strings.LegacyHome.usageWeeklyFigure(week.utilization)
         }
         hasWeekly = week != nil
@@ -284,8 +284,10 @@ final class UsagePillView: UIControl {
         (superview as? LegacyHomeTitleView)?.fit()
     }
 
-    static func color(_ percent: Double) -> ColorToken {
-        switch ClaudeUsageFormat.level(percent) {
+    static func color(_ percent: Double) -> ColorToken { color(ClaudeUsageFormat.level(percent)) }
+
+    static func color(_ level: ClaudeUsageFormat.Level) -> ColorToken {
+        switch level {
         case .low: Palette.claudeUsageLow
         case .medium: Palette.claudeUsageMedium
         case .high: Palette.claudeUsageHigh

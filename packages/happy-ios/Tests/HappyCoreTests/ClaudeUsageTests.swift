@@ -51,6 +51,26 @@ final class ClaudeUsageTests: XCTestCase {
         XCTAssertEqual(ClaudeUsageFormat.extraSpend(.init(utilization: 0, usedCents: 1234, limitCents: 5000)), "$12.34 / $50.00")
     }
 
+    func testWeeklyColourFollowsPaceAgainstEvenUse() {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        func window(_ used: Double, daysLeft: Double) -> ClaudeUsage.Window {
+            let reset = now.addingTimeInterval(daysLeft * 86400)
+            return .init(utilization: used, resetsAt: ISO8601DateFormatter().string(from: reset))
+        }
+        // Half the week gone (3.5 days left): even use is 50%.
+        XCTAssertEqual(ClaudeUsageFormat.paceLevel(window(40, daysLeft: 3.5), now: now), .low)
+        XCTAssertEqual(ClaudeUsageFormat.paceLevel(window(50, daysLeft: 3.5), now: now), .low)
+        XCTAssertEqual(ClaudeUsageFormat.paceLevel(window(55, daysLeft: 3.5), now: now), .medium)
+        XCTAssertEqual(ClaudeUsageFormat.paceLevel(window(60, daysLeft: 3.5), now: now), .medium)
+        XCTAssertEqual(ClaudeUsageFormat.paceLevel(window(61, daysLeft: 3.5), now: now), .high)
+        // Week just started: any real use is ahead of pace.
+        XCTAssertEqual(ClaudeUsageFormat.paceLevel(window(30, daysLeft: 7), now: now), .high)
+        // Reset passed: the whole week counts as gone.
+        XCTAssertEqual(ClaudeUsageFormat.paceLevel(window(99, daysLeft: -1), now: now), .low)
+        // No reset time: the fixed buckets.
+        XCTAssertEqual(ClaudeUsageFormat.paceLevel(.init(utilization: 60, resetsAt: nil), now: now), .medium)
+    }
+
     func testResetsIn() {
         let now = Date(timeIntervalSince1970: 1_000_000)
         func at(_ seconds: TimeInterval) -> String {

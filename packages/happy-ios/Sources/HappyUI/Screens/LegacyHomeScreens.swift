@@ -28,12 +28,13 @@ final class ClaudeUsageSheetViewController: UIViewController {
         super.init(nibName: nil, bundle: nil)
         title = Strings.LegacyHome.usageTitle
         subtitle.string = Strings.LegacyHome.usageSubtitle
-        func section(_ label: String, _ percent: Double, _ detail: String) -> SectionViews {
+        func section(_ label: String, _ percent: Double, _ detail: String, level: ClaudeUsageFormat.Level? = nil) -> SectionViews {
+            let color = level.map(UsagePillView.color) ?? UsagePillView.color(percent)
             let views = SectionViews(fraction: ClaudeUsageFormat.fraction(percent))
             views.label.string = label
             views.percent.string = ClaudeUsageFormat.percent(percent)
-            views.percent.color = UsagePillView.color(percent)
-            views.fill.backgroundColor = UIColor(UsagePillView.color(percent))
+            views.percent.color = color
+            views.fill.backgroundColor = UIColor(color)
             views.detail.string = detail
             return views
         }
@@ -41,7 +42,7 @@ final class ClaudeUsageSheetViewController: UIViewController {
             section(Strings.LegacyHome.usageSession, usage.fiveHour.utilization, Strings.LegacyHome.resetsIn(ClaudeUsageFormat.resetIn(usage.fiveHour.resetsAt, now: now))),
         ]
         if let week = usage.sevenDay {
-            sections.append(section(Strings.LegacyHome.usageWeekly, week.utilization, Strings.LegacyHome.resetsIn(ClaudeUsageFormat.resetIn(week.resetsAt, now: now))))
+            sections.append(section(Strings.LegacyHome.usageWeekly, week.utilization, Strings.LegacyHome.resetsIn(ClaudeUsageFormat.resetIn(week.resetsAt, now: now)), level: ClaudeUsageFormat.paceLevel(week, now: now)))
         }
         if let extra = usage.extra {
             sections.append(section(Strings.LegacyHome.usageExtra, extra.utilization, ClaudeUsageFormat.extraSpend(extra)))
